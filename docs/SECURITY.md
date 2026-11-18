@@ -35,6 +35,7 @@ Current process supervision:
 - Temporary config and probe-directory Drop guards make a final synchronous cleanup attempt.
 - On Windows, the supervisor owns a Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`; each engine child is assigned immediately after spawn. Closing the final job handle makes Windows terminate assigned processes even if the app exits unexpectedly.
 - If Job Object initialization or child assignment fails, engine work is blocked; an uncontained child is killed and awaited before the operation returns.
+- If runtime cleanup becomes uncertain, the UI displays an explicit safety warning and disables engine installation, config validation, and Real Delay instead of presenting the engine as merely uninstalled.
 
 Remaining requirements:
 

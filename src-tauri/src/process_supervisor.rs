@@ -769,6 +769,215 @@ mod tests {
     }
 
     #[cfg(windows)]
+    const JOB_HELPER_STATUS_ENV: &str = "BLACKLIST_INEVITABLE_TEST_JOB_HELPER_STATUS";
+    #[cfg(windows)]
+    const JOB_HELPER_MARKER_ENV: &str = "BLACKLIST_INEVITABLE_TEST_JOB_HELPER_MARKER";
+    #[cfg(windows)]
+    const JOB_HELPER_RELEASE_ENV: &str = "BLACKLIST_INEVITABLE_TEST_JOB_HELPER_RELEASE";
+
+    // Launched as an isolated test-binary process. Joining the Job Object makes
+    // this helper and its suspended child members; the parent test releases it
+    // by creating the path in JOB_HELPER_RELEASE_ENV.
+    #[cfg(windows)]
+    #[test]
+    fn job_inheritance_helper_process() {
+        use std::os::windows::process::CommandExt;
+        use std::process::Command as StdCommand;
+        use std::time::Duration;
+        use windows_sys::Win32::System::Threading::CREATE_SUSPENDED;
+
+        let Some(status_path) = std::env::var_os(JOB_HELPER_STATUS_ENV).map(std::path::PathBuf::from) else {
+            return;
+        };
+        let marker_path = std::env::var_os(JOB_HELPER_MARKER_ENV)
+            .map(std::path::PathBuf::from)
+            .expect("helper marker path");
+        let release_path = std::env::var_os(JOB_HELPER_RELEASE_ENV)
+            .map(std::path::PathBuf::from)
+            .expect("helper release path");
+
+        let supervisor = ProcessSupervisor::for_app();
+        if !supervisor.cleanup_healthy() {
+            std::fs::write(&status_path, "application-could-not-join-job")
+                .expect("write failed job status");
+            return;
+        }
+
+        let executable = std::env::current_exe().expect("resolve test executable");
+        let mut command = StdCommand::new(executable);
+        command
+            .args([
+                "--exact",
+                "process_supervisor::tests::write_marker_child_process",
+                "--nocapture",
+            ])
+            .env(MARKER_CHILD_ENV, &marker_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(CREATE_SUSPENDED);
+
+        // std::process::Child does not kill on Drop. The Job Object is the owner.
+        let child = command.spawn().expect("spawn suspended job-inherited child");
+        let child_pid = child.id();
+        let inherited = supervisor
+            .inner
+            .job
+            .as_ref()
+            .expect("application Job Object")
+            .is_pid_in_job(child_pid)
+            .expect("query inherited Job Object membership");
+        std::fs::write(&status_path, format!("{child_pid}:{inherited}"))
+            .expect("write inherited child status");
+        drop(child);
+
+        for _ in 0..1500 {
+            if release_path.exists() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        std::fs::write(&status_path, "parent-test-did-not-release-helper")
+            .expect("write helper timeout status");
+    }
+
+    #[cfg(windows)]
+    fn process_is_active(pid: u32) -> Result<bool, String> {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+
+        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if process.is_null() {
+            return Ok(false);
+        }
+
+        let mut exit_code = 0;
+        let queried = unsafe { GetExitCodeProcess(process, &mut exit_code) };
+        let error = if queried == 0 {
+            Some(std::io::Error::last_os_error())
+        } else {
+            None
+        };
+        unsafe { CloseHandle(process) };
+
+        match error {
+            Some(error) => Err(format!("GetExitCodeProcess({pid}) failed: {error}")),
+            None => Ok(exit_code == 259), // STILL_ACTIVE
+        }
+    }
+
+    #[cfg(windows)]
+    async fn wait_for_process_exit(pid: u32) {
+        use tokio::time::{sleep, timeout, Duration};
+
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if !process_is_active(pid).expect("query process exit state") {
+                    return;
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("process should exit when its own Job Object closes");
+    }
+
+    #[cfg(windows)]
+    async fn wait_for_file(path: &std::path::Path) {
+        use tokio::time::{sleep, timeout, Duration};
+
+        timeout(Duration::from_secs(15), async {
+            loop {
+                if path.is_file() {
+                    return;
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("job helper status file should be written");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn app_job_inheritance_contains_children_and_is_instance_scoped() {
+        use std::process::Command as StdCommand;
+        use tokio::time::sleep;
+        use std::time::Duration;
+
+        let root = std::env::temp_dir().join(format!(
+            "blacklist-inevitable-job-inheritance-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).expect("create test directory");
+
+        let executable = std::env::current_exe().expect("resolve test executable");
+        let mut helpers = Vec::new();
+        let mut records = Vec::new();
+
+        for name in ["first", "second"] {
+            let status_path = root.join(format!("{name}-status.txt"));
+            let marker_path = root.join(format!("{name}-marker.txt"));
+            let release_path = root.join(format!("{name}-release.txt"));
+            let mut helper = StdCommand::new(&executable);
+            helper
+                .args([
+                    "--exact",
+                    "process_supervisor::tests::job_inheritance_helper_process",
+                    "--nocapture",
+                ])
+                .env(JOB_HELPER_STATUS_ENV, &status_path)
+                .env(JOB_HELPER_MARKER_ENV, &marker_path)
+                .env(JOB_HELPER_RELEASE_ENV, &release_path)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+
+            let child = helper.spawn().expect("spawn isolated Job Object owner");
+            let helper_pid = child.id();
+            helpers.push((child, helper_pid, release_path));
+            records.push((status_path, marker_path));
+        }
+
+        wait_for_file(&records[0].0).await;
+        wait_for_file(&records[1].0).await;
+
+        let first = std::fs::read_to_string(&records[0].0).expect("read first helper status");
+        let second = std::fs::read_to_string(&records[1].0).expect("read second helper status");
+        let parse_child_pid = |value: &str| -> u32 {
+            let (pid, inherited) = value.split_once(':').expect("pid:membership status");
+            assert_eq!(inherited, "true", "child must inherit its own app Job Object");
+            pid.parse().expect("parse child PID")
+        };
+        let first_child_pid = parse_child_pid(&first);
+        let second_child_pid = parse_child_pid(&second);
+
+        assert!(!records[0].1.exists(), "suspended first child must not execute");
+        assert!(!records[1].1.exists(), "suspended second child must not execute");
+
+        // Close only the first app instance's job. Its own process and child must
+        // terminate, while the second app instance and its child remain alive.
+        std::fs::write(&helpers[0].2, b"release").expect("release first app instance");
+        wait_for_process_exit(helpers[0].1).await;
+        wait_for_process_exit(first_child_pid).await;
+        assert!(process_is_active(helpers[1].1).expect("check second helper"));
+        assert!(process_is_active(second_child_pid).expect("check second child"));
+        assert!(!records[1].1.exists(), "the other app's suspended child must remain unexecuted");
+
+        std::fs::write(&helpers[1].2, b"release").expect("release second app instance");
+        wait_for_process_exit(helpers[1].1).await;
+        wait_for_process_exit(second_child_pid).await;
+
+        for (mut helper, _, _) in helpers {
+            let _ = helper.try_wait();
+        }
+        std::fs::remove_dir_all(root).expect("remove test directory");
+    }
+
+    #[cfg(windows)]
     #[tokio::test]
     async fn suspended_engine_child_cannot_execute_before_job_assignment() {
         use tokio::time::{sleep, timeout, Duration};

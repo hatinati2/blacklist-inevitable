@@ -2,7 +2,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 use tokio::net::TcpStream;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
@@ -10,6 +10,7 @@ use tokio::time::timeout;
 
 use crate::engine::{EngineDescriptor, ENGINE_TARGETS};
 use crate::profile_store;
+use crate::process_supervisor::ProcessSupervisor;
 use crate::profiles::{parse_import_text, ImportIssue, ProfileSummary};
 
 static REAL_DELAY_SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
@@ -29,6 +30,7 @@ pub struct AppStatus {
     profile_management_implemented: bool,
     endpoint_tcp_test_implemented: bool,
     sing_box_installed: bool,
+    runtime_cleanup_healthy: bool,
     engines: Vec<EngineDescriptor>,
 }
 
@@ -65,6 +67,7 @@ pub async fn get_app_status(app: AppHandle) -> AppStatus {
         profile_management_implemented: true,
         endpoint_tcp_test_implemented: true,
         sing_box_installed,
+        runtime_cleanup_healthy: app.state::<ProcessSupervisor>().cleanup_healthy(),
         engines: ENGINE_TARGETS.to_vec(),
     }
 }
@@ -209,6 +212,8 @@ pub async fn validate_profile_config(
     app: AppHandle,
     profile_id: String,
 ) -> Result<ConfigValidationResult, String> {
+    let supervisor = app.state::<ProcessSupervisor>().inner().clone();
+    let _operation = supervisor.begin_operation()?;
     let profiles = profile_store::list_profiles(&app)?;
     let profile = profiles
         .into_iter()
@@ -252,11 +257,13 @@ pub async fn test_all_profile_real_delays(
     // Shared across every invocation, including detached workers from a cancelled
     // command, so the process cap applies to the entire app rather than one batch.
     let semaphore = real_delay_semaphore();
+    let supervisor = app.state::<ProcessSupervisor>().inner().clone();
     let mut tasks = Vec::new();
 
     for profile in profiles {
         let app = app.clone();
         let semaphore = Arc::clone(&semaphore);
+        let supervisor = supervisor.clone();
         let fallback = RealDelayResult {
             profile_id: profile.id.clone(),
             name: profile.name.clone(),
@@ -299,7 +306,14 @@ pub async fn test_all_profile_real_delays(
                 }
             };
 
-            match crate::engine::sing_box::measure_real_delay(&app, &profile, &credentials).await {
+            match crate::engine::sing_box::measure_real_delay(
+                &app,
+                &profile,
+                &credentials,
+                &supervisor,
+            )
+            .await
+            {
                 Ok(outcome) => RealDelayResult {
                     profile_id: profile_id.clone(),
                     name: name.clone(),

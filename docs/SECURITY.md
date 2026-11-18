@@ -2,6 +2,15 @@
 
 These requirements apply before implementing real network functionality.
 
+## Profile credentials
+
+- Store credentials separately from ordinary profile metadata.
+- On Windows, use Windows Credential Manager through the keyring integration.
+- Never log raw share links or credential-bearing configuration.
+- Do not return passwords, UUIDs, or tokens to the React profile list.
+- Keep only an allowlist of non-secret transport options in the profile index.
+- Treat unsupported options explicitly; do not silently claim an imported link is fully supported by an engine.
+
 ## Preflight mode
 
 - Must not enable TUN or packet interception.
@@ -18,16 +27,16 @@ These requirements apply before implementing real network functionality.
 - Shutdown must have bounded graceful and forced termination phases.
 - Process identity and exit status must be verified before declaring cleanup complete.
 
-## Credentials and logs
+## Secrets and diagnostics
 
-- Never log raw profile URLs or credential-bearing configuration.
 - Redact passwords, tokens, UUIDs, private keys, and authentication headers.
-- Do not store secrets in plaintext JSON settings.
-- Review Windows-protected storage integration before adding persistent credentials.
+- Never write credential-bearing JSON into ordinary application settings or logs.
+- Profile secrets are currently stored through the Windows Credential Manager.
+- Engine configuration files containing credentials must be temporary, access-restricted, and removed after process exit.
 
 ## Supply chain
 
 - Pin engine versions and verify downloaded binaries with published checksums/signatures where available.
 - Review each engine's license and redistribution terms before bundling.
 - Keep third-party notices and source links with release artifacts.
-- Do not download or execute an engine binary merely because a profile references it.
+- Never download or execute an engine binary merely because a profile references it.

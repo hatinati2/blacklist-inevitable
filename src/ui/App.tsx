@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 type EngineTarget = {
@@ -13,37 +13,124 @@ type AppStatus = {
   developmentStage: string;
   connectionImplemented: boolean;
   preflightTestingImplemented: boolean;
+  profileManagementImplemented: boolean;
+  endpointTcpTestImplemented: boolean;
   engines: EngineTarget[];
+};
+
+type Profile = {
+  id: string;
+  name: string;
+  protocol: string;
+  server: string;
+  port: number;
+  options: Record<string, string>;
+};
+
+type ImportIssue = { line: number; reason: string };
+type ImportResponse = { imported: Profile[]; rejected: ImportIssue[] };
+type EndpointResult = {
+  profileId: string;
+  name: string;
+  protocol: string;
+  server: string;
+  port: number;
+  supported: boolean;
+  reachable: boolean;
+  latencyMs: number | null;
+  detail: string;
 };
 
 export default function App() {
   const [status, setStatus] = useState<AppStatus | null>(null);
+  const [profiles, setProfiles] = useState<Profile[]>([]);
+  const [shareText, setShareText] = useState("");
+  const [endpointResults, setEndpointResults] = useState<EndpointResult[] | null>(null);
   const [message, setMessage] = useState("Checking desktop runtime…");
-  const [loading, setLoading] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [previewMode, setPreviewMode] = useState(false);
 
   const refreshStatus = useCallback(async () => {
-    setLoading(true);
     try {
       const nextStatus = await invoke<AppStatus>("get_app_status");
       setStatus(nextStatus);
-      setMessage("Connected to the native application shell.");
+      setMessage("Native application shell is ready.");
+      setPreviewMode(false);
     } catch {
       setStatus(null);
-      setMessage("Browser preview mode — launch through the Tauri desktop shell for native status.");
-    } finally {
-      setLoading(false);
+      setMessage("Browser preview mode — run the desktop app to access local profiles.");
+      setPreviewMode(true);
+    }
+  }, []);
+
+  const refreshProfiles = useCallback(async () => {
+    try {
+      const nextProfiles = await invoke<Profile[]>("get_profiles");
+      setProfiles(nextProfiles);
+    } catch {
+      setProfiles([]);
     }
   }, []);
 
   useEffect(() => {
     void refreshStatus();
-  }, [refreshStatus]);
+    void refreshProfiles();
+  }, [refreshStatus, refreshProfiles]);
 
   const engines = status?.engines ?? [
     { kind: "sing-box", binaryName: "sing-box", integrationStage: "planned" },
     { kind: "Xray-core", binaryName: "xray", integrationStage: "planned" },
     { kind: "Mihomo", binaryName: "mihomo", integrationStage: "planned" },
   ];
+
+  const reachableCount = useMemo(
+    () => endpointResults?.filter((result) => result.reachable).length ?? 0,
+    [endpointResults],
+  );
+
+  const importProfiles = async () => {
+    if (!shareText.trim()) return;
+    setBusy(true);
+    try {
+      const result = await invoke<ImportResponse>("import_profiles", { input: shareText });
+      setShareText("");
+      setEndpointResults(null);
+      await refreshProfiles();
+      const summary = `${result.imported.length} imported, ${result.rejected.length} skipped.`;
+      setMessage(summary);
+    } catch (error) {
+      setMessage(typeof error === "string" ? error : "Could not import these profiles.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const removeProfile = async (profileId: string) => {
+    setBusy(true);
+    try {
+      await invoke("delete_profile", { profileId });
+      await refreshProfiles();
+      setEndpointResults((current) => current?.filter((result) => result.profileId !== profileId) ?? null);
+      setMessage("Profile removed.");
+    } catch (error) {
+      setMessage(typeof error === "string" ? error : "Could not remove this profile.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const testEndpoints = async () => {
+    setBusy(true);
+    try {
+      const results = await invoke<EndpointResult[]>("test_all_profile_endpoints");
+      setEndpointResults(results);
+      setMessage(`Basic endpoint check finished: ${results.filter((item) => item.reachable).length} TCP endpoints reachable.`);
+    } catch (error) {
+      setMessage(typeof error === "string" ? error : "Endpoint checks could not be completed.");
+    } finally {
+      setBusy(false);
+    }
+  };
 
   return (
     <main className="app-shell">
@@ -55,16 +142,16 @@ export default function App() {
             <h1>blacklist-inevitable</h1>
           </div>
         </div>
-        <span className="stage-tag">FOUNDATION</span>
+        <span className="stage-tag">PROFILE FOUNDATION</span>
       </header>
 
       <section className="hero">
         <div className="hero-copy">
           <p className="eyebrow">PROJECT STATUS</p>
-          <h2>A safer route to a reliable connection.</h2>
+          <h2>Bring your nodes together. Check the basics first.</h2>
           <p className="hero-description">
-            A clean Windows-first foundation for profile management, isolated server checks,
-            and predictable connection lifecycle control.
+            Import supported share links, keep credentials in Windows Credential Manager,
+            and check basic TCP reachability before a protocol-aware engine is added.
           </p>
           <div className="runtime-line">
             <span className="runtime-dot" />
@@ -78,16 +165,133 @@ export default function App() {
         </div>
       </section>
 
+      <section className="workspace-grid">
+        <article className="panel import-panel">
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">PROFILE IMPORT</p>
+              <h2>Add server links</h2>
+            </div>
+            <span className="count-tag">{profiles.length} saved</span>
+          </div>
+          <p className="panel-copy">
+            One share link per line. Supported: VLESS, VMess, Trojan, Shadowsocks SIP002,
+            Hysteria2 and TUIC. Subscription URLs and plugin-based Shadowsocks links are not supported yet.
+          </p>
+          <textarea
+            value={shareText}
+            onChange={(event) => setShareText(event.target.value)}
+            placeholder={"vless://…\nvmess://…\ntrojan://…"}
+            rows={7}
+            spellCheck={false}
+            disabled={previewMode || busy}
+          />
+          <div className="panel-actions">
+            <span className="hint-text">Credentials are not displayed in the profile list.</span>
+            <button className="primary-button" onClick={() => void importProfiles()} disabled={previewMode || busy || !shareText.trim()}>
+              {busy ? "Working…" : "Import links"}
+            </button>
+          </div>
+        </article>
+
+        <article className="panel probe-panel">
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">BASIC CONNECTIVITY</p>
+              <h2>Check endpoints</h2>
+            </div>
+            <span className="count-tag">TCP only</span>
+          </div>
+          <p className="panel-copy">
+            Checks whether supported TCP endpoints accept a connection. It does not authenticate
+            with the proxy, measure tunneled download speed, or enable VPN/TUN/system proxy.
+          </p>
+          <div className="probe-summary">
+            <div>
+              <strong>{profiles.length}</strong>
+              <span>saved nodes</span>
+            </div>
+            <div>
+              <strong>{endpointResults ? reachableCount : "—"}</strong>
+              <span>TCP reachable</span>
+            </div>
+          </div>
+          <button className="secondary-button" onClick={() => void testEndpoints()} disabled={previewMode || busy || profiles.length === 0}>
+            {busy ? "Working…" : "Test all TCP endpoints"}
+          </button>
+        </article>
+      </section>
+
       <section className="section-heading">
         <div>
-          <p className="eyebrow">ENGINE STRATEGY</p>
-          <h2>One interface. Multiple runtimes.</h2>
+          <p className="eyebrow">SAVED PROFILES</p>
+          <h2>Your server list</h2>
         </div>
-        <button className="quiet-button" onClick={() => void refreshStatus()} disabled={loading}>
-          {loading ? "Refreshing…" : "Refresh status"}
+        <button className="quiet-button" onClick={() => { void refreshStatus(); void refreshProfiles(); }} disabled={busy || previewMode}>
+          Refresh
         </button>
       </section>
 
+      <section className="profile-list">
+        {profiles.length === 0 ? (
+          <div className="empty-state">
+            <div className="empty-mark">+</div>
+            <h3>No profiles imported</h3>
+            <p>Paste one or more supported share links above to create your local server list.</p>
+          </div>
+        ) : (
+          profiles.map((profile) => {
+            const result = endpointResults?.find((item) => item.profileId === profile.id);
+            return (
+              <article className="profile-row" key={profile.id}>
+                <div className="profile-main">
+                  <span className="profile-symbol">{profile.protocol.slice(0, 2).toUpperCase()}</span>
+                  <div className="profile-name-block">
+                    <h3>{profile.name}</h3>
+                    <p>{profile.server}:{profile.port} <span>·</span> {profile.protocol}</p>
+                  </div>
+                </div>
+                <div className="profile-status">
+                  {result ? (
+                    result.supported ? (
+                      <span className={result.reachable ? "result-pill success" : "result-pill failure"}>
+                        {result.reachable ? `${result.latencyMs} ms` : "Unreachable"}
+                      </span>
+                    ) : (
+                      <span className="result-pill neutral">UDP probe pending</span>
+                    )
+                  ) : (
+                    <span className="result-pill neutral">Not tested</span>
+                  )}
+                  <button className="remove-button" onClick={() => void removeProfile(profile.id)} disabled={busy || previewMode}>
+                    Remove
+                  </button>
+                </div>
+                {result && <p className="profile-detail">{result.detail}</p>}
+              </article>
+            );
+          })
+        )}
+      </section>
+
+      <section className="notice">
+        <div className="notice-icon">i</div>
+        <div>
+          <h3>Endpoint check is not a VPN test</h3>
+          <p>
+            A reachable TCP port does not prove that credentials, TLS, transport settings, or a proxy
+            tunnel work. Hysteria2 and TUIC need a UDP-aware probe and are currently skipped.
+            The connection engine is not active and no device traffic is routed.
+          </p>
+        </div>
+      </section>
+
+      <section className="section-heading engine-heading">
+        <div>
+          <p className="eyebrow">ENGINE STRATEGY</p>
+          <h2>Protocol-aware checks come next</h2>
+        </div>
+      </section>
       <section className="engine-grid">
         {engines.map((engine) => (
           <article className="engine-card" key={engine.kind}>
@@ -97,25 +301,14 @@ export default function App() {
             </div>
             <h3>{engine.kind}</h3>
             <p className="binary-name">{engine.binaryName}</p>
-            <p className="engine-note">Adapter integration is not implemented yet.</p>
+            <p className="engine-note">Protocol-aware engine integration is not enabled yet.</p>
           </article>
         ))}
       </section>
 
-      <section className="notice">
-        <div className="notice-icon">i</div>
-        <div>
-          <h3>Development build — no traffic is routed</h3>
-          <p>
-            Connection and preflight testing are not available in this foundation.
-            No TUN interface or system proxy settings are changed by this screen.
-          </p>
-        </div>
-      </section>
-
       <footer className="footer">
         <span>Version {status?.version ?? "0.1.0"}</span>
-        <span>{status?.developmentStage ?? "early foundation"} · Windows first</span>
+        <span>{status?.developmentStage ?? "profile foundation"} · Windows first</span>
       </footer>
     </main>
   );

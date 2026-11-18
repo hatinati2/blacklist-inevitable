@@ -588,9 +588,9 @@ pub async fn is_installed(app: &AppHandle) -> bool {
 }
 
 fn matches_expected_engine_version(reported: &str) -> bool {
-    reported
-        .split_whitespace()
-        .any(|token| token.trim_start_matches('v') == SING_BOX_VERSION)
+    reported.split_whitespace().any(|token| {
+        token == SING_BOX_VERSION || token.strip_prefix('v') == Some(SING_BOX_VERSION)
+    })
 }
 
 pub async fn install(app: &AppHandle) -> Result<String, String> {
@@ -773,6 +773,9 @@ pub async fn validate_profile_config(
     fs::create_dir_all(&cache)
         .map_err(|_| "Could not create the temporary test directory.".to_string())?;
     let config_path = cache.join(format!("config-{}.json", Uuid::new_v4()));
+    // Install the guard before the write so a cancelled/failed write cannot leave
+    // a partial credential-bearing configuration behind.
+    let _config_guard = ProbeConfigFile(config_path.clone());
     let config_bytes = serde_json::to_vec(&config)
         .map_err(|_| "Could not encode the temporary engine configuration.".to_string())?;
     tokio::fs::write(&config_path, config_bytes)
@@ -816,7 +819,8 @@ fn redact_diagnostic(
     credentials: &BTreeMap<String, String>,
 ) -> String {
     let mut sanitized = diagnostic.trim().to_string();
-    for secret in credentials.values().filter(|secret| secret.len() >= 4) {
+    // Even short credentials are secrets; never echo them back in engine diagnostics.
+    for secret in credentials.values().filter(|secret| !secret.is_empty()) {
         sanitized = sanitized.replace(secret, "[redacted]");
     }
     if sanitized.is_empty() {
@@ -847,6 +851,16 @@ impl Drop for ProbeDirectory {
     fn drop(&mut self) {
         // Synchronous fallback cleanup also runs if the Tauri command future is cancelled.
         let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+struct ProbeConfigFile(PathBuf);
+
+impl Drop for ProbeConfigFile {
+    fn drop(&mut self) {
+        // Config validation stores credentials in this file. Remove it even when
+        // the invoking command is cancelled while sing-box is running.
+        let _ = fs::remove_file(&self.0);
     }
 }
 
@@ -1120,5 +1134,16 @@ mod runtime_guard_tests {
         assert!(!matches_expected_engine_version("sing-box version 1.14.40"));
         assert!(!matches_expected_engine_version("sing-box version 1.14.3"));
         assert!(!matches_expected_engine_version("sing-box version 1.14.4-beta"));
+        assert!(!matches_expected_engine_version("sing-box version vv1.14.4"));
+        assert!(!matches_expected_engine_version("sing-box version 1.14.4v"));
+    }
+
+    #[test]
+    fn diagnostics_redact_short_credentials() {
+        let credentials = BTreeMap::from([("password".to_string(), "s3!".to_string())]);
+        let diagnostic = redact_diagnostic("invalid password value: s3!", &credentials);
+
+        assert!(!diagnostic.contains("s3!"));
+        assert!(diagnostic.contains("[redacted]"));
     }
 }

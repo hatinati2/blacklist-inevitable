@@ -40,7 +40,7 @@ The Real Delay implementation currently uses fixed endpoints and fixed timeouts.
 
 ## Process ownership and remaining lifecycle work
 
-Real Delay and explicit config-validation commands acquire leases from an application-scoped process supervisor. The supervisor rejects new engine operations after shutdown starts, signals active Real Delay workers, and waits for registered operations to release their leases before the Tauri app exits. A Real Delay worker responds to shutdown by cancelling the proxied request, stopping its sing-box child, waiting for process exit, and removing its unique temporary directory. Config validation is bounded; a timeout or unconfirmed cleanup marks the in-memory runtime health state as unsafe.
+Real Delay, explicit config validation, engine installation, and installed-version status probes acquire leases from an application-scoped process supervisor. The supervisor rejects new engine operations after shutdown starts, signals active Real Delay workers, and waits for registered operations to release their leases before the Tauri app exits. A Real Delay worker responds to shutdown by cancelling the proxied request, stopping its sing-box child, waiting for process exit, and removing its unique temporary directory. Config validation is bounded; a timeout or unconfirmed cleanup marks the in-memory runtime health state as unsafe.
 
 Temporary config-validation files and probe directories also have synchronous Drop guards. A failed final cleanup marks the supervisor unhealthy, and further engine operations are rejected for the remainder of that app session. The app's `ExitRequested` event is deferred until supervised operations finish their cleanup path.
 

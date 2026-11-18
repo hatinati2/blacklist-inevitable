@@ -95,7 +95,7 @@ export default function App() {
   }, [refreshStatus, refreshProfiles]);
 
   const engines = status?.engines ?? [
-    { kind: "sing-box", binaryName: "sing-box", integrationStage: "planned" },
+    { kind: "sing-box", binaryName: "sing-box", integrationStage: "implemented · preflight only" },
     { kind: "Xray-core", binaryName: "xray", integrationStage: "planned" },
     { kind: "Mihomo", binaryName: "mihomo", integrationStage: "planned" },
   ];
@@ -402,7 +402,7 @@ export default function App() {
       <section className="section-heading engine-heading">
         <div>
           <p className="eyebrow">ENGINE STRATEGY</p>
-          <h2>Multi-engine support comes next</h2>
+          <h2>Engine integration status</h2>
         </div>
       </section>
       <section className="engine-grid">
@@ -414,14 +414,18 @@ export default function App() {
             </div>
             <h3>{engine.kind}</h3>
             <p className="binary-name">{engine.binaryName}</p>
-            <p className="engine-note">Protocol-aware engine integration is not enabled yet.</p>
+            {engine.kind === "sing-box" ? (
+              <p className="engine-note">sing-box config validation and isolated Real Delay are implemented; normal traffic routing is not.</p>
+            ) : (
+              <p className="engine-note">This engine adapter is not implemented yet.</p>
+            )}
           </article>
         ))}
       </section>
 
       <footer className="footer">
         <span>Version {status?.version ?? "0.1.0"}</span>
-        <span>{status?.developmentStage ?? "profile foundation"} · Windows first</span>
+        <span>{status?.developmentStage ?? "sing-box preflight implementation"} · Windows first</span>
       </footer>
     </main>
   );

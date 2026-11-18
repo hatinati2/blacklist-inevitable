@@ -32,9 +32,11 @@ Windows is the first platform. Android work starts only after the Windows releas
 - [x] Keep TCP reachability as a separately labelled diagnostic.
 - [x] Keep the current preflight code path free of TUN and Windows system-proxy changes.
 - [ ] Add configurable probe URLs and timeout settings.
-- [ ] Add a cancellation-aware, application-wide process supervisor that verifies termination on cancellation and app shutdown.
-- [ ] Add a shared cleanup-health gate that blocks a future normal Connect when prior runtime cleanup is uncertain.
-- [ ] Verify file cleanup, child-process exit, and listener release under success, failure, timeout, cancellation, and app shutdown on Windows.
+- [x] Add an application-scoped supervisor for Real Delay and config-validation operations; defer graceful app exit until registered operations finish cleanup.
+- [x] Cancel active Real Delay workers on graceful app shutdown, stop and await their sing-box child process, and reject new engine work once shutdown begins.
+- [x] Add an in-memory cleanup-health gate that blocks subsequent engine operations in the current app session when cleanup is uncertain.
+- [ ] Add Windows Job Object ownership and startup recovery for orphaned engine processes after hard crashes or forced termination.
+- [ ] Verify file cleanup, child-process exit, and listener release under success, failure, timeout, cancellation, graceful shutdown, and forced termination on Windows.
 - [ ] Run protocol-aware preflight tests against controlled VLESS, VMess, Trojan, Shadowsocks, Hysteria2, and TUIC test servers.
 
 ## M3 — Multi-engine adapters

@@ -597,10 +597,12 @@ fn matches_expected_engine_version(reported: &str) -> bool {
 pub async fn install(app: &AppHandle, supervisor: &ProcessSupervisor) -> Result<String, String> {
     let binary_path = installed_binary_path(app)?;
     if binary_path.is_file() {
-        if let Ok(version) = read_engine_version(&binary_path, supervisor).await {
-            if matches_expected_engine_version(&version) {
-                return Ok(version);
-            }
+        match read_engine_version(&binary_path, supervisor).await {
+            Ok(version) if matches_expected_engine_version(&version) => return Ok(version),
+            // A timeout means the previous version-check child may not have been
+            // reaped. Do not download/replace an engine while cleanup is uncertain.
+            Err(error) if error.contains("timed out") => return Err(error),
+            _ => {}
         }
     }
 

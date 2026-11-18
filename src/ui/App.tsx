@@ -105,6 +105,15 @@ export default function App() {
     [endpointResults],
   );
 
+  const displayedProfiles = useMemo(() => {
+    if (!realDelayResults) return profiles;
+    const rank = new Map(realDelayResults.map((result, index) => [result.profileId, index]));
+    return [...profiles].sort((left, right) =>
+      (rank.get(left.id) ?? Number.MAX_SAFE_INTEGER) -
+      (rank.get(right.id) ?? Number.MAX_SAFE_INTEGER),
+    );
+  }, [profiles, realDelayResults]);
+
   const importProfiles = async () => {
     if (!shareText.trim()) return;
     setBusy(true);
@@ -213,7 +222,7 @@ export default function App() {
             <h1>blacklist-inevitable</h1>
           </div>
         </div>
-        <span className="stage-tag">PROFILE FOUNDATION</span>
+        <span className="stage-tag">SING-BOX PREFLIGHT</span>
       </header>
 
       <section className="hero">
@@ -222,7 +231,7 @@ export default function App() {
           <h2>Bring your nodes together. Check the basics first.</h2>
           <p className="hero-description">
             Import supported share links, keep credentials in Windows Credential Manager,
-            and check basic TCP reachability before a protocol-aware engine is added.
+            validate each generated sing-box config, then measure a real request through that node.
           </p>
           <div className="runtime-line">
             <span className="runtime-dot" />
@@ -323,7 +332,7 @@ export default function App() {
             <p>Paste one or more supported share links above to create your local server list.</p>
           </div>
         ) : (
-          profiles.map((profile) => {
+          displayedProfiles.map((profile) => {
             const result = endpointResults?.find((item) => item.profileId === profile.id);
             const delayResult = realDelayResults?.find((item) => item.profileId === profile.id);
             return (
@@ -343,7 +352,7 @@ export default function App() {
                   )}
                   {delayResult ? (
                     <span className={delayResult.configStatus === "valid" ? "result-pill success" : "result-pill failure"}>
-                      {delayResult.configStatus === "valid" ? "Config valid" : delayResult.configStatus === "unsupported" ? "Unsupported" : "Config invalid"}
+                      {delayResult.configStatus === "valid" ? "Config valid" : delayResult.configStatus === "unsupported" ? "Unsupported" : delayResult.configStatus === "not_checked" ? "Not checked" : "Config invalid"}
                     </span>
                   ) : null}
                   {delayResult?.realDelayMs !== null && delayResult?.realDelayMs !== undefined ? (
@@ -351,15 +360,12 @@ export default function App() {
                   ) : delayResult ? (
                     <span className="result-pill failure">Delay failed</span>
                   ) : null}
-                  {result ? (
-                    result.supported ? (
-                      <span className={result.reachable ? "result-pill success" : "result-pill failure"}>
-                        {result.reachable ? `${result.latencyMs} ms` : "Unreachable"}
-                      </span>
-                    ) : (
-                      <span className="result-pill neutral">UDP probe pending</span>
-                    )
-                  ) : (
+                  {result && (
+                    <span className={result.reachable ? "result-pill success" : "result-pill failure"}>
+                      {result.reachable ? `TCP ${result.latencyMs} ms` : "TCP unreachable"}
+                    </span>
+                  )}
+                  {!result && !delayResult && (
                     <span className="result-pill neutral">Not tested</span>
                   )}
                   <button className="remove-button" onClick={() => void validateConfig(profile.id)} disabled={busy || previewMode || !status?.singBoxInstalled}>

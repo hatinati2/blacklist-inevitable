@@ -21,15 +21,24 @@ Profile metadata is saved under the Tauri application data directory. Credential
 
 The current profile model deliberately keeps secrets out of the UI response. A future engine adapter will retrieve credentials from the native store only when it needs to generate a temporary engine configuration.
 
-## Basic endpoint check
+## Current TCP reachability diagnostic
 
-The current check opens a bounded TCP connection to the configured host and port for VLESS, VMess, Trojan, and Shadowsocks. It is limited to 24 concurrent probes and a five-second timeout per endpoint. Hysteria2 and TUIC are skipped because they require UDP-aware testing.
+The current diagnostic opens a bounded TCP connection to the configured host and port for TCP-capable profiles. It is limited to 24 concurrent probes and a five-second timeout per endpoint. UDP-only profiles are skipped.
 
-A successful TCP connection means only that the endpoint accepted a TCP connection. It does **not** validate TLS, proxy protocol negotiation, authentication, transport settings, or the ability to carry traffic. This check never starts an engine, enables TUN, or changes the Windows system proxy.
+A successful TCP connection means only that the endpoint accepted a TCP connection. It does **not** validate the generated engine configuration, TLS, proxy protocol negotiation, authentication, transport settings, or the ability to carry traffic. The UI labels this result as TCP reachability; it must never be shown as Real Delay.
 
-## Next integration steps
+## Required engine config validation
 
-1. Add parsers and fixtures for more import formats without discarding unsupported options.
-2. Pin a sing-box version and validate generated outbound configuration against its native checker.
-3. Add a supervised probe-only sing-box runtime and protocol-aware URL tests, with no TUN or system proxy.
-4. Add UDP protocol tests for Hysteria2 and TUIC.
+Before measuring a node, the app must generate that node's engine configuration and run the selected engine's native configuration checker. For the first adapter, this is the pinned sing-box `check -c` command. A successful config check proves only that the engine accepts the configuration shape; it does not prove that the remote server works or that credentials are correct.
+
+Unsupported options must be reported explicitly. They must not be silently dropped from generated configuration.
+
+## Required Real Delay
+
+Real Delay must use a real HTTP(S) request sent **through the selected node** using a temporary local proxy backed by the selected engine. The measured time covers the request path through the proxy and the HTTP response from the probe endpoint. The initial default is `https://www.gstatic.com/generate_204`, with a configurable secondary URL for fallback.
+
+Each node is tested in an isolated temporary runtime. No TUN, Windows system proxy, or normal device traffic capture is permitted. TCP handshake timing remains a distinct diagnostic, not a substitute for Real Delay.
+
+Hiddify documents its monitoring test as a URL request through each outbound; v2rayNG exposes a dedicated native `measureOutboundDelay` API. This project follows the same principle.
+
+See [REAL_DELAY_SPEC.md](REAL_DELAY_SPEC.md) for the complete algorithm, safety constraints, result model, and acceptance tests.

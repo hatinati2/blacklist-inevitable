@@ -165,7 +165,6 @@ export default function App() {
     try {
       const version = await invoke<string>("install_sing_box_engine");
       setMessage(`Installed ${version} after SHA-256 verification.`);
-      await refreshRuntimeStatus();
     } catch (error) {
       setMessage(typeof error === "string" ? error : "Could not install sing-box.");
     } finally {

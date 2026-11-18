@@ -33,14 +33,14 @@ Current process supervision:
 - Tauri exit is deferred while active Real Delay operations cancel their HTTP probe, stop and wait for the sing-box child, and remove temporary probe files.
 - Config validation remains bounded by a 15-second timeout. If process termination or config-file cleanup is uncertain, the in-memory runtime health flag is set to unsafe and later engine operations are blocked for the rest of that app session.
 - Temporary config and probe-directory Drop guards make a final synchronous cleanup attempt.
-- On Windows, the supervisor owns a Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. Engine commands are created with `CREATE_SUSPENDED`; the supervisor locates the process's sole initial thread, assigns the process to the Job Object, and calls `ResumeThread` only after assignment succeeds.
+- On Windows, the desktop application itself joins the supervisor's Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` before Tauri creates child processes. Windows automatically associates children created by a process in a Job Object with that Job Object unless breakaway is explicitly allowed/requested; this app does not enable breakaway. Engine commands remain `CREATE_SUSPENDED`; before resuming the initial thread, the supervisor verifies membership in this exact Job Object and explicitly assigns only if inheritance did not establish membership.
 - If thread discovery, Job Object initialization, process assignment, or thread resume fails, engine work is blocked; the child is terminated and awaited before the operation returns. The child cannot run its own code before Job Object membership is established.
-- If the app exits abruptly in the interval after creating the suspended child but before assignment, a non-running orphaned suspended process can remain. It cannot execute engine code, but startup recovery must identify and remove it without touching unrelated sing-box processes; this is tracked in issue #24.
+- Because the application itself is already in the Job Object before engine child creation, a child inherits membership at the instant it is created. Closing the app's final Job Object handle terminates inherited children even if the app crashes before its post-spawn verification call. If the application cannot be assigned to the Job Object (including unsupported outer-job constraints), cleanup health is marked unsafe and all engine operations remain blocked.
 - If runtime cleanup becomes uncertain, the UI displays an explicit safety warning and disables engine installation, config validation, and Real Delay instead of presenting the engine as merely uninstalled.
 
 Remaining requirements:
 
-- Recover orphaned suspended engine children after an abrupt app exit before Job Object assignment, without terminating unrelated processes (issue #24).
+- Keep the Windows app-process Job Object inheritance and per-instance isolation regression tests enabled (issue #24).
 - Verify child termination, listener release, and file cleanup on success, failure, timeout, user cancellation, graceful app shutdown, and app-level forced termination on Windows.
 - Keep startup recovery fail-closed so a stale engine process can never be mistaken for a clean normal-connection runtime.
 - Add explicit access-control hardening for credential-bearing temporary files where needed.
@@ -52,7 +52,7 @@ Before normal connection functionality is implemented:
 
 - Extend the current preflight supervisor into a connection-runtime owner for all engine process handles.
 - Child processes must not be detached; shutdown and cancellation must await process exit.
-- Windows engine children start suspended and are assigned to the app-owned Job Object before their initial thread is resumed. Startup recovery and app-level crash/forced-termination validation must cover the possible non-running orphan created before assignment.
+- The application joins its kill-on-close Job Object before creating child processes; Windows child-process inheritance provides containment at creation. Engine children remain suspended until membership in this exact Job Object is verified and their initial thread is resumed.
 - Connect, Disconnect, cancellation, crash recovery, and app shutdown must be serialized through one Rust-owned state machine.
 - Uncertain cleanup must fail closed and block the next normal connection, including after an application restart.
 

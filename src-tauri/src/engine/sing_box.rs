@@ -20,6 +20,7 @@ pub fn build_probe_config(
             profile.unsupported_options.join(", ")
         ));
     }
+    validate_profile_options(profile, credentials)?;
 
     let mut outbound = Map::new();
     outbound.insert("type".to_string(), json!(profile.protocol));
@@ -43,6 +44,7 @@ pub fn build_probe_config(
             }
             outbound.insert("uuid".to_string(), json!(required(credentials, "uuid")?));
             insert_option(&mut outbound, "flow", &profile.options, "flow");
+            insert_option(&mut outbound, "packet_encoding", &profile.options, "packetEncoding");
             insert_tls(&mut outbound, profile, false)?;
             insert_transport(&mut outbound, &profile.options)?;
         }
@@ -134,6 +136,131 @@ pub fn build_probe_config(
     }))
 }
 
+
+
+fn validate_profile_options(
+    profile: &ProfileSummary,
+    credentials: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    let options = &profile.options;
+    let transport = options
+        .get("transport")
+        .or_else(|| options.get("type"))
+        .map(String::as_str)
+        .unwrap_or("tcp")
+        .to_ascii_lowercase();
+
+    let is_websocket = matches!(transport.as_str(), "ws" | "websocket");
+    let is_grpc = transport == "grpc";
+    let supports_path_and_host = matches!(
+        transport.as_str(),
+        "ws" | "websocket" | "grpc" | "http" | "h2" | "httpupgrade" | "http-upgrade"
+    );
+
+    if (options.contains_key("path") || options.contains_key("host")) && !supports_path_and_host {
+        return Err("Path/Host transport options were supplied without a compatible transport.".to_string());
+    }
+    if options.contains_key("serviceName") && !is_grpc {
+        return Err("serviceName is only supported with the gRPC transport.".to_string());
+    }
+    if (options.contains_key("ed") || options.contains_key("eh")) && !is_websocket {
+        return Err("WebSocket early-data options (ed/eh) require the WebSocket transport.".to_string());
+    }
+
+    if let Some(value) = options.get("insecure").or_else(|| options.get("allowInsecure")) {
+        if !["0", "1", "true", "false"].contains(&value.to_ascii_lowercase().as_str()) {
+            return Err("The insecure/allowInsecure option must be true, false, 1, or 0.".to_string());
+        }
+    }
+
+    if let Some(encoding) = options.get("packetEncoding") {
+        if !["", "packetaddr", "xudp"].contains(&encoding.as_str()) {
+            return Err(format!("Packet encoding '{encoding}' is not supported by this sing-box adapter."));
+        }
+    }
+
+    if let Some(flow) = options.get("flow") {
+        if profile.protocol != "vless" || !flow.is_empty() && flow != "xtls-rprx-vision" {
+            return Err(format!("Flow '{flow}' is not supported for this profile."));
+        }
+    }
+
+    match profile.protocol.as_str() {
+        "vless" => {
+            let security = options.get("security").map(String::as_str).unwrap_or("");
+            if !["", "none", "tls", "reality"].contains(&security.to_ascii_lowercase().as_str()) {
+                return Err(format!("VLESS security mode '{security}' is not supported."));
+            }
+            if options.get("encryption").is_some_and(|value| value != "none") {
+                return Err("Only VLESS encryption=none is currently supported.".to_string());
+            }
+            let reality = security.eq_ignore_ascii_case("reality");
+            if !reality && (options.contains_key("pbk") || options.contains_key("sid") || options.contains_key("spx")) {
+                return Err("Reality-only options (pbk/sid/spx) require security=reality.".to_string());
+            }
+            if reality && options.contains_key("spx") {
+                return Err("Reality spiderX (spx) is not mapped by the current sing-box adapter.".to_string());
+            }
+        }
+        "vmess" => {
+            if options.get("tls").is_some_and(|value| {
+                !value.is_empty() && !["tls", "none"].contains(&value.to_ascii_lowercase().as_str())
+            }) {
+                return Err("Only VMess tls=tls or tls=none is currently supported.".to_string());
+            }
+            if let Some(alter_id) = options.get("alterId") {
+                if alter_id.parse::<u16>().is_err() {
+                    return Err("VMess alterId must be a valid 16-bit integer.".to_string());
+                }
+            }
+            if options.get("headerType").is_some_and(|value| !value.is_empty() && value != "none") {
+                return Err("VMess header types other than 'none' are not supported.".to_string());
+            }
+        }
+        "trojan" | "hysteria2" | "tuic" => {
+            if options.get("security").is_some_and(|value| {
+                !value.is_empty() && !["tls", "none"].contains(&value.to_ascii_lowercase().as_str())
+            }) {
+                return Err("This protocol requires TLS; only the standard TLS security mode is supported.".to_string());
+            }
+        }
+        "shadowsocks" => {}
+        _ => return Err("This protocol is not supported by the sing-box adapter.".to_string()),
+    }
+
+    let tls_enabled = matches!(profile.protocol.as_str(), "trojan" | "hysteria2" | "tuic")
+        || options.get("security").is_some_and(|value| {
+            ["tls", "reality"].contains(&value.to_ascii_lowercase().as_str())
+        })
+        || options.get("tls").is_some_and(|value| value.eq_ignore_ascii_case("tls"));
+
+    if !tls_enabled
+        && [
+            "sni", "fp", "fingerprint", "alpn", "insecure", "allowInsecure",
+        ]
+        .iter()
+        .any(|key| options.contains_key(*key))
+    {
+        return Err("TLS-related options were supplied while TLS is disabled.".to_string());
+    }
+
+    if let Some(obfs) = options.get("obfs") {
+        if profile.protocol != "hysteria2" || obfs != "salamander" {
+            return Err("Only Hysteria2 salamander obfuscation is supported by this adapter.".to_string());
+        }
+        if !credentials.contains_key("obfsPassword") {
+            return Err("Hysteria2 salamander obfuscation is missing its password.".to_string());
+        }
+    } else if credentials.contains_key("obfsPassword") {
+        return Err("An obfuscation password was supplied without a supported obfuscation mode.".to_string());
+    }
+
+    if let Some(mode) = options.get("mode") {
+        return Err(format!("The source mode option '{mode}' is not mapped by this adapter."));
+    }
+
+    Ok(())
+}
 
 fn ensure_allowed_options(profile: &ProfileSummary, allowed: &[&str]) -> Result<(), String> {
     let unsupported = profile

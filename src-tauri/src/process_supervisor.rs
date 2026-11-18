@@ -108,6 +108,37 @@ impl WindowsJobObject {
         Ok(())
     }
 
+    #[cfg(test)]
+    fn is_pid_in_job(&self, pid: u32) -> Result<bool, String> {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::JobObjects::IsProcessInJob;
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+
+        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if process.is_null() {
+            return Err(format!(
+                "OpenProcess({pid}) failed while verifying inherited Job Object membership: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+
+        let mut is_member = 0;
+        let queried = unsafe { IsProcessInJob(process, self.handle, &mut is_member) };
+        let error = if queried == 0 {
+            Some(std::io::Error::last_os_error())
+        } else {
+            None
+        };
+        unsafe { CloseHandle(process) };
+
+        match error {
+            Some(error) => Err(format!("IsProcessInJob({pid}) failed: {error}")),
+            None => Ok(is_member != 0),
+        }
+    }
+
     fn ensure_process_handle_in_job(
         &self,
         pid: u32,

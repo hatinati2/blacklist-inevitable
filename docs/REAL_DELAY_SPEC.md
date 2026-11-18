@@ -29,7 +29,7 @@ The request timeout is currently nine seconds per endpoint attempt, and the batc
 
 The current preflight commands use an application-scoped process supervisor:
 
-- Real Delay and explicit config validation acquire operation leases before engine work begins.
+- Real Delay, explicit config validation, engine installation, and installed-version status probes acquire operation leases before engine work begins.
 - On `RunEvent::ExitRequested`, the app defers exit, rejects new engine work, and signals active Real Delay operations to cancel.
 - A running Real Delay request is dropped, its sing-box child is stopped and awaited (bounded to four seconds), and its probe directory is removed before its lease is released.
 - Config validation has a bounded 15-second check. Shutdown waits for that operation to finish; if its child termination or temporary-file cleanup cannot be confirmed, the supervisor marks runtime health unsafe.

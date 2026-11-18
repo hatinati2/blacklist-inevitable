@@ -2,43 +2,41 @@
 
 A Windows-first, multi-engine proxy/VPN desktop client focused on safe server preflight testing and predictable connection lifecycle management.
 
-> **Project status:** early foundation. The current repository is a development scaffold, not a working VPN client. Engine processes, profile parsing, server testing, and traffic routing are not implemented yet.
+> **Status: foundation only.** This repository currently contains the desktop shell and project scaffolding. It is not yet a working VPN client: profile parsing, engine process management, node probing, TUN/system-proxy integration, and traffic routing are not implemented.
 
-## Product direction
+## Product decisions
 
-- **Platform:** Windows first. Android is explicitly out of scope until the Windows release is built and smoke-tested.
-- **Architecture:** Tauri 2, React, TypeScript, and Rust.
-- **Engine strategy:** adapter-based integration for sing-box, Xray-core, and Mihomo, added incrementally after compatibility and licensing review.
-- **Priority:** balanced — stability, practical features, and straightforward UX.
+- **First platform:** Windows. Android work starts only after the Windows release has been built and smoke-tested.
+- **Stack:** Tauri 2, React, TypeScript, and Rust.
+- **Engine targets:** sing-box, Xray-core, and Mihomo, integrated incrementally behind explicit adapters.
+- **Priority:** balanced — stability, useful features, and a straightforward interface.
 
-## Core safety requirement
+## Non-negotiable preflight safety
 
-The future **Test servers** workflow must run independently of the real connection path. It must not enable TUN, alter the system proxy, or route normal device traffic. It should start only the minimum isolated engine process required for a probe, report per-node latency and errors, and always clean up its temporary resources. A cleanup failure must prevent a normal connection from starting until the state is reconciled.
+The future **Test servers** operation must be isolated from the real connection path. It must not enable TUN, change the Windows system proxy, or route ordinary device traffic. It must create temporary probe-only runtime state, test nodes independently, report latency and failure reasons, and clean up every child process and temporary resource. If cleanup cannot be confirmed, normal connection startup must remain blocked until the runtime is reconciled.
 
-## Development
+## Windows development
 
-Prerequisites for Windows development:
-
-- Node.js LTS and npm
-- Rust stable toolchain with the MSVC target
-- Microsoft C++ Build Tools
-- WebView2 Runtime
-
-Commands:
+Install Node.js LTS, Rust stable with the MSVC target, Microsoft C++ Build Tools, and WebView2 Runtime.
 
 ```powershell
 npm install
-npm run tauri dev
+npm run tauri -- dev
 ```
 
-Build a Windows installer:
+Build the Windows installer:
 
 ```powershell
-npm run tauri build
+npm run tauri -- build
 ```
 
-## Current scope
+## Repository map
 
-The initial foundation establishes the desktop shell, engine boundary, project documentation, and a Windows CI build workflow. It does not bundle engine binaries or implement real proxy/VPN functionality.
+- `src/` — React/TypeScript desktop UI
+- `src-tauri/` — Rust application shell and engine boundary
+- `docs/ARCHITECTURE.md` — component boundaries and safety invariants
+- `docs/ROADMAP.md` — staged delivery plan
+- `docs/SECURITY.md` — security and cleanup requirements
+- `.github/workflows/windows.yml` — Windows build pipeline
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/ROADMAP.md](docs/ROADMAP.md).
+No third-party engine binaries are bundled at this stage. Their licenses and redistribution obligations must be reviewed before packaging them.

@@ -35,7 +35,7 @@ The current preflight commands use an application-scoped process supervisor:
 - Config validation has a bounded 15-second check. Shutdown waits for that operation to finish; if its child termination or temporary-file cleanup cannot be confirmed, the supervisor marks runtime health unsafe.
 - Any unconfirmed process or temporary-file cleanup blocks subsequent engine operations for the rest of the current app session.
 
-The health state is currently in-memory. It does not yet recover an orphaned process after a hard application crash, power loss, or forced termination, and no Windows Job Object is installed yet. Startup recovery and crash/forced-termination tests remain mandatory before normal Connect or device-wide routing is implemented. There is no normal Connect / Disconnect feature yet.
+On Windows, the supervisor creates an app-owned Job Object configured with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` and assigns each engine child immediately after spawn. Closing the final job handle causes Windows to terminate assigned children if the app exits unexpectedly. If the Job Object cannot be created or a child cannot be assigned, engine work fails closed and an uncontained child is killed and awaited. Since assignment follows process creation, a narrow crash window remains before assignment; startup recovery for that edge case and app-level forced-termination tests remain mandatory before normal Connect or device-wide routing is implemented. The cleanup-health state is still in-memory. There is no normal Connect / Disconnect feature yet.
 
 ## User-visible result model
 

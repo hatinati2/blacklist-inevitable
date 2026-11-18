@@ -802,6 +802,7 @@ pub async fn validate_profile_config(
 
     let cleanup_result = tokio::fs::remove_file(&config_path).await;
     if cleanup_result.is_err() {
+        supervisor.mark_cleanup_unhealthy();
         return Err(
             "The temporary configuration could not be removed; preflight cleanup needs attention."
                 .to_string(),
@@ -809,7 +810,10 @@ pub async fn validate_profile_config(
     }
 
     match command_result {
-        Err(_) => Err("sing-box config validation timed out.".to_string()),
+        Err(_) => {
+            supervisor.mark_cleanup_unhealthy();
+            Err("sing-box config validation timed out; child termination could not be confirmed.".to_string())
+        }
         Ok(Err(_)) => Err("Could not start sing-box config validation.".to_string()),
         Ok(Ok(output)) if output.status.success() => Ok(()),
         Ok(Ok(output)) => {
@@ -955,10 +959,11 @@ pub async fn measure_real_delay(
 
     let validation = match validation {
         Err(_) => {
+            operation.mark_cleanup_unhealthy();
             cleanup_probe_dir(&run_dir).await?;
             return Ok(ProbeOutcome {
                 config_status: "invalid".to_string(),
-                config_detail: "sing-box configuration validation timed out.".to_string(),
+                config_detail: "sing-box configuration validation timed out; child termination could not be confirmed.".to_string(),
                 real_delay_ms: None,
                 real_delay_detail: "Not run because configuration validation did not finish.".to_string(),
                 tested_url: None,

@@ -1,30 +1,37 @@
 # blacklist-inevitable
 
-A Windows-first, multi-engine proxy/VPN desktop client focused on safe server preflight testing and predictable connection lifecycle management.
+A Windows-first desktop app for importing proxy profiles and testing them before a future connection workflow. The current build implements **profile management and sing-box preflight testing**; it is not yet a traffic-routing VPN client.
 
-> **Status: foundation only.** This repository currently contains the desktop shell and project scaffolding. It is not yet a working VPN client: profile parsing, engine process management, node probing, TUN/system-proxy integration, and traffic routing are not implemented.
+## Current implementation
 
-## Product decisions
+- Import one share link per line: VLESS, VMess Base64 JSON, Trojan, Shadowsocks SIP002, Hysteria2 / hy2, and TUIC.
+- Keep profile metadata separate from credentials. On Windows, credentials are stored through Windows Credential Manager.
+- Preserve the names of unknown source options without retaining their values. The sing-box adapter refuses profiles with options it cannot map instead of silently dropping settings.
+- Download and install the pinned Windows AMD64 sing-box 1.14.4 release. The downloaded archive is checked against a pinned SHA-256 digest, the executable is extracted, and its reported version is checked.
+- Generate an isolated sing-box outbound configuration for each supported profile and run the native `sing-box check`.
+- Measure **Real Delay** by sending an HTTPS request through a temporary, loopback-only SOCKS5 proxy backed by that profile's sing-box outbound. The test accepts HTTP 204 only, disallows redirects, and uses a fallback 204 endpoint.
+- Keep the basic TCP endpoint check separate. It is only a TCP connection diagnostic and is not Real Delay.
 
-- **First platform:** Windows. Android work starts only after the Windows release has been built and smoke-tested.
-- **Stack:** Tauri 2, React, TypeScript, and Rust.
-- **Engine targets:** sing-box, Xray-core, and Mihomo, integrated incrementally behind explicit adapters.
-- **Priority:** balanced — stability, useful features, and a straightforward interface.
+Real Delay is currently implemented with fixed probe endpoints and timeouts. Xray-core and Mihomo are target engines only; their adapters are not implemented yet.
 
-## Non-negotiable preflight safety
+## Not implemented
 
-The future **Test servers** operation has two mandatory, separate checks for every supported node:
+- Normal Connect / Disconnect and device traffic routing.
+- TUN, Wintun, packet capture, or Windows system-proxy integration.
+- Xray-core and Mihomo adapters.
+- Subscription URL, Clash YAML, sing-box JSON, or plugin-based Shadowsocks import.
+- Android support.
 
-1. **Config validation:** generate the selected engine's configuration and run that engine's native config checker (for the first engine, `sing-box check`). Invalid configurations must be rejected with a useful error before a delay measurement starts.
-2. **Real delay:** launch a temporary, per-node engine process with a loopback-only local proxy, send a real HTTP(S) request through that node to a configurable 204 test URL, and measure the request round-trip time. A TCP handshake time is not a real-delay result.
+The preflight code path does not enable TUN or change Windows system proxy settings. That is not a claim that normal VPN connection functionality exists.
 
-Neither check may enable TUN, change the Windows system proxy, or route unrelated device traffic. The runner must own and stop every temporary child process and remove all temporary configuration files. If cleanup cannot be confirmed, normal connection startup must remain blocked until the runtime is reconciled.
+## Windows build and verification
 
-The current TCP endpoint check is only a separate diagnostic. It is not config validation and it is not the promised Real Delay feature.
+The GitHub Actions workflow on `main` runs Rust formatting checks, Rust tests, Rust compilation checks, the frontend build, and the Windows NSIS installer build. A successful CI build confirms compilation and packaging on the GitHub Windows runner; it does **not** replace installation, upgrade, uninstall, or network smoke tests on a clean Windows machine.
 
-## Windows development
+- [Windows build workflow](https://github.com/hatinati2/blacklist-inevitable/actions/workflows/windows.yml)
+- [Repository](https://github.com/hatinati2/blacklist-inevitable)
 
-Install Node.js LTS, Rust stable with the MSVC target, Microsoft C++ Build Tools, and WebView2 Runtime.
+For local development, install Node.js 22, Rust stable with the MSVC target, Microsoft C++ Build Tools, and WebView2 Runtime:
 
 ```powershell
 npm install
@@ -39,11 +46,14 @@ npm run tauri -- build
 
 ## Repository map
 
-- `src/` — React/TypeScript desktop UI
-- `src-tauri/` — Rust application shell and engine boundary
-- `docs/ARCHITECTURE.md` — component boundaries and safety invariants
-- `docs/ROADMAP.md` — staged delivery plan
-- `docs/SECURITY.md` — security and cleanup requirements
-- `.github/workflows/windows.yml` — Windows build pipeline
+- `src/` — React / TypeScript desktop UI
+- `src-tauri/` — Rust application, profile store, and engine adapters
+- `docs/ARCHITECTURE.md` — architecture and runtime boundaries
+- `docs/PROFILE_IMPORT.md` — import, credential, and test behavior
+- `docs/REAL_DELAY_SPEC.md` — Real Delay semantics and remaining acceptance requirements
+- `docs/ROADMAP.md` — staged delivery and release gates
+- `docs/SECURITY.md` — security invariants and current limitations
 
-No third-party engine binaries are bundled at this stage. Their licenses and redistribution obligations must be reviewed before packaging them.
+## Third-party engine
+
+sing-box is downloaded from its upstream release rather than bundled in this repository. The app writes a third-party notice beside the installed executable. The upstream project is licensed under GPL-3.0-or-later and has additional naming / association language; a complete license, notice, redistribution, and release review remains a Windows release gate. The current installer does not bundle the sing-box executable.

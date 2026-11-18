@@ -28,7 +28,7 @@ Current implementation:
 
 Current graceful-shutdown supervision:
 
-- Real Delay and explicit config-validation commands register operation leases with an application-scoped Rust supervisor.
+- Real Delay, explicit config-validation, engine installation, and installed-version status commands register operation leases with an application-scoped Rust supervisor.
 - New supervised engine operations are rejected after shutdown begins.
 - Tauri exit is deferred while active Real Delay operations cancel their HTTP probe, stop and wait for the sing-box child, and remove temporary probe files.
 - Config validation remains bounded by a 15-second timeout. If process termination or config-file cleanup is uncertain, the in-memory runtime health flag is set to unsafe and later engine operations are blocked for the rest of that app session.

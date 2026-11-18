@@ -649,7 +649,7 @@ pub async fn install(app: &AppHandle) -> Result<String, String> {
 
     let notice_path = directory.join("THIRD_PARTY_NOTICE.txt");
     let notice = format!(
-        "sing-box {SING_BOX_VERSION}\n         Upstream: https://github.com/SagerNet/sing-box\n         Release: https://github.com/SagerNet/sing-box/releases/tag/v{SING_BOX_VERSION}\n         License: GNU GPL version 3 or later (GPL-3.0-or-later).\n         This unmodified executable was downloaded from the upstream release and verified\n         against the pinned SHA-256 of its Windows AMD64 archive.\n"
+        "sing-box {SING_BOX_VERSION}\n         Upstream: https://github.com/SagerNet/sing-box\n         Release: https://github.com/SagerNet/sing-box/releases/tag/v{SING_BOX_VERSION}\n         License: GNU GPL version 3 or later (GPL-3.0-or-later).\n         Upstream license: https://github.com/SagerNet/sing-box/blob/v{SING_BOX_VERSION}/LICENSE\n         Additional upstream condition: no derivative work may use the name or imply\n         association with the upstream application without prior consent.\n         This unmodified executable was downloaded from the upstream release and verified\n         against the pinned SHA-256 of its Windows AMD64 archive.\n"
     );
     fs::write(notice_path, notice)
         .map_err(|_| "The engine was installed but its third-party notice could not be saved.".to_string())?;

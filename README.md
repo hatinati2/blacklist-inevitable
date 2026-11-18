@@ -13,7 +13,14 @@ A Windows-first, multi-engine proxy/VPN desktop client focused on safe server pr
 
 ## Non-negotiable preflight safety
 
-The future **Test servers** operation must be isolated from the real connection path. It must not enable TUN, change the Windows system proxy, or route ordinary device traffic. It must create temporary probe-only runtime state, test nodes independently, report latency and failure reasons, and clean up every child process and temporary resource. If cleanup cannot be confirmed, normal connection startup must remain blocked until the runtime is reconciled.
+The future **Test servers** operation has two mandatory, separate checks for every supported node:
+
+1. **Config validation:** generate the selected engine's configuration and run that engine's native config checker (for the first engine, `sing-box check`). Invalid configurations must be rejected with a useful error before a delay measurement starts.
+2. **Real delay:** launch a temporary, per-node engine process with a loopback-only local proxy, send a real HTTP(S) request through that node to a configurable 204 test URL, and measure the request round-trip time. A TCP handshake time is not a real-delay result.
+
+Neither check may enable TUN, change the Windows system proxy, or route unrelated device traffic. The runner must own and stop every temporary child process and remove all temporary configuration files. If cleanup cannot be confirmed, normal connection startup must remain blocked until the runtime is reconciled.
+
+The current TCP endpoint check is only a separate diagnostic. It is not config validation and it is not the promised Real Delay feature.
 
 ## Windows development
 

@@ -250,12 +250,16 @@ pub async fn test_all_profile_real_delays(
         let semaphore = Arc::clone(&semaphore);
         tasks.spawn(async move {
             let _permit = semaphore.acquire_owned().await.ok();
+            let profile_id = profile.id.clone();
+            let name = profile.name.clone();
+            let server = profile.server.clone();
+            let port = profile.port;
             let base = |config_status: &str, config_detail: String, delay_detail: String| {
                 RealDelayResult {
-                    profile_id: profile.id.clone(),
-                    name: profile.name.clone(),
-                    server: profile.server.clone(),
-                    port: profile.port,
+                    profile_id: profile_id.clone(),
+                    name: name.clone(),
+                    server: server.clone(),
+                    port,
                     config_status: config_status.to_string(),
                     config_detail,
                     real_delay_ms: None,
@@ -277,10 +281,10 @@ pub async fn test_all_profile_real_delays(
 
             match crate::engine::sing_box::measure_real_delay(&app, &profile, &credentials).await {
                 Ok(outcome) => RealDelayResult {
-                    profile_id: profile.id,
-                    name: profile.name,
-                    server: profile.server,
-                    port: profile.port,
+                    profile_id: profile_id.clone(),
+                    name: name.clone(),
+                    server: server.clone(),
+                    port,
                     config_status: outcome.config_status,
                     config_detail: outcome.config_detail,
                     real_delay_ms: outcome.real_delay_ms,

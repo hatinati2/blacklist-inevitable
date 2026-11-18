@@ -324,6 +324,7 @@ mod tests {
             server: "proxy.example.com".to_string(),
             port: 443,
             options: BTreeMap::new(),
+            unsupported_options: Vec::new(),
         }
     }
 

@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
@@ -8,6 +9,14 @@ use tauri::{AppHandle, Manager};
 use crate::profiles::{ParsedProfile, ProfileSummary};
 
 const SERVICE_NAME: &str = "blacklist-inevitable";
+static PROFILE_STORE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn lock_profile_store() -> Result<MutexGuard<'static, ()>, String> {
+    PROFILE_STORE_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| "The local profile store is temporarily unavailable.".to_string())
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct ProfileFile {
@@ -116,11 +125,13 @@ fn cleanup_added_credentials(profiles: &[ProfileSummary]) -> Result<(), String> 
 }
 
 pub fn list_profiles(app: &AppHandle) -> Result<Vec<ProfileSummary>, String> {
+    let _guard = lock_profile_store()?;
     let path = profile_file_path(app)?;
     Ok(read_file(&path)?.profiles)
 }
 
 pub fn add_profiles(app: &AppHandle, incoming: Vec<ParsedProfile>) -> Result<Vec<ProfileSummary>, String> {
+    let _guard = lock_profile_store()?;
     let path = profile_file_path(app)?;
     let mut file = read_file(&path)?;
     let mut added: Vec<ProfileSummary> = Vec::new();
@@ -148,21 +159,39 @@ pub fn add_profiles(app: &AppHandle, incoming: Vec<ParsedProfile>) -> Result<Vec
 }
 
 pub fn remove_profile(app: &AppHandle, profile_id: &str) -> Result<(), String> {
+    let _guard = lock_profile_store()?;
     let path = profile_file_path(app)?;
     let mut file = read_file(&path)?;
-    let initial_length = file.profiles.len();
+    let removed_profile = file
+        .profiles
+        .iter()
+        .find(|profile| profile.id == profile_id)
+        .cloned()
+        .ok_or_else(|| "Profile not found.".to_string())?;
     file.profiles.retain(|profile| profile.id != profile_id);
 
-    if file.profiles.len() == initial_length {
-        return Err("Profile not found.".to_string());
+    write_file(&path, &file)?;
+    if let Err(error) = delete_credentials(profile_id) {
+        // Keep the profile visible and retryable if the OS credential store refused
+        // deletion. Metadata contains no secrets, so restoring it is safe.
+        let restore_result = (|| {
+            let mut current = read_file(&path)?;
+            if !current.profiles.iter().any(|profile| profile.id == profile_id) {
+                current.profiles.push(removed_profile);
+            }
+            write_file(&path, &current)
+        })();
+
+        return match restore_result {
+            Ok(()) => Err(format!(
+                "The saved credential could not be deleted ({error}); the profile was restored so you can retry removal."
+            )),
+            Err(restore_error) => Err(format!(
+                "The saved credential could not be deleted ({error}), and the profile metadata could not be restored ({restore_error}). An orphaned credential may remain."
+            )),
+        };
     }
 
-    write_file(&path, &file)?;
-    delete_credentials(profile_id).map_err(|error| {
-        format!(
-            "The profile was removed from the local list, but its saved credential could not be deleted: {error}"
-        )
-    })?;
     Ok(())
 }
 

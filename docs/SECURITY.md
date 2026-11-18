@@ -13,7 +13,7 @@ The application currently implements profile storage and isolated sing-box prefl
 
 The current profile store uses Windows Credential Manager for credentials and keeps secrets out of the profile-list response. The sing-box adapter retrieves credentials only when constructing a temporary configuration.
 
-Credential deletion failures are reported. If profile metadata has already been removed but the OS credential store refuses deletion, the UI reloads the durable profile list and reports that saved credentials may remain orphaned in the credential store.
+Credential deletion failures are reported. If the OS credential store refuses deletion after the metadata write, the profile metadata is restored on a best-effort basis so the user can retry removal. If that restoration also fails, the UI reloads the durable profile list and reports that an orphaned credential may remain. Profile list writes and mutations are serialized by an application-wide lock.
 
 ## Preflight isolation
 

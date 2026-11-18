@@ -11,6 +11,8 @@ pub struct ProcessSupervisor {
 struct Inner {
     state: Mutex<State>,
     idle: Notify,
+    #[cfg(windows)]
+    job: Option<WindowsJobObject>,
 }
 
 fn lock_state(inner: &Inner) -> MutexGuard<'_, State> {
@@ -33,6 +35,99 @@ struct State {
     active: HashMap<u64, watch::Sender<bool>>,
 }
 
+
+#[cfg(windows)]
+struct WindowsJobObject {
+    handle: windows_sys::Win32::Foundation::HANDLE,
+}
+
+// Windows kernel handles may be used by multiple threads when the owning Rust
+// object is shared; the handle is closed exactly once in Drop.
+#[cfg(windows)]
+unsafe impl Send for WindowsJobObject {}
+#[cfg(windows)]
+unsafe impl Sync for WindowsJobObject {}
+
+#[cfg(windows)]
+impl WindowsJobObject {
+    fn new() -> Result<Self, String> {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::JobObjects::{
+            CreateJobObjectW, SetInformationJobObject,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            JobObjectExtendedLimitInformation,
+        };
+
+        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if handle.is_null() {
+            return Err(format!(
+                "CreateJobObjectW failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION =
+            unsafe { std::mem::zeroed() };
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+
+        let configured = unsafe {
+            SetInformationJobObject(
+                handle,
+                JobObjectExtendedLimitInformation,
+                &limits as *const _ as *const std::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        };
+
+        if configured == 0 {
+            let error = std::io::Error::last_os_error();
+            unsafe { CloseHandle(handle) };
+            return Err(format!("SetInformationJobObject failed: {error}"));
+        }
+
+        Ok(Self { handle })
+    }
+
+    fn assign_pid(&self, pid: u32) -> Result<(), String> {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
+        };
+
+        let process = unsafe { OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid) };
+        if process.is_null() {
+            return Err(format!(
+                "OpenProcess({pid}) failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+
+        let assigned = unsafe { AssignProcessToJobObject(self.handle, process) };
+        let error = if assigned == 0 {
+            Some(std::io::Error::last_os_error())
+        } else {
+            None
+        };
+        unsafe { CloseHandle(process) };
+
+        match error {
+            Some(error) => Err(format!("AssignProcessToJobObject failed: {error}")),
+            None => Ok(()),
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WindowsJobObject {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        // Closing the final handle applies JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE.
+        unsafe { CloseHandle(self.handle) };
+    }
+}
+
 pub struct OperationLease {
     id: u64,
     inner: Arc<Inner>,
@@ -41,16 +136,27 @@ pub struct OperationLease {
 
 impl Default for ProcessSupervisor {
     fn default() -> Self {
+        // On Windows, create the kill-on-close job before any engine operation
+        // is allowed to start. A failed containment setup fails closed.
+        #[cfg(windows)]
+        let job = WindowsJobObject::new().ok();
+        #[cfg(windows)]
+        let cleanup_healthy = job.is_some();
+        #[cfg(not(windows))]
+        let cleanup_healthy = true;
+
         Self {
             inner: Arc::new(Inner {
                 state: Mutex::new(State {
                     shutting_down: false,
                     shutdown_complete: false,
-                    cleanup_healthy: true,
+                    cleanup_healthy,
                     next_operation_id: 1,
                     active: HashMap::new(),
                 }),
                 idle: Notify::new(),
+                #[cfg(windows)]
+                job,
             }),
         }
     }
@@ -65,7 +171,7 @@ impl ProcessSupervisor {
             return Err("The application is shutting down; no new engine process may start.".to_string());
         }
         if !state.cleanup_healthy {
-            return Err("Engine startup is blocked because previous process or temporary-file cleanup was not confirmed.".to_string());
+            return Err("Engine startup is blocked because Windows process containment or previous runtime cleanup is unavailable.".to_string());
         }
 
         let id = state.next_operation_id;
@@ -77,6 +183,53 @@ impl ProcessSupervisor {
             inner: Arc::clone(&self.inner),
             cancellation: receiver,
         })
+    }
+
+    /// Assigns a newly spawned engine child to the app-owned Windows Job Object.
+    /// The job is configured with KILL_ON_JOB_CLOSE, so Windows terminates assigned
+    /// children if the app process exits unexpectedly and its final job handle closes.
+    pub async fn assign_child(
+        &self,
+        child: &mut tokio::process::Child,
+    ) -> Result<(), String> {
+        #[cfg(windows)]
+        {
+            let assignment = match (self.inner.job.as_ref(), child.id()) {
+                (Some(job), Some(pid)) => job.assign_pid(pid),
+                (None, _) => Err("The Windows process-containment Job Object is unavailable.".to_string()),
+                (_, None) => Err("The newly spawned engine process has no process identifier.".to_string()),
+            };
+
+            if let Err(error) = assignment {
+                let termination_confirmed = if child.start_kill().is_ok() {
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(4),
+                        child.wait(),
+                    )
+                    .await
+                    {
+                        Ok(Ok(_)) => true,
+                        _ => false,
+                    }
+                } else {
+                    false
+                };
+
+                self.mark_cleanup_unhealthy();
+                return Err(if termination_confirmed {
+                    format!("Could not place the engine process under Windows Job Object ownership ({error}); the child was stopped, and further engine work is disabled for this session.")
+                } else {
+                    format!("Could not place the engine process under Windows Job Object ownership ({error}), and its termination could not be confirmed; further engine work is disabled for this session.")
+                });
+            }
+        }
+
+        #[cfg(not(windows))]
+        {
+            let _ = child;
+        }
+
+        Ok(())
     }
 
     /// Prevents new operations and signals every active operation to stop.
@@ -171,6 +324,35 @@ impl Drop for OperationLease {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn closing_job_object_terminates_assigned_child() {
+        use std::process::Stdio;
+        use tokio::process::Command;
+        use tokio::time::{timeout, Duration};
+
+        let job = WindowsJobObject::new().expect("create Windows job object");
+        let mut child = Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", "Start-Sleep -Seconds 30"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("start test child");
+        let pid = child.id().expect("test child PID");
+        job.assign_pid(pid).expect("assign child to job object");
+
+        // Simulate the app losing its last job handle during abrupt termination.
+        drop(job);
+        let status = timeout(Duration::from_secs(5), child.wait())
+            .await
+            .expect("job close should terminate the child")
+            .expect("wait for job-terminated child");
+        assert!(!status.success(), "the job-owned child should be terminated");
+    }
 
     #[tokio::test]
     async fn shutdown_cancels_active_operations_and_waits_for_cleanup() {

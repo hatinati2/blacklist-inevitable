@@ -1168,28 +1168,37 @@ fn pick_loopback_port() -> Result<u16, String> {
 
 async fn wait_for_local_socks(child: &mut Child, port: u16) -> Result<(), String> {
     let address = ("127.0.0.1", port);
-    for _ in 0..100 {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                return Err(format!(
-                    "The temporary sing-box process exited before its local proxy was ready (code: {}).",
-                    status.code().map(|code| code.to_string()).unwrap_or_else(|| "unknown".to_string())
-                ));
+    let startup = timeout(ENGINE_START_TIMEOUT, async {
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    return Err(format!(
+                        "The temporary sing-box process exited before its local proxy was ready (code: {}).",
+                        status.code().map(|code| code.to_string()).unwrap_or_else(|| "unknown".to_string())
+                    ));
+                }
+                Ok(None) => {}
+                Err(_) => return Err("Could not inspect the temporary sing-box process.".to_string()),
             }
-            Ok(None) => {}
-            Err(_) => return Err("Could not inspect the temporary sing-box process.".to_string()),
-        }
 
-        if let Ok(Ok(stream)) =
-            timeout(Duration::from_millis(200), TcpStream::connect(address)).await
-        {
-            drop(stream);
-            return Ok(());
+            if let Ok(Ok(stream)) =
+                timeout(Duration::from_millis(200), TcpStream::connect(address)).await
+            {
+                drop(stream);
+                return Ok(());
+            }
+            sleep(Duration::from_millis(100)).await;
         }
-        sleep(Duration::from_millis(100)).await;
+    })
+    .await;
+
+    match startup {
+        Ok(result) => result,
+        Err(_) => Err(format!(
+            "The temporary sing-box local proxy did not become ready within {} seconds.",
+            ENGINE_START_TIMEOUT.as_secs()
+        )),
     }
-
-    Err("The temporary sing-box local proxy did not become ready within 10 seconds.".to_string())
 }
 
 async fn measure_request_through_socks(port: u16) -> Result<(u64, String), String> {

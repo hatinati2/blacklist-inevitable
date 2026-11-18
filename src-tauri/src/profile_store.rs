@@ -84,14 +84,36 @@ fn store_credentials(
 }
 
 #[cfg(windows)]
-fn delete_credentials(profile_id: &str) {
-    if let Ok(entry) = keyring::Entry::new(SERVICE_NAME, profile_id) {
-        let _ = entry.delete_credential();
+fn delete_credentials(profile_id: &str) -> Result<(), String> {
+    let entry = keyring::Entry::new(SERVICE_NAME, profile_id)
+        .map_err(|_| "Windows Credential Manager entry could not be opened for deletion.".to_string())?;
+    match entry.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(_) => Err("Windows Credential Manager could not delete this profile's credentials.".to_string()),
     }
 }
 
 #[cfg(not(windows))]
-fn delete_credentials(_profile_id: &str) {}
+fn delete_credentials(_profile_id: &str) -> Result<(), String> {
+    Ok(())
+}
+
+fn cleanup_added_credentials(profiles: &[ProfileSummary]) -> Result<(), String> {
+    let mut failed = 0usize;
+    for profile in profiles {
+        if delete_credentials(&profile.id).is_err() {
+            failed += 1;
+        }
+    }
+
+    if failed == 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "Secure credential cleanup failed for {failed} profile(s); orphaned credentials may remain in the OS credential store."
+        ))
+    }
+}
 
 pub fn list_profiles(app: &AppHandle) -> Result<Vec<ProfileSummary>, String> {
     let path = profile_file_path(app)?;
@@ -106,20 +128,20 @@ pub fn add_profiles(app: &AppHandle, incoming: Vec<ParsedProfile>) -> Result<Vec
     for parsed in incoming {
         let profile_id = parsed.profile.id.clone();
         if let Err(error) = store_credentials(&profile_id, &parsed.credentials) {
-            for profile in &added {
-                delete_credentials(&profile.id);
-            }
-            return Err(error);
+            return match cleanup_added_credentials(&added) {
+                Ok(()) => Err(error),
+                Err(cleanup_error) => Err(format!("{error} {cleanup_error}")),
+            };
         }
         file.profiles.push(parsed.profile.clone());
         added.push(parsed.profile);
     }
 
     if let Err(error) = write_file(&path, &file) {
-        for profile in &added {
-            delete_credentials(&profile.id);
-        }
-        return Err(error);
+        return match cleanup_added_credentials(&added) {
+            Ok(()) => Err(error),
+            Err(cleanup_error) => Err(format!("{error} {cleanup_error}")),
+        };
     }
 
     Ok(added)
@@ -136,7 +158,11 @@ pub fn remove_profile(app: &AppHandle, profile_id: &str) -> Result<(), String> {
     }
 
     write_file(&path, &file)?;
-    delete_credentials(profile_id);
+    delete_credentials(profile_id).map_err(|error| {
+        format!(
+            "The profile was removed from the local list, but its saved credential could not be deleted: {error}"
+        )
+    })?;
     Ok(())
 }
 

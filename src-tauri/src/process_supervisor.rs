@@ -108,46 +108,49 @@ impl WindowsJobObject {
         Ok(())
     }
 
-    fn is_pid_in_job(&self, pid: u32) -> Result<bool, String> {
-        use windows_sys::Win32::Foundation::CloseHandle;
-        use windows_sys::Win32::System::JobObjects::IsProcessInJob;
-        use windows_sys::Win32::System::Threading::{
-            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    fn ensure_process_handle_in_job(
+        &self,
+        pid: u32,
+        process: &SuspendedProcessHandle,
+    ) -> Result<(), String> {
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, IsProcessInJob,
         };
 
-        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
-        if process.is_null() {
+        let mut is_member = 0;
+        let queried = unsafe { IsProcessInJob(process.0, self.handle, &mut is_member) };
+        if queried == 0 {
             return Err(format!(
-                "OpenProcess({pid}) failed while verifying inherited Job Object membership: {}",
+                "IsProcessInJob({pid}) failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        if is_member != 0 {
+            return Ok(());
+        }
+
+        let assigned = unsafe { AssignProcessToJobObject(self.handle, process.0) };
+        if assigned == 0 {
+            return Err(format!(
+                "AssignProcessToJobObject({pid}) failed: {}",
                 std::io::Error::last_os_error()
             ));
         }
 
-        let mut is_member = 0;
-        let queried = unsafe { IsProcessInJob(process, self.handle, &mut is_member) };
-        let error = if queried == 0 {
-            Some(std::io::Error::last_os_error())
-        } else {
-            None
-        };
-        unsafe { CloseHandle(process) };
-
-        match error {
-            Some(error) => Err(format!("IsProcessInJob({pid}) failed: {error}")),
-            None => Ok(is_member != 0),
-        }
+        Ok(())
     }
 
-    fn assign_pid(&self, pid: u32) -> Result<(), String> {
-        use windows_sys::Win32::Foundation::CloseHandle;
-        use windows_sys::Win32::System::JobObjects::{
-            AssignProcessToJobObject, IsProcessInJob,
-        };
+    /// Assigns a process whose initial thread was created suspended, then resumes
+    /// that thread only after Job Object membership is established.
+    fn assign_suspended_pid(&self, pid: u32) -> Result<(), String> {
         use windows_sys::Win32::System::Threading::{
-            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA,
-            PROCESS_TERMINATE,
+            OpenProcess, ResumeThread, PROCESS_QUERY_LIMITED_INFORMATION,
+            PROCESS_SET_QUOTA, PROCESS_TERMINATE,
         };
 
+        // Pin the process object before taking the thread snapshot. Keeping this
+        // handle open prevents a terminated child's PID from being reused while
+        // we validate the initial thread and assign that exact process object.
         let process = unsafe {
             OpenProcess(
                 PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SET_QUOTA | PROCESS_TERMINATE,
@@ -157,52 +160,16 @@ impl WindowsJobObject {
         };
         if process.is_null() {
             return Err(format!(
-                "OpenProcess({pid}) failed: {}",
+                "OpenProcess({pid}) failed before suspended-thread assignment: {}",
                 std::io::Error::last_os_error()
             ));
         }
-
-        let mut is_member = 0;
-        let queried = unsafe { IsProcessInJob(process, self.handle, &mut is_member) };
-        if queried == 0 {
-            let error = std::io::Error::last_os_error();
-            unsafe { CloseHandle(process) };
-            return Err(format!("IsProcessInJob({pid}) failed: {error}"));
-        }
-        if is_member != 0 {
-            unsafe { CloseHandle(process) };
-            return Ok(());
-        }
-
-        let assigned = unsafe { AssignProcessToJobObject(self.handle, process) };
-        let error = if assigned == 0 {
-            Some(std::io::Error::last_os_error())
-        } else {
-            None
-        };
-        unsafe { CloseHandle(process) };
-
-        match error {
-            Some(error) => Err(format!("AssignProcessToJobObject({pid}) failed: {error}")),
-            None => Ok(()),
-        }
-    }
-
-    /// Assigns a process whose initial thread was created suspended, then resumes
-    /// that thread only after Job Object membership is established.
-    fn assign_suspended_pid(&self, pid: u32) -> Result<(), String> {
-        use windows_sys::Win32::System::Threading::ResumeThread;
+        let process = SuspendedProcessHandle(process);
 
         assign_suspended_thread(
             pid,
             find_suspended_primary_thread,
-            |process_id| {
-                if self.is_pid_in_job(process_id)? {
-                    Ok(())
-                } else {
-                    self.assign_pid(process_id)
-                }
-            },
+            |process_id| self.ensure_process_handle_in_job(process_id, &process),
             |thread| {
                 let previous_suspend_count = unsafe { ResumeThread(thread.0) };
                 if previous_suspend_count == u32::MAX {
@@ -236,6 +203,17 @@ fn assign_suspended_thread<T>(
     }
 
     Ok(())
+}
+
+#[cfg(windows)]
+struct SuspendedProcessHandle(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl Drop for SuspendedProcessHandle {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        unsafe { CloseHandle(self.0) };
+    }
 }
 
 #[cfg(windows)]

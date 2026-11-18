@@ -33,7 +33,10 @@ jobs:
           components: rustfmt, clippy
 
       - name: Install frontend dependencies
-        run: npm install
+        run: npm install --include=optional
+
+      - name: Verify Tauri Windows CLI binding
+        run: npm ls @tauri-apps/cli @tauri-apps/cli-win32-x64-msvc
 
       - name: Format Rust sources
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --all

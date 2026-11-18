@@ -21,7 +21,7 @@ tauri = { version = "2" }
 tokio = { version = "1", features = ["fs", "macros", "net", "process", "rt", "sync", "time"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "socks", "stream"] }
 futures-util = "0.3"
-sha2 = "0.10"
+sha2 = "0.11"
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
 url = "2.5"
 uuid = { version = "1", features = ["v4"] }

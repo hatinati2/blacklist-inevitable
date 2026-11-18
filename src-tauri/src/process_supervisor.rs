@@ -94,7 +94,7 @@ impl ProcessSupervisor {
         for sender in senders {
             sender.send_replace(true);
         }
-        self.inner.idle.notify_waiters();
+        self.inner.idle.notify_one();
         true
     }
 
@@ -154,7 +154,7 @@ impl Drop for OperationLease {
         };
 
         if became_idle {
-            self.inner.idle.notify_waiters();
+            self.inner.idle.notify_one();
         }
     }
 }

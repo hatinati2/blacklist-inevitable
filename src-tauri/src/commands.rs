@@ -52,9 +52,9 @@ pub fn get_app_status(app: AppHandle) -> AppStatus {
     AppStatus {
         app_name: "blacklist-inevitable",
         version: env!("CARGO_PKG_VERSION"),
-        development_stage: "profile management foundation",
+        development_stage: "sing-box preflight implementation",
         connection_implemented: false,
-        preflight_testing_implemented: false,
+        preflight_testing_implemented: true,
         profile_management_implemented: true,
         endpoint_tcp_test_implemented: true,
         sing_box_installed: crate::engine::sing_box::is_installed(&app),

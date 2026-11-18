@@ -665,7 +665,7 @@ pub async fn install(app: &AppHandle) -> Result<String, String> {
     }
 
     let version = match read_engine_version(&temporary_binary).await {
-        Ok(version) if version.contains(SING_BOX_VERSION) => version,
+        Ok(version) if matches_expected_engine_version(&version) => version,
         Ok(_) => {
             let _ = fs::remove_file(&temporary_binary);
             return Err("The downloaded executable reports an unexpected sing-box version.".to_string());
@@ -1106,4 +1106,19 @@ async fn cleanup_probe_dir(path: &Path) -> Result<(), String> {
             .map_err(|_| "Temporary preflight files could not be removed; connection startup must remain blocked.".to_string())?;
     }
     Ok(())
+}
+
+
+#[cfg(test)]
+mod runtime_guard_tests {
+    use super::*;
+
+    #[test]
+    fn installed_version_check_requires_an_exact_version_token() {
+        assert!(matches_expected_engine_version("sing-box version 1.14.4"));
+        assert!(matches_expected_engine_version("sing-box version v1.14.4"));
+        assert!(!matches_expected_engine_version("sing-box version 1.14.40"));
+        assert!(!matches_expected_engine_version("sing-box version 1.14.3"));
+        assert!(!matches_expected_engine_version("sing-box version 1.14.4-beta"));
+    }
 }

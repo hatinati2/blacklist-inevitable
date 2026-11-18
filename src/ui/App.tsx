@@ -141,6 +141,9 @@ export default function App() {
       setEndpointResults((current) => current?.filter((result) => result.profileId !== profileId) ?? null);
       setMessage("Profile removed.");
     } catch (error) {
+      // Credential deletion can fail after the profile metadata has already
+      // been removed. Always refresh so the UI reflects the durable profile index.
+      await refreshProfiles();
       setMessage(typeof error === "string" ? error : "Could not remove this profile.");
     } finally {
       setBusy(false);

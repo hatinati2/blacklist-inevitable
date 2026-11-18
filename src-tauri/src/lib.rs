@@ -1,3 +1,5 @@
+use tauri::Manager;
+
 mod commands;
 mod engine;
 mod process_supervisor;

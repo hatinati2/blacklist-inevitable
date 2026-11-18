@@ -22,6 +22,7 @@ pub struct AppStatus {
     preflight_testing_implemented: bool,
     profile_management_implemented: bool,
     endpoint_tcp_test_implemented: bool,
+    sing_box_installed: bool,
     engines: Vec<EngineDescriptor>,
 }
 
@@ -47,7 +48,7 @@ pub struct EndpointTestResult {
 }
 
 #[tauri::command]
-pub fn get_app_status() -> AppStatus {
+pub fn get_app_status(app: AppHandle) -> AppStatus {
     AppStatus {
         app_name: "blacklist-inevitable",
         version: env!("CARGO_PKG_VERSION"),
@@ -56,6 +57,7 @@ pub fn get_app_status() -> AppStatus {
         preflight_testing_implemented: false,
         profile_management_implemented: true,
         endpoint_tcp_test_implemented: true,
+        sing_box_installed: crate::engine::sing_box::is_installed(&app),
         engines: ENGINE_TARGETS.to_vec(),
     }
 }
@@ -178,5 +180,44 @@ async fn test_one_endpoint(profile: ProfileSummary) -> EndpointTestResult {
             latency_ms: None,
             detail: "TCP connection timed out after 5 seconds.".to_string(),
         },
+    }
+}
+
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigValidationResult {
+    profile_id: String,
+    valid: bool,
+    detail: String,
+}
+
+#[tauri::command]
+pub async fn install_sing_box_engine(app: AppHandle) -> Result<String, String> {
+    crate::engine::sing_box::install(&app).await
+}
+
+#[tauri::command]
+pub async fn validate_profile_config(
+    app: AppHandle,
+    profile_id: String,
+) -> Result<ConfigValidationResult, String> {
+    let profiles = profile_store::list_profiles(&app)?;
+    let profile = profiles
+        .into_iter()
+        .find(|profile| profile.id == profile_id)
+        .ok_or_else(|| "Profile not found.".to_string())?;
+    let credentials = profile_store::get_credentials(&profile.id)?;
+    match crate::engine::sing_box::validate_profile_config(&app, &profile, &credentials).await {
+        Ok(()) => Ok(ConfigValidationResult {
+            profile_id: profile.id,
+            valid: true,
+            detail: "sing-box accepted this generated configuration.".to_string(),
+        }),
+        Err(detail) => Ok(ConfigValidationResult {
+            profile_id: profile.id,
+            valid: false,
+            detail,
+        }),
     }
 }

@@ -15,6 +15,7 @@ type AppStatus = {
   preflightTestingImplemented: boolean;
   profileManagementImplemented: boolean;
   endpointTcpTestImplemented: boolean;
+  singBoxInstalled: boolean;
   engines: EngineTarget[];
 };
 
@@ -49,6 +50,8 @@ export default function App() {
   const [message, setMessage] = useState("Checking desktop runtime…");
   const [busy, setBusy] = useState(false);
   const [previewMode, setPreviewMode] = useState(false);
+  const [installingEngine, setInstallingEngine] = useState(false);
+  const [configResults, setConfigResults] = useState<Record<string, { valid: boolean; detail: string }>>({});
 
   const refreshStatus = useCallback(async () => {
     try {
@@ -114,6 +117,42 @@ export default function App() {
       setMessage("Profile removed.");
     } catch (error) {
       setMessage(typeof error === "string" ? error : "Could not remove this profile.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const installEngine = async () => {
+    setInstallingEngine(true);
+    try {
+      const version = await invoke<string>("install_sing_box_engine");
+      setMessage(`Installed ${version} after SHA-256 verification.`);
+      await refreshStatus();
+    } catch (error) {
+      setMessage(typeof error === "string" ? error : "Could not install sing-box.");
+    } finally {
+      setInstallingEngine(false);
+    }
+  };
+
+  const validateConfig = async (profileId: string) => {
+    setBusy(true);
+    try {
+      const result = await invoke<{ profileId: string; valid: boolean; detail: string }>(
+        "validate_profile_config",
+        { profileId },
+      );
+      setConfigResults((current) => ({
+        ...current,
+        [profileId]: { valid: result.valid, detail: result.detail },
+      }));
+      setMessage(result.valid ? "Engine configuration is valid." : "Engine configuration validation failed.");
+    } catch (error) {
+      setConfigResults((current) => ({
+        ...current,
+        [profileId]: { valid: false, detail: typeof error === "string" ? error : "Validation failed." },
+      }));
+      setMessage(typeof error === "string" ? error : "Could not validate the configuration.");
     } finally {
       setBusy(false);
     }
@@ -220,6 +259,14 @@ export default function App() {
           <button className="secondary-button" onClick={() => void testEndpoints()} disabled={previewMode || busy || profiles.length === 0}>
             {busy ? "Working…" : "Test all TCP endpoints"}
           </button>
+          {!previewMode && !status?.singBoxInstalled && (
+            <button className="primary-button engine-install-button" onClick={() => void installEngine()} disabled={installingEngine || busy}>
+              {installingEngine ? "Downloading and verifying…" : "Install sing-box engine"}
+            </button>
+          )}
+          {!previewMode && status?.singBoxInstalled && (
+            <p className="engine-installed-note">sing-box { "1.14.4" } is installed. Native config validation is available per profile.</p>
+          )}
         </article>
       </section>
 
@@ -253,6 +300,11 @@ export default function App() {
                   </div>
                 </div>
                 <div className="profile-status">
+                  {configResults[profile.id] && (
+                    <span className={configResults[profile.id].valid ? "result-pill success" : "result-pill failure"}>
+                      {configResults[profile.id].valid ? "Config valid" : "Config invalid"}
+                    </span>
+                  )}
                   {result ? (
                     result.supported ? (
                       <span className={result.reachable ? "result-pill success" : "result-pill failure"}>
@@ -264,11 +316,15 @@ export default function App() {
                   ) : (
                     <span className="result-pill neutral">Not tested</span>
                   )}
+                  <button className="remove-button" onClick={() => void validateConfig(profile.id)} disabled={busy || previewMode || !status?.singBoxInstalled}>
+                    Validate config
+                  </button>
                   <button className="remove-button" onClick={() => void removeProfile(profile.id)} disabled={busy || previewMode}>
                     Remove
                   </button>
                 </div>
                 {result && <p className="profile-detail">{result.detail}</p>}
+                {configResults[profile.id] && <p className="profile-detail">{configResults[profile.id].detail}</p>}
               </article>
             );
           })
@@ -280,9 +336,9 @@ export default function App() {
         <div>
           <h3>TCP reachability is not Real Delay</h3>
           <p>
-            The required checks are separate: native engine configuration validation, then a real
-            HTTP(S) request through the selected node to measure delay (like Hiddify and v2rayNG).
-            This screen currently performs TCP reachability only. No device traffic is routed.
+            The sing-box native config checker validates a generated per-node config. Real Delay
+            still requires a separate HTTP(S) request through the selected node and is not implemented
+            yet. TCP reachability remains a separate diagnostic. No device traffic is routed.
           </p>
         </div>
       </section>

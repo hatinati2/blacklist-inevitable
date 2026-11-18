@@ -104,3 +104,6 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   .hint-text { max-width: 52%; }
   .section-heading { align-items: flex-end; gap: 12px; }
 }
+
+.engine-install-button { width: 100%; margin-top: 10px; }
+.engine-installed-note { margin: 10px 0 0; color: #8bd7b9; font-size: 10px; line-height: 1.5; }

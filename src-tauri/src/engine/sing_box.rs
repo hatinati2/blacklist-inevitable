@@ -295,3 +295,251 @@ mod tests {
         assert!(build_probe_config(&profile, &credentials, 10080).is_err());
     }
 }
+
+
+use std::fs::{self, File};
+use std::io::{Cursor, Read, Write};
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::time::Duration;
+
+use sha2::{Digest, Sha256};
+use tauri::{AppHandle, Manager};
+use tokio::process::Command;
+use tokio::time::timeout;
+use uuid::Uuid;
+use zip::ZipArchive;
+
+pub const SING_BOX_VERSION: &str = "1.14.4";
+const WINDOWS_AMD64_ARCHIVE_URL: &str =
+    "https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-windows-amd64.zip";
+const WINDOWS_AMD64_ARCHIVE_SHA256: &str =
+    "99185d75d314a07dbba4a130c8ad986cbeb629a07927975636b341ca61f991df";
+const CONFIG_CHECK_TIMEOUT: Duration = Duration::from_secs(15);
+
+pub fn installed_binary_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let root = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| "Could not resolve the application data directory.".to_string())?;
+    Ok(root
+        .join("engines")
+        .join(format!("sing-box-{SING_BOX_VERSION}"))
+        .join("sing-box.exe"))
+}
+
+pub fn is_installed(app: &AppHandle) -> bool {
+    installed_binary_path(app)
+        .map(|path| path.is_file())
+        .unwrap_or(false)
+}
+
+pub async fn install(app: &AppHandle) -> Result<String, String> {
+    let binary_path = installed_binary_path(app)?;
+    if binary_path.is_file() {
+        if let Ok(version) = read_engine_version(&binary_path).await {
+            if version.contains(SING_BOX_VERSION) {
+                return Ok(version);
+            }
+        }
+    }
+
+    let directory = binary_path
+        .parent()
+        .ok_or_else(|| "Could not resolve the engine installation directory.".to_string())?;
+    fs::create_dir_all(directory)
+        .map_err(|_| "Could not create the engine installation directory.".to_string())?;
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(180))
+        .build()
+        .map_err(|_| "Could not initialize the secure download client.".to_string())?;
+    let response = client
+        .get(WINDOWS_AMD64_ARCHIVE_URL)
+        .send()
+        .await
+        .map_err(|_| "Could not download the official sing-box release.".to_string())?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "The sing-box download server returned HTTP {}.",
+            response.status().as_u16()
+        ));
+    }
+
+    let archive_bytes = response
+        .bytes()
+        .await
+        .map_err(|_| "The sing-box archive download was incomplete.".to_string())?;
+    let actual_hash = Sha256::digest(&archive_bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    if actual_hash != WINDOWS_AMD64_ARCHIVE_SHA256 {
+        return Err("The downloaded sing-box archive failed its SHA-256 verification.".to_string());
+    }
+
+    let temporary_binary = directory.join(format!("sing-box-{}.partial", Uuid::new_v4()));
+    let extract_result = extract_verified_executable(&archive_bytes, &temporary_binary);
+    if let Err(error) = extract_result {
+        let _ = fs::remove_file(&temporary_binary);
+        return Err(error);
+    }
+
+    let version = match read_engine_version(&temporary_binary).await {
+        Ok(version) if version.contains(SING_BOX_VERSION) => version,
+        Ok(_) => {
+            let _ = fs::remove_file(&temporary_binary);
+            return Err("The downloaded executable reports an unexpected sing-box version.".to_string());
+        }
+        Err(error) => {
+            let _ = fs::remove_file(&temporary_binary);
+            return Err(error);
+        }
+    };
+
+    if binary_path.exists() {
+        fs::remove_file(&binary_path)
+            .map_err(|_| "Could not replace the previously installed sing-box engine.".to_string())?;
+    }
+    fs::rename(&temporary_binary, &binary_path)
+        .map_err(|_| "Could not install the verified sing-box executable.".to_string())?;
+
+    let notice_path = directory.join("THIRD_PARTY_NOTICE.txt");
+    let notice = format!(
+        "sing-box {SING_BOX_VERSION}\n         Upstream: https://github.com/SagerNet/sing-box\n         Release: https://github.com/SagerNet/sing-box/releases/tag/v{SING_BOX_VERSION}\n         License: GNU GPL version 3 or later (GPL-3.0-or-later).\n         This unmodified executable was downloaded from the upstream release and verified\n         against the pinned SHA-256 of its Windows AMD64 archive.\n"
+    );
+    fs::write(notice_path, notice)
+        .map_err(|_| "The engine was installed but its third-party notice could not be saved.".to_string())?;
+
+    Ok(version)
+}
+
+fn extract_verified_executable(archive_bytes: &[u8], destination: &Path) -> Result<(), String> {
+    let mut archive = ZipArchive::new(Cursor::new(archive_bytes))
+        .map_err(|_| "The verified sing-box release archive is not a valid ZIP file.".to_string())?;
+    let mut found = false;
+
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|_| "Could not read an entry in the sing-box release archive.".to_string())?;
+        if !entry.is_file()
+            || Path::new(entry.name())
+                .file_name()
+                .and_then(|name| name.to_str())
+                != Some("sing-box.exe")
+        {
+            continue;
+        }
+        if found {
+            return Err("The sing-box archive contains more than one executable.".to_string());
+        }
+
+        let mut output = File::create(destination)
+            .map_err(|_| "Could not create the temporary sing-box executable.".to_string())?;
+        std::io::copy(&mut entry, &mut output)
+            .map_err(|_| "Could not extract the sing-box executable.".to_string())?;
+        output
+            .flush()
+            .map_err(|_| "Could not flush the extracted sing-box executable.".to_string())?;
+        found = true;
+    }
+
+    if !found {
+        return Err("The sing-box release archive does not contain sing-box.exe.".to_string());
+    }
+
+    Ok(())
+}
+
+async fn read_engine_version(binary: &Path) -> Result<String, String> {
+    let output = timeout(
+        Duration::from_secs(10),
+        Command::new(binary)
+            .arg("version")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| "The sing-box version check timed out.".to_string())?
+    .map_err(|_| "Could not execute the sing-box engine.".to_string())?;
+
+    if !output.status.success() {
+        return Err("The sing-box executable did not start successfully.".to_string());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+pub async fn validate_profile_config(
+    app: &AppHandle,
+    profile: &ProfileSummary,
+    credentials: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    let binary = installed_binary_path(app)?;
+    if !binary.is_file() {
+        return Err("The sing-box engine is not installed.".to_string());
+    }
+
+    let config = build_probe_config(profile, credentials, 17381)?;
+    let cache = app
+        .path()
+        .app_cache_dir()
+        .map_err(|_| "Could not resolve the temporary test directory.".to_string())?
+        .join("preflight");
+    fs::create_dir_all(&cache)
+        .map_err(|_| "Could not create the temporary test directory.".to_string())?;
+    let config_path = cache.join(format!("config-{}.json", Uuid::new_v4()));
+    let config_bytes = serde_json::to_vec(&config)
+        .map_err(|_| "Could not encode the temporary engine configuration.".to_string())?;
+    tokio::fs::write(&config_path, config_bytes)
+        .await
+        .map_err(|_| "Could not write the temporary engine configuration.".to_string())?;
+
+    let command_result = timeout(
+        CONFIG_CHECK_TIMEOUT,
+        Command::new(&binary)
+            .arg("check")
+            .arg("-c")
+            .arg(&config_path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await;
+
+    let cleanup_result = tokio::fs::remove_file(&config_path).await;
+    if cleanup_result.is_err() {
+        return Err(
+            "The temporary configuration could not be removed; preflight cleanup needs attention."
+                .to_string(),
+        );
+    }
+
+    match command_result {
+        Err(_) => Err("sing-box config validation timed out.".to_string()),
+        Ok(Err(_)) => Err("Could not start sing-box config validation.".to_string()),
+        Ok(Ok(output)) if output.status.success() => Ok(()),
+        Ok(Ok(output)) => {
+            let diagnostic = String::from_utf8_lossy(&output.stderr);
+            Err(redact_diagnostic(&diagnostic, credentials))
+        }
+    }
+}
+
+fn redact_diagnostic(
+    diagnostic: &str,
+    credentials: &BTreeMap<String, String>,
+) -> String {
+    let mut sanitized = diagnostic.trim().to_string();
+    for secret in credentials.values().filter(|secret| secret.len() >= 4) {
+        sanitized = sanitized.replace(secret, "[redacted]");
+    }
+    if sanitized.is_empty() {
+        "The sing-box engine rejected this configuration.".to_string()
+    } else {
+        sanitized.chars().take(1200).collect()
+    }
+}

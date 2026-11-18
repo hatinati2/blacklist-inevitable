@@ -35,7 +35,7 @@ Windows is the first platform. Android work starts only after the Windows releas
 - [x] Add an application-scoped supervisor for Real Delay and config-validation operations; defer graceful app exit until registered operations finish cleanup.
 - [x] Cancel active Real Delay workers on graceful app shutdown, stop and await their sing-box child process, and reject new engine work once shutdown begins.
 - [x] Add an in-memory cleanup-health gate that blocks subsequent engine operations in the current app session when cleanup is uncertain.
-- [x] Add Windows Job Object ownership with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`; assign each engine child immediately after spawn so Windows terminates assigned processes when the app's final job handle closes.
+- [x] Add Windows Job Object ownership with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`; attach the application during Tauri setup so engine children inherit containment at process creation, then verify membership while each child's initial thread is suspended.
 - [x] Add a Windows unit test confirming that closing the final Job Object handle terminates an assigned child.
 - [x] Surface an unhealthy runtime-cleanup state in the UI and disable engine actions while cleanup is uncertain.
 - [x] Prevent engine code from executing before Windows Job Object verification by creating each engine child suspended, verifying membership, then resuming its sole initial thread.

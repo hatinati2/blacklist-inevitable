@@ -37,6 +37,7 @@ Windows is the first platform. Android work starts only after the Windows releas
 - [x] Add an in-memory cleanup-health gate that blocks subsequent engine operations in the current app session when cleanup is uncertain.
 - [x] Add Windows Job Object ownership with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`; assign each engine child immediately after spawn so Windows terminates assigned processes when the app's final job handle closes.
 - [x] Add a Windows unit test confirming that closing the final Job Object handle terminates an assigned child.
+- [x] Surface an unhealthy runtime-cleanup state in the UI and disable engine actions while cleanup is uncertain.
 - [ ] Close or recover the narrow process-creation-to-job-assignment crash window during startup.
 - [ ] Verify file cleanup, child-process exit, and listener release under success, failure, timeout, cancellation, graceful shutdown, and app-level forced termination on Windows.
 - [ ] Run protocol-aware preflight tests against controlled VLESS, VMess, Trojan, Shadowsocks, Hysteria2, and TUIC test servers.

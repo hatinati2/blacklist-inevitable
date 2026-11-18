@@ -16,6 +16,7 @@ type AppStatus = {
   profileManagementImplemented: boolean;
   endpointTcpTestImplemented: boolean;
   singBoxInstalled: boolean;
+  runtimeCleanupHealthy: boolean;
   engines: EngineTarget[];
 };
 
@@ -77,6 +78,15 @@ export default function App() {
       setStatus(null);
       setMessage("Browser preview mode — run the desktop app to access local profiles.");
       setPreviewMode(true);
+    }
+  }, []);
+
+  const refreshRuntimeStatus = useCallback(async () => {
+    try {
+      const nextStatus = await invoke<AppStatus>("get_app_status");
+      setStatus(nextStatus);
+    } catch {
+      // Preserve the last known runtime status if the lightweight refresh fails.
     }
   }, []);
 
@@ -155,10 +165,10 @@ export default function App() {
     try {
       const version = await invoke<string>("install_sing_box_engine");
       setMessage(`Installed ${version} after SHA-256 verification.`);
-      await refreshStatus();
     } catch (error) {
       setMessage(typeof error === "string" ? error : "Could not install sing-box.");
     } finally {
+      await refreshRuntimeStatus();
       setInstallingEngine(false);
     }
   };
@@ -182,6 +192,7 @@ export default function App() {
       }));
       setMessage(typeof error === "string" ? error : "Could not validate the configuration.");
     } finally {
+      await refreshRuntimeStatus();
       setBusy(false);
     }
   };
@@ -198,6 +209,7 @@ export default function App() {
     } catch (error) {
       setMessage(typeof error === "string" ? error : "Real Delay testing could not be completed.");
     } finally {
+      await refreshRuntimeStatus();
       setBusy(false);
     }
   };
@@ -247,6 +259,17 @@ export default function App() {
           <div className="orbit-core">BI</div>
         </div>
       </section>
+
+      {status && !status.runtimeCleanupHealthy && (
+        <section className="runtime-warning" role="alert">
+          <strong>Engine operations are locked for safety</strong>
+          <p>
+            The app cannot confirm that engine-process containment and temporary-file cleanup are safe.
+            Installing sing-box, validating configurations, and Real Delay are disabled for this session.
+            This does not mean sing-box is missing; do not try to reinstall it as a workaround.
+          </p>
+        </section>
+      )}
 
       <section className="workspace-grid">
         <article className="panel import-panel">
@@ -303,10 +326,10 @@ export default function App() {
           <button className="secondary-button" onClick={() => void testEndpoints()} disabled={previewMode || busy || profiles.length === 0}>
             {busy ? "Working…" : "TCP reachability only"}
           </button>
-          <button className="primary-button engine-install-button" onClick={() => void testRealDelay()} disabled={previewMode || busy || profiles.length === 0 || !status?.singBoxInstalled}>
+          <button className="primary-button engine-install-button" onClick={() => void testRealDelay()} disabled={previewMode || busy || profiles.length === 0 || !status?.singBoxInstalled || !status?.runtimeCleanupHealthy}>
             {busy ? "Testing…" : "Test config + Real Delay"}
           </button>
-          {!previewMode && !status?.singBoxInstalled && (
+          {!previewMode && status?.runtimeCleanupHealthy && !status?.singBoxInstalled && (
             <button className="primary-button engine-install-button" onClick={() => void installEngine()} disabled={installingEngine || busy}>
               {installingEngine ? "Downloading and verifying…" : "Install sing-box engine"}
             </button>
@@ -371,7 +394,7 @@ export default function App() {
                   {!result && !delayResult && (
                     <span className="result-pill neutral">Not tested</span>
                   )}
-                  <button className="remove-button" onClick={() => void validateConfig(profile.id)} disabled={busy || previewMode || !status?.singBoxInstalled}>
+                  <button className="remove-button" onClick={() => void validateConfig(profile.id)} disabled={busy || previewMode || !status?.singBoxInstalled || !status?.runtimeCleanupHealthy}>
                     Validate config
                   </button>
                   <button className="remove-button" onClick={() => void removeProfile(profile.id)} disabled={busy || previewMode}>

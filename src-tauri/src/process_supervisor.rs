@@ -212,4 +212,49 @@ mod tests {
         assert!(!supervisor.request_shutdown());
         assert!(supervisor.begin_operation().is_err());
     }
+
+    #[tokio::test]
+    async fn shutdown_waits_until_a_cancelled_child_is_killed_and_waited() {
+        use std::process::Stdio;
+        use tokio::process::Command;
+        use tokio::time::{sleep, timeout, Duration};
+
+        let supervisor = ProcessSupervisor::default();
+        let mut operation = supervisor.begin_operation().expect("operation lease");
+
+        let worker = tokio::spawn(async move {
+            #[cfg(windows)]
+            let mut child = Command::new("cmd")
+                .args(["/C", "ping", "-n", "30", "127.0.0.1"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .kill_on_drop(true)
+                .spawn()
+                .expect("start test child");
+
+            #[cfg(unix)]
+            let mut child = Command::new("sh")
+                .args(["-c", "sleep 30"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .kill_on_drop(true)
+                .spawn()
+                .expect("start test child");
+
+            tokio::select! {
+                _ = operation.cancelled() => {
+                    child.kill().await.expect("kill and wait for test child");
+                }
+                _ = child.wait() => {}
+            }
+            drop(operation);
+        });
+
+        sleep(Duration::from_millis(100)).await;
+        assert!(supervisor.request_shutdown());
+        assert!(timeout(Duration::from_secs(5), supervisor.wait_for_idle())
+            .await
+            .expect("supervisor drain timeout"));
+        worker.await.expect("worker task");
+    }
 }

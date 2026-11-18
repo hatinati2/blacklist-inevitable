@@ -39,7 +39,7 @@ Windows is the first platform. Android work starts only after the Windows releas
 - [x] Add a Windows unit test confirming that closing the final Job Object handle terminates an assigned child.
 - [x] Surface an unhealthy runtime-cleanup state in the UI and disable engine actions while cleanup is uncertain.
 - [x] Prevent engine code from executing before Windows Job Object verification by creating each engine child suspended, verifying membership, then resuming its sole initial thread.
-- [x] Attach the desktop application itself to its kill-on-close Job Object before creating child processes so children inherit containment at process creation; fail closed if the app cannot join.
+- [x] Attach the desktop application itself to its kill-on-close Job Object during Tauri setup, after initial UI helpers are initialized but before engine commands can run, so later children inherit containment at process creation; fail closed if the app cannot join.
 - [x] Add a Windows integration test for inherited child membership and per-instance Job Object isolation, closing the pre-assignment orphan window.
 - [ ] Verify file cleanup, child-process exit, and listener release under success, failure, timeout, cancellation, graceful shutdown, and app-level forced termination on Windows.
 - [ ] Run protocol-aware preflight tests against controlled VLESS, VMess, Trojan, Shadowsocks, Hysteria2, and TUIC test servers.

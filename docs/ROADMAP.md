@@ -24,9 +24,14 @@ The scope is Windows first. Android work starts only after the Windows build has
 
 - [ ] Pin a sing-box release after platform, feature, and license review.
 - [ ] Add verified engine installation/update flow; never execute an unverified binary.
-- [ ] Generate one outbound config per imported node and validate it with the engine.
+- [ ] Generate one isolated outbound config per imported node.
+- [ ] Run the native `sing-box check` command and report valid/invalid plus actionable errors.
 - [ ] Add a process supervisor with bounded logs and deterministic shutdown.
-- [ ] Add protocol-aware isolated URL tests without TUN or system-proxy changes.
+- [ ] Add **Real Delay**: HTTP(S) request through the selected node's temporary local proxy.
+- [ ] Measure request round-trip time, not TCP connect time; keep TCP reachability as a separately labelled diagnostic.
+- [ ] Add configurable test URL, timeout, bounded concurrency, and a fallback URL.
+- [ ] Prove preflight never enables TUN or mutates Windows system proxy settings.
+- [ ] Verify cleanup on success, failure, timeout, cancellation, and application shutdown.
 
 ## M3 — Multi-engine adapters
 

@@ -33,13 +33,14 @@ Current process supervision:
 - Tauri exit is deferred while active Real Delay operations cancel their HTTP probe, stop and wait for the sing-box child, and remove temporary probe files.
 - Config validation remains bounded by a 15-second timeout. If process termination or config-file cleanup is uncertain, the in-memory runtime health flag is set to unsafe and later engine operations are blocked for the rest of that app session.
 - Temporary config and probe-directory Drop guards make a final synchronous cleanup attempt.
-- On Windows, the supervisor owns a Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`; each engine child is assigned immediately after spawn. Closing the final job handle makes Windows terminate assigned processes even if the app exits unexpectedly.
-- If Job Object initialization or child assignment fails, engine work is blocked; an uncontained child is killed and awaited before the operation returns.
+- On Windows, the supervisor owns a Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. Engine commands are created with `CREATE_SUSPENDED`; the supervisor locates the process's sole initial thread, assigns the process to the Job Object, and calls `ResumeThread` only after assignment succeeds.
+- If thread discovery, Job Object initialization, process assignment, or thread resume fails, engine work is blocked; the child is terminated and awaited before the operation returns. The child cannot run its own code before Job Object membership is established.
+- If the app exits abruptly in the interval after creating the suspended child but before assignment, a non-running orphaned suspended process can remain. It cannot execute engine code, but startup recovery must identify and remove it without touching unrelated sing-box processes; this is tracked in issue #24.
 - If runtime cleanup becomes uncertain, the UI displays an explicit safety warning and disables engine installation, config validation, and Real Delay instead of presenting the engine as merely uninstalled.
 
 Remaining requirements:
 
-- Close or recover the narrow crash window between process creation and Job Object assignment.
+- Recover orphaned suspended engine children after an abrupt app exit before Job Object assignment, without terminating unrelated processes (issue #24).
 - Verify child termination, listener release, and file cleanup on success, failure, timeout, user cancellation, graceful app shutdown, and app-level forced termination on Windows.
 - Keep startup recovery fail-closed so a stale engine process can never be mistaken for a clean normal-connection runtime.
 - Add explicit access-control hardening for credential-bearing temporary files where needed.
@@ -51,7 +52,7 @@ Before normal connection functionality is implemented:
 
 - Extend the current preflight supervisor into a connection-runtime owner for all engine process handles.
 - Child processes must not be detached; shutdown and cancellation must await process exit.
-- Windows Job Object ownership covers children after assignment; startup recovery and app-level crash/forced-termination validation must cover the pre-assignment edge case.
+- Windows engine children start suspended and are assigned to the app-owned Job Object before their initial thread is resumed. Startup recovery and app-level crash/forced-termination validation must cover the possible non-running orphan created before assignment.
 - Connect, Disconnect, cancellation, crash recovery, and app shutdown must be serialized through one Rust-owned state machine.
 - Uncertain cleanup must fail closed and block the next normal connection, including after an application restart.
 

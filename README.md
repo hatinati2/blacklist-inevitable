@@ -14,7 +14,7 @@ A Windows-first desktop app for importing proxy profiles and testing them before
 - Supervise Real Delay and explicit config-validation operations; on graceful app exit, cancel active probes, stop and wait for their sing-box child process, and finish temporary-file cleanup before exiting.
 
 Real Delay is currently implemented with fixed probe endpoints and timeouts. Xray-core and Mihomo are target engines only; their adapters are not implemented yet.
-The runtime cleanup-health gate is currently in-memory. Recovery after a hard crash or forced termination (including Windows Job Object ownership) is not implemented yet.
+On Windows, engine child processes are assigned immediately after spawn to an app-owned Job Object configured with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. Closing the final job handle, including when the app process exits unexpectedly, makes Windows terminate assigned children. Assignment happens just after process creation, so a narrow pre-assignment crash window remains; startup recovery for that edge case and app-level forced-termination tests are still release gates. The runtime cleanup-health gate remains in-memory.
 
 ## Not implemented
 

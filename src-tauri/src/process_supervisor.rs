@@ -333,7 +333,8 @@ mod tests {
         use tokio::process::Command;
         use tokio::time::{timeout, Duration};
 
-        let job = WindowsJobObject::new().expect("create Windows job object");
+        let supervisor = ProcessSupervisor::default();
+        let operation = supervisor.begin_operation().expect("register test operation");
         let mut child = Command::new("powershell.exe")
             .args(["-NoProfile", "-NonInteractive", "-Command", "Start-Sleep -Seconds 30"])
             .stdin(Stdio::null())
@@ -342,11 +343,14 @@ mod tests {
             .kill_on_drop(true)
             .spawn()
             .expect("start test child");
-        let pid = child.id().expect("test child PID");
-        job.assign_pid(pid).expect("assign child to job object");
+        supervisor
+            .assign_child(&mut child)
+            .await
+            .expect("assign child through process supervisor");
+        drop(operation);
 
         // Simulate the app losing its last job handle during abrupt termination.
-        drop(job);
+        drop(supervisor);
         let status = timeout(Duration::from_secs(5), child.wait())
             .await
             .expect("job close should terminate the child")

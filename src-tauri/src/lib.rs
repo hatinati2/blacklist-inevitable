@@ -8,7 +8,7 @@ mod profiles;
 
 pub fn run() {
     let app = tauri::Builder::default()
-        .manage(process_supervisor::ProcessSupervisor::default())
+        .manage(process_supervisor::ProcessSupervisor::for_app())
         .invoke_handler(tauri::generate_handler![
             commands::get_app_status,
             commands::get_profiles,

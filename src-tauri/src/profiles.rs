@@ -148,12 +148,15 @@ fn parse_share_uri(input: &str) -> Result<ParsedProfile, String> {
         }
         "shadowsocks" => {
             let user_info = decode_component(url.username());
-            let (method, password) = if let Some(decoded) = try_decode_base64(&user_info) {
+            let (method, password) = if let Some(password) = url.password() {
+                // SIP002 user-info is sometimes provided in its plain method:password
+                // form. Prefer the explicit URL password before trying Base64 because
+                // common cipher names can also be valid Base64URL characters.
+                (user_info, decode_component(password))
+            } else if let Some(decoded) = try_decode_base64(&user_info) {
                 let decoded = String::from_utf8(decoded)
                     .map_err(|_| "Invalid Shadowsocks credentials.".to_string())?;
                 split_method_password(&decoded)?
-            } else if let Some(password) = url.password() {
-                (user_info, decode_component(password))
             } else {
                 split_method_password(&user_info)?
             };
@@ -462,6 +465,17 @@ mod tests {
         assert_eq!(parsed.profile.protocol, "shadowsocks");
         assert_eq!(parsed.profile.options.get("method").unwrap(), "aes-256-gcm");
         assert_eq!(parsed.credentials.get("password").unwrap(), "password");
+    }
+
+    #[test]
+    fn parses_plain_shadowsocks_method_and_password() {
+        let parsed = parse_share_uri(
+            "ss://aes-128-gcm:plain-password@ss.example.org:8388#Plain%20SS",
+        )
+        .expect("valid plain Shadowsocks URI");
+
+        assert_eq!(parsed.profile.options.get("method").unwrap(), "aes-128-gcm");
+        assert_eq!(parsed.credentials.get("password").unwrap(), "plain-password");
     }
 
     #[test]

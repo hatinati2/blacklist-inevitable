@@ -203,8 +203,9 @@ export default function App() {
             <span className="count-tag">TCP only</span>
           </div>
           <p className="panel-copy">
-            Checks whether supported TCP endpoints accept a connection. It does not authenticate
-            with the proxy, measure tunneled download speed, or enable VPN/TUN/system proxy.
+            TCP reachability only — not Real Delay and not configuration validation. The required
+            engine config check and real HTTP(S) delay test through each proxy will be implemented
+            with the first protocol-aware engine adapter. No VPN/TUN/system proxy is enabled.
           </p>
           <div className="probe-summary">
             <div>
@@ -277,11 +278,11 @@ export default function App() {
       <section className="notice">
         <div className="notice-icon">i</div>
         <div>
-          <h3>Endpoint check is not a VPN test</h3>
+          <h3>TCP reachability is not Real Delay</h3>
           <p>
-            A reachable TCP port does not prove that credentials, TLS, transport settings, or a proxy
-            tunnel work. Hysteria2 and TUIC need a UDP-aware probe and are currently skipped.
-            The connection engine is not active and no device traffic is routed.
+            The required checks are separate: native engine configuration validation, then a real
+            HTTP(S) request through the selected node to measure delay (like Hiddify and v2rayNG).
+            This screen currently performs TCP reachability only. No device traffic is routed.
           </p>
         </div>
       </section>
@@ -289,7 +290,7 @@ export default function App() {
       <section className="section-heading engine-heading">
         <div>
           <p className="eyebrow">ENGINE STRATEGY</p>
-          <h2>Protocol-aware checks come next</h2>
+          <h2>Config validation and Real Delay come next</h2>
         </div>
       </section>
       <section className="engine-grid">

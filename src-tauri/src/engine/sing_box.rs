@@ -582,7 +582,7 @@ impl EngineCommandError {
 /// then collects output under a hard timeout. The job is the crash-time
 /// containment backstop; kill_on_drop remains the per-command fallback.
 async fn run_engine_command_output(
-    mut command: Command,
+    command: &mut Command,
     supervisor: &ProcessSupervisor,
     command_timeout: Duration,
 ) -> Result<std::process::Output, EngineCommandError> {

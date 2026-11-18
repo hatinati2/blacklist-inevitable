@@ -127,7 +127,7 @@ impl ProcessSupervisor {
             .unwrap_or(false)
     }
 
-    fn mark_cleanup_unhealthy(&self) {
+    pub(crate) fn mark_cleanup_unhealthy(&self) {
         if let Ok(mut state) = self.inner.state.lock() {
             state.cleanup_healthy = false;
         }

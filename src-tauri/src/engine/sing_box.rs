@@ -555,6 +555,58 @@ use tokio::time::{sleep, timeout};
 use uuid::Uuid;
 use zip::ZipArchive;
 
+#[derive(Debug)]
+enum EngineCommandError {
+    Spawn,
+    Containment(String),
+    TimedOut,
+    Wait,
+}
+
+impl EngineCommandError {
+    fn message(self, label: &str) -> String {
+        match self {
+            Self::Spawn => format!("Could not start {label}."),
+            Self::Containment(error) => error,
+            Self::TimedOut => format!(
+                "{label} timed out; child termination could not be confirmed."
+            ),
+            Self::Wait => format!(
+                "Could not collect {label} output; child termination could not be confirmed."
+            ),
+        }
+    }
+}
+
+/// Starts an engine command, assigns it to the app-owned Windows Job Object,
+/// then collects output under a hard timeout. The job is the crash-time
+/// containment backstop; kill_on_drop remains the per-command fallback.
+async fn run_engine_command_output(
+    mut command: Command,
+    supervisor: &ProcessSupervisor,
+    command_timeout: Duration,
+) -> Result<std::process::Output, EngineCommandError> {
+    command.kill_on_drop(true);
+    let mut child = command.spawn().map_err(|_| EngineCommandError::Spawn)?;
+    supervisor
+        .assign_child(&mut child)
+        .await
+        .map_err(EngineCommandError::Containment)?;
+
+    match timeout(command_timeout, child.wait_with_output()).await {
+        Ok(Ok(output)) => Ok(output),
+        Ok(Err(_)) => {
+            supervisor.mark_cleanup_unhealthy();
+            Err(EngineCommandError::Wait)
+        }
+        Err(_) => {
+            supervisor.mark_cleanup_unhealthy();
+            Err(EngineCommandError::TimedOut)
+        }
+    }
+}
+
+
 pub const SING_BOX_VERSION: &str = "1.14.4";
 const WINDOWS_AMD64_ARCHIVE_URL: &str =
     "https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-windows-amd64.zip";
@@ -741,21 +793,16 @@ async fn read_engine_version(
     binary: &Path,
     supervisor: &ProcessSupervisor,
 ) -> Result<String, String> {
-    let output = timeout(
-        Duration::from_secs(10),
+    let output = run_engine_command_output(
         Command::new(binary)
             .arg("version")
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .output(),
+            .stderr(Stdio::null()),
+        supervisor,
+        Duration::from_secs(10),
     )
     .await
-    .map_err(|_| {
-        supervisor.mark_cleanup_unhealthy();
-        "The sing-box version check timed out; child termination could not be confirmed.".to_string()
-    })?
-    .map_err(|_| "Could not execute the sing-box engine.".to_string())?;
+    .map_err(|error| error.message("The sing-box version check"))?;
 
     if !output.status.success() {
         return Err("The sing-box executable did not start successfully.".to_string());
@@ -795,16 +842,15 @@ pub async fn validate_profile_config(
         .await
         .map_err(|_| "Could not write the temporary engine configuration.".to_string())?;
 
-    let command_result = timeout(
-        CONFIG_CHECK_TIMEOUT,
+    let command_result = run_engine_command_output(
         Command::new(&binary)
             .arg("check")
             .arg("-c")
             .arg(&config_path)
             .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .output(),
+            .stderr(Stdio::piped()),
+        supervisor,
+        CONFIG_CHECK_TIMEOUT,
     )
     .await;
 
@@ -818,13 +864,9 @@ pub async fn validate_profile_config(
     }
 
     match command_result {
-        Err(_) => {
-            supervisor.mark_cleanup_unhealthy();
-            Err("sing-box config validation timed out; child termination could not be confirmed.".to_string())
-        }
-        Ok(Err(_)) => Err("Could not start sing-box config validation.".to_string()),
-        Ok(Ok(output)) if output.status.success() => Ok(()),
-        Ok(Ok(output)) => {
+        Err(error) => Err(error.message("sing-box config validation")),
+        Ok(output) if output.status.success() => Ok(()),
+        Ok(output) => {
             let diagnostic = String::from_utf8_lossy(&output.stderr);
             Err(redact_diagnostic(&diagnostic, credentials))
         }
@@ -951,22 +993,21 @@ pub async fn measure_real_delay(
         return Err("Could not write the isolated sing-box configuration.".to_string());
     }
 
-    let validation = timeout(
-        CONFIG_CHECK_TIMEOUT,
+    let validation = run_engine_command_output(
         Command::new(&binary)
             .arg("check")
             .arg("-c")
             .arg(&config_path)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .output(),
+            .stderr(Stdio::piped()),
+        supervisor,
+        CONFIG_CHECK_TIMEOUT,
     )
     .await;
 
     let validation = match validation {
-        Err(_) => {
+        Err(EngineCommandError::TimedOut) => {
             operation.mark_cleanup_unhealthy();
             cleanup_probe_dir(&run_dir).await?;
             return Ok(ProbeOutcome {
@@ -977,12 +1018,12 @@ pub async fn measure_real_delay(
                 tested_url: None,
             });
         }
-        Ok(Err(_)) => {
+        Err(error) => {
             cleanup_probe_dir(&run_dir).await?;
-            return Err("Could not start sing-box configuration validation.".to_string());
+            return Err(error.message("sing-box configuration validation"));
         }
-        Ok(Ok(output)) if output.status.success() => output,
-        Ok(Ok(output)) => {
+        Ok(output) if output.status.success() => output,
+        Ok(output) => {
             let diagnostic = String::from_utf8_lossy(&output.stderr);
             let detail = redact_diagnostic(&diagnostic, credentials);
             cleanup_probe_dir(&run_dir).await?;
@@ -1023,6 +1064,11 @@ pub async fn measure_real_delay(
             return Err("Could not start the temporary sing-box probe process.".to_string());
         }
     };
+
+    if let Err(error) = supervisor.assign_child(&mut child).await {
+        cleanup_probe_dir(&run_dir).await?;
+        return Err(error);
+    }
 
     let measurement = tokio::select! {
         _ = operation.cancelled() => {

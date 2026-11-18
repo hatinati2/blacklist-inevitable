@@ -42,7 +42,7 @@ Remaining requirements:
 
 - Keep the Windows app-process Job Object inheritance and per-instance isolation regression tests enabled (issue #24).
 - Verify child termination, listener release, and file cleanup on success, failure, timeout, user cancellation, graceful app shutdown, and app-level forced termination on Windows.
-- Keep startup recovery fail-closed so a stale engine process can never be mistaken for a clean normal-connection runtime.
+- If the application cannot join its kill-on-close Job Object during Tauri setup, keep runtime cleanup unhealthy and block every engine operation; do not fall back to an uncontained spawn.
 - Add explicit access-control hardening for credential-bearing temporary files where needed.
 - Keep preflight isolated from all normal connection and device-routing state.
 

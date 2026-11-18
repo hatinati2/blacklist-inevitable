@@ -104,7 +104,12 @@ pub fn add_profiles(app: &AppHandle, incoming: Vec<ParsedProfile>) -> Result<Vec
 
     for parsed in incoming {
         let profile_id = parsed.profile.id.clone();
-        store_credentials(&profile_id, &parsed.credentials)?;
+        if let Err(error) = store_credentials(&profile_id, &parsed.credentials) {
+            for profile in &added {
+                delete_credentials(&profile.id);
+            }
+            return Err(error);
+        }
         file.profiles.push(parsed.profile.clone());
         added.push(parsed.profile);
     }

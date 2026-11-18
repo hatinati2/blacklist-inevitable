@@ -23,7 +23,7 @@ pub fn run() {
         .expect("failed to build blacklist-inevitable");
 
     app.run(|app_handle, event| {
-        if let tauri::RunEvent::ExitRequested { api, code } = event {
+        if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
             let supervisor = app_handle
                 .state::<process_supervisor::ProcessSupervisor>()
                 .inner()

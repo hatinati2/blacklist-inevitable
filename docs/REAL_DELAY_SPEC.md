@@ -23,6 +23,7 @@ The request timeout is currently nine seconds per endpoint attempt, and the batc
 - Each probe creates a unique temporary directory and configuration.
 - Each temporary SOCKS inbound is configured to listen on `127.0.0.1` only.
 - The preflight path does not enable TUN, Wintun, packet capture, Windows system proxy, or normal device traffic routing.
+- Temporary configuration-validation files and per-probe directories have synchronous Drop guards, so cancellation of a Tauri command still attempts to remove credential-bearing JSON files.
 - The normal request path explicitly asks the child process to stop and waits up to four seconds for process exit.
 - A child-process kill-on-drop setting and temporary-directory Drop guard provide fallback cleanup if the command future is dropped.
 
@@ -54,6 +55,7 @@ The current adapter maps a tested subset of VLESS, VMess, Trojan, Shadowsocks, H
 - Confirm a direct-network response cannot be mistaken for a proxied response.
 - Verify DNS, TLS, transport, and authentication failures are diagnosed where the engine exposes enough detail.
 - Verify that success, failure, timeout, user cancellation, and app shutdown leave no child process, listener, or temporary file behind.
+- Cancel config validation while sing-box is reading the temporary JSON and verify that no credential-bearing file remains in the preflight cache.
 - Verify that TUN and system proxy settings remain unchanged before, during, and after the test batch.
 - Add configurable test endpoints and timeout controls.
 

@@ -1,8 +1,8 @@
-# Profile import and endpoint checks
+# Profile import and preflight checks
 
 ## Current share-link import support
 
-The current importer accepts one link per line:
+The importer accepts one link per line:
 
 - VLESS URI
 - VMess Base64 JSON URI
@@ -11,34 +11,36 @@ The current importer accepts one link per line:
 - Hysteria2 / hy2 URI
 - TUIC URI
 
-Subscription URLs, Clash YAML, sing-box JSON, plugin-based Shadowsocks links, and less common URI variants are not accepted yet. Only an allowlist of recognized non-secret fields is mapped into the normalized profile options. Unknown source option names are preserved separately; their values are not copied into public metadata.
+Subscription URLs, Clash YAML, sing-box JSON, plugin-based Shadowsocks links, and less common URI variants are not accepted yet. The importer maps an allowlist of recognized non-secret fields into the normalized profile model. Unknown source option names are retained separately; their values are not copied into public profile metadata.
 
-The importer rejects invalid lines independently so valid links in the same paste can still be saved. Unknown URI query keys and unrecognized VMess JSON fields are retained by key name in `unsupportedOptions`. The sing-box adapter refuses to validate or test a profile while such unmapped source options remain, rather than silently dropping them.
+Invalid lines are rejected independently so valid links in the same paste can still be saved. Unknown query keys and unrecognized VMess JSON fields are retained by key name in `unsupportedOptions`. The sing-box adapter refuses to validate or probe a profile while unmapped options remain, rather than silently dropping them.
 
 ## Credential handling
 
-Profile metadata is saved under the Tauri application data directory. Credentials (UUIDs, passwords, and similar authentication material) are stored separately using the Windows Credential Manager through the keyring crate. Raw share links are not written to the profile index or application logs.
+Profile metadata is saved under the Tauri application data directory. Credentials (UUIDs, passwords, and similar authentication material) are stored separately using Windows Credential Manager through the keyring crate. Raw share links are not written to the profile index or ordinary application logs.
 
-The current profile model deliberately keeps secrets out of the UI response. A future engine adapter will retrieve credentials from the native store only when it needs to generate a temporary engine configuration.
+The profile list response does not include credentials. The engine adapter retrieves credentials only when it needs to generate a temporary engine configuration. That temporary configuration necessarily contains the credentials required by sing-box and is removed after the probe's cleanup path.
 
-## Current TCP reachability diagnostic
+## TCP reachability diagnostic
 
-The current diagnostic opens a bounded TCP connection to the configured host and port for TCP-capable profiles. It is limited to 24 concurrent probes and a five-second timeout per endpoint. UDP-only profiles are skipped.
+The basic endpoint diagnostic opens a bounded TCP connection to the configured host and port for VLESS, VMess, Trojan, and Shadowsocks profiles. It is limited to 24 concurrent probes and a five-second timeout per endpoint. Hysteria2 and TUIC are skipped by this TCP-only diagnostic.
 
-A successful TCP connection means only that the endpoint accepted a TCP connection. It does **not** validate the generated engine configuration, TLS, proxy protocol negotiation, authentication, transport settings, or the ability to carry traffic. The UI labels this result as TCP reachability; it must never be shown as Real Delay.
+A successful TCP connection means only that the endpoint accepted a TCP connection. It does **not** validate the generated engine configuration, TLS, proxy protocol negotiation, authentication, transport settings, or the ability to carry traffic. The UI labels this result as TCP reachability; it is not Real Delay.
 
-## Required engine config validation
+## sing-box config validation
 
-Before measuring a node, the app must generate that node's engine configuration and run the selected engine's native configuration checker. For the first adapter, this is the pinned sing-box `check -c` command. A successful config check proves only that the engine accepts the configuration shape; it does not prove that the remote server works or that credentials are correct.
+The application can generate a per-profile sing-box outbound configuration and run the native `sing-box check -c` command. The standalone Validate config action reports whether sing-box accepted the generated configuration. The batch Real Delay action repeats the native check and will not start a probe when configuration generation or validation fails.
 
-Unsupported options must be reported explicitly. They must not be silently dropped from generated configuration.
+A successful config check proves only that the engine accepts the configuration shape; it does not prove that the remote server is online or that credentials are correct. Unsupported options are reported explicitly and block the probe.
 
-## Required Real Delay
+## Real Delay
 
-Real Delay must use a real HTTP(S) request sent **through the selected node** using a temporary local proxy backed by the selected engine. The measured time covers the request path through the proxy and the HTTP response from the probe endpoint. The initial default is `https://www.gstatic.com/generate_204`, with a configurable secondary URL for fallback.
+Real Delay is implemented using an isolated sing-box process for each tested profile. The engine exposes a temporary SOCKS inbound bound only to `127.0.0.1`; the HTTP client connects through that proxy with SOCKS5 remote DNS (`socks5h`) so the request is sent through the selected profile's outbound.
 
-Each node is tested in an isolated temporary runtime. No TUN, Windows system proxy, or normal device traffic capture is permitted. TCP handshake timing remains a distinct diagnostic, not a substitute for Real Delay.
+The primary endpoint is `https://www.gstatic.com/generate_204`. If it fails, the implementation tries `https://cp.cloudflare.com/generate_204`. Redirects are disabled and only HTTP 204 counts as a successful measurement. The timer covers the request through the proxy until the response headers are received. Each HTTP attempt has a nine-second timeout and at most four engine processes run concurrently.
 
-Hiddify documents its monitoring test as a URL request through each outbound; v2rayNG exposes a dedicated native `measureOutboundDelay` API. This project follows the same principle.
+The current probe URLs and timeout are fixed in the Rust implementation; there is not yet a UI setting for them. Successful measurements are returned in ascending delay order. The result includes the endpoint used, config outcome, measured milliseconds, or a failure detail.
 
-See [REAL_DELAY_SPEC.md](REAL_DELAY_SPEC.md) for the complete algorithm, safety constraints, result model, and acceptance tests.
+Preflight does not enable TUN, Wintun, packet capture, Windows system proxy settings, or normal device traffic routing. This feature tests one profile at a time through its temporary local proxy; it does not connect the device to a VPN.
+
+See [REAL_DELAY_SPEC.md](REAL_DELAY_SPEC.md) for the measurement definition, current lifecycle limitations, and remaining acceptance tests.

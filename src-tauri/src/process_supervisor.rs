@@ -104,15 +104,22 @@ impl ProcessSupervisor {
         // Keep this API safe if a future caller forgets to start shutdown explicitly.
         self.request_shutdown();
         loop {
+            // Keep the synchronous mutex guard in its own lexical scope. A
+            // MutexGuard is not Send and must never live across this await.
             let notified = self.inner.idle.notified();
-            let mut state = lock_state(&self.inner);
+            let (is_idle, cleanup_healthy) = {
+                let mut state = lock_state(&self.inner);
+                if state.active.is_empty() {
+                    state.shutdown_complete = true;
+                    (true, state.cleanup_healthy)
+                } else {
+                    (false, state.cleanup_healthy)
+                }
+            };
 
-            if state.active.is_empty() {
-                state.shutdown_complete = true;
-                return state.cleanup_healthy;
+            if is_idle {
+                return cleanup_healthy;
             }
-
-            drop(state);
             notified.await;
         }
     }
@@ -169,7 +176,6 @@ mod tests {
     async fn shutdown_cancels_active_operations_and_waits_for_cleanup() {
         let supervisor = ProcessSupervisor::default();
         let operation = supervisor.begin_operation().expect("operation lease");
-        let mut operation = operation;
 
         assert!(supervisor.request_shutdown());
         assert!(operation.is_cancelled());

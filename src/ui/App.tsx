@@ -264,7 +264,7 @@ export default function App() {
         <section className="runtime-warning" role="alert">
           <strong>Engine operations are locked for safety</strong>
           <p>
-            The app could not confirm that a previous engine process or temporary file was cleaned up.
+            The app cannot confirm that engine-process containment and temporary-file cleanup are safe.
             Installing sing-box, validating configurations, and Real Delay are disabled for this session.
             This does not mean sing-box is missing; do not try to reinstall it as a workaround.
           </p>

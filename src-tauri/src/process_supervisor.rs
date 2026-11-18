@@ -387,21 +387,20 @@ impl Default for ProcessSupervisor {
 }
 
 impl ProcessSupervisor {
-    /// Production constructor. Joining the application to the kill-on-close job
-    /// before Tauri creates child processes makes every later child inherit job
-    /// membership at process creation, closing the create/assign crash window.
-    pub fn for_app() -> Self {
-        let supervisor = Self::default();
-
+    /// Attach the application process to its kill-on-close Job Object during
+    /// Tauri setup, before the app event loop can invoke engine commands. Existing
+    /// Tauri/WebView helper processes remain outside this engine-child job; later
+    /// engine children inherit membership at process creation.
+    pub fn attach_current_process_to_job(&self) -> Result<(), String> {
         #[cfg(windows)]
-        if let Some(job) = supervisor.inner.job.as_ref() {
-            if let Err(error) = job.assign_current_process() {
-                eprintln!("Windows process containment could not attach the application to its Job Object: {error}");
-                supervisor.mark_cleanup_unhealthy();
-            }
+        {
+            let job = self.inner.job.as_ref().ok_or_else(|| {
+                "The Windows process-containment Job Object is unavailable.".to_string()
+            })?;
+            job.assign_current_process()?;
         }
 
-        supervisor
+        Ok(())
     }
 
     pub fn begin_operation(&self) -> Result<OperationLease, String> {

@@ -521,15 +521,12 @@ mod tests {
                 "blacklist-inevitable-contained-start-{}.txt",
                 uuid::Uuid::new_v4()
             ));
-            let escaped_path = marker.to_string_lossy().replace('\'', "''");
-            let script = format!(
-                "Set-Content -LiteralPath '{escaped_path}' -Value started"
-            );
+            let command_line = format!("echo started > \"{}\"", marker.display());
 
-            let mut command = Command::new("powershell.exe");
+            let mut command = Command::new("cmd.exe");
             command
-                .args(["-NoProfile", "-NonInteractive", "-Command"])
-                .arg(&script)
+                .args(["/D", "/C"])
+                .arg(&command_line)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
@@ -567,18 +564,23 @@ mod tests {
             "blacklist-inevitable-uncontained-start-{}.txt",
             uuid::Uuid::new_v4()
         ));
-        let escaped_path = marker.to_string_lossy().replace('\'', "''");
-        let script = format!("Set-Content -LiteralPath '{escaped_path}' -Value started");
+        let command_line = format!("echo started > \"{}\"", marker.display());
 
-        let mut command = Command::new("powershell.exe");
+        let mut command = Command::new("cmd.exe");
         command
-            .args(["-NoProfile", "-NonInteractive", "-Command"])
-            .arg(&script)
+            .args(["/D", "/C"])
+            .arg(&command_line)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         supervisor.prepare_child_command(&mut command);
         let mut child = command.spawn().expect("start suspended child without a job");
+
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        assert!(
+            !marker.exists(),
+            "child executed before Job Object assignment was attempted"
+        );
 
         let error = supervisor
             .assign_child(&mut child)

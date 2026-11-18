@@ -8,7 +8,7 @@ mod profiles;
 
 pub fn run() {
     let app = tauri::Builder::default()
-        .manage(process_supervisor::ProcessSupervisor::default())
+        .manage(process_supervisor::ProcessSupervisor::for_app())
         .setup(|app| {
             let supervisor = app
                 .state::<process_supervisor::ProcessSupervisor>()

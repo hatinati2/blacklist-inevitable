@@ -27,7 +27,15 @@ The request timeout is currently nine seconds per endpoint attempt, and the batc
 - The normal request path explicitly asks the child process to stop and waits up to four seconds for process exit.
 - A child-process kill-on-drop setting and temporary-directory Drop guard provide fallback cleanup if the command future is dropped.
 
-This is not yet a complete application-wide process supervisor. Cancellation and application-shutdown paths do not yet share a runtime-health gate that verifies child termination before permitting a future normal Connect. There is no normal Connect / Disconnect feature yet. These guarantees must be completed and tested before device-wide routing is added.
+The current preflight commands use an application-scoped process supervisor:
+
+- Real Delay, explicit config validation, engine installation, and installed-version status probes acquire operation leases before engine work begins.
+- On `RunEvent::ExitRequested`, the app defers exit, rejects new engine work, and signals active Real Delay operations to cancel.
+- A running Real Delay request is dropped, its sing-box child is stopped and awaited (bounded to four seconds), and its probe directory is removed before its lease is released.
+- Config validation has a bounded 15-second check. Shutdown waits for that operation to finish; if its child termination or temporary-file cleanup cannot be confirmed, the supervisor marks runtime health unsafe.
+- Any unconfirmed process or temporary-file cleanup blocks subsequent engine operations for the rest of the current app session.
+
+The health state is currently in-memory. It does not yet recover an orphaned process after a hard application crash, power loss, or forced termination, and no Windows Job Object is installed yet. Startup recovery and crash/forced-termination tests remain mandatory before normal Connect or device-wide routing is implemented. There is no normal Connect / Disconnect feature yet.
 
 ## User-visible result model
 

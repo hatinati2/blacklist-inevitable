@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use futures_util::StreamExt;
 use serde_json::{json, Map, Value};
 
+use crate::process_supervisor::ProcessSupervisor;
 use crate::profiles::ProfileSummary;
 
 const OUTBOUND_TAG: &str = "blacklist-profile";
@@ -574,14 +575,14 @@ pub fn installed_binary_path(app: &AppHandle) -> Result<PathBuf, String> {
         .join("sing-box.exe"))
 }
 
-pub async fn is_installed(app: &AppHandle) -> bool {
+pub async fn is_installed(app: &AppHandle, supervisor: &ProcessSupervisor) -> bool {
     let Ok(path) = installed_binary_path(app) else {
         return false;
     };
     if !path.is_file() {
         return false;
     }
-    read_engine_version(&path)
+    read_engine_version(&path, supervisor)
         .await
         .map(|reported| matches_expected_engine_version(&reported))
         .unwrap_or(false)
@@ -593,13 +594,15 @@ fn matches_expected_engine_version(reported: &str) -> bool {
     })
 }
 
-pub async fn install(app: &AppHandle) -> Result<String, String> {
+pub async fn install(app: &AppHandle, supervisor: &ProcessSupervisor) -> Result<String, String> {
     let binary_path = installed_binary_path(app)?;
     if binary_path.is_file() {
-        if let Ok(version) = read_engine_version(&binary_path).await {
-            if matches_expected_engine_version(&version) {
-                return Ok(version);
-            }
+        match read_engine_version(&binary_path, supervisor).await {
+            Ok(version) if matches_expected_engine_version(&version) => return Ok(version),
+            // A timeout means the previous version-check child may not have been
+            // reaped. Do not download/replace an engine while cleanup is uncertain.
+            Err(error) if error.contains("timed out") => return Err(error),
+            _ => {}
         }
     }
 
@@ -664,7 +667,7 @@ pub async fn install(app: &AppHandle) -> Result<String, String> {
         return Err(error);
     }
 
-    let version = match read_engine_version(&temporary_binary).await {
+    let version = match read_engine_version(&temporary_binary, supervisor).await {
         Ok(version) if matches_expected_engine_version(&version) => version,
         Ok(_) => {
             let _ = fs::remove_file(&temporary_binary);
@@ -734,7 +737,10 @@ fn extract_verified_executable(archive_bytes: &[u8], destination: &Path) -> Resu
     Ok(())
 }
 
-async fn read_engine_version(binary: &Path) -> Result<String, String> {
+async fn read_engine_version(
+    binary: &Path,
+    supervisor: &ProcessSupervisor,
+) -> Result<String, String> {
     let output = timeout(
         Duration::from_secs(10),
         Command::new(binary)
@@ -745,7 +751,10 @@ async fn read_engine_version(binary: &Path) -> Result<String, String> {
             .output(),
     )
     .await
-    .map_err(|_| "The sing-box version check timed out.".to_string())?
+    .map_err(|_| {
+        supervisor.mark_cleanup_unhealthy();
+        "The sing-box version check timed out; child termination could not be confirmed.".to_string()
+    })?
     .map_err(|_| "Could not execute the sing-box engine.".to_string())?;
 
     if !output.status.success() {
@@ -758,6 +767,7 @@ pub async fn validate_profile_config(
     app: &AppHandle,
     profile: &ProfileSummary,
     credentials: &BTreeMap<String, String>,
+    supervisor: &ProcessSupervisor,
 ) -> Result<(), String> {
     let binary = installed_binary_path(app)?;
     if !binary.is_file() {
@@ -775,7 +785,10 @@ pub async fn validate_profile_config(
     let config_path = cache.join(format!("config-{}.json", Uuid::new_v4()));
     // Install the guard before the write so a cancelled/failed write cannot leave
     // a partial credential-bearing configuration behind.
-    let _config_guard = ProbeConfigFile(config_path.clone());
+    let _config_guard = ProbeConfigFile {
+        path: config_path.clone(),
+        supervisor: supervisor.clone(),
+    };
     let config_bytes = serde_json::to_vec(&config)
         .map_err(|_| "Could not encode the temporary engine configuration.".to_string())?;
     tokio::fs::write(&config_path, config_bytes)
@@ -797,6 +810,7 @@ pub async fn validate_profile_config(
 
     let cleanup_result = tokio::fs::remove_file(&config_path).await;
     if cleanup_result.is_err() {
+        supervisor.mark_cleanup_unhealthy();
         return Err(
             "The temporary configuration could not be removed; preflight cleanup needs attention."
                 .to_string(),
@@ -804,7 +818,10 @@ pub async fn validate_profile_config(
     }
 
     match command_result {
-        Err(_) => Err("sing-box config validation timed out.".to_string()),
+        Err(_) => {
+            supervisor.mark_cleanup_unhealthy();
+            Err("sing-box config validation timed out; child termination could not be confirmed.".to_string())
+        }
         Ok(Err(_)) => Err("Could not start sing-box config validation.".to_string()),
         Ok(Ok(output)) if output.status.success() => Ok(()),
         Ok(Ok(output)) => {
@@ -845,22 +862,34 @@ const REAL_DELAY_FALLBACK_URL: &str = "https://cp.cloudflare.com/generate_204";
 const REAL_DELAY_REQUEST_TIMEOUT: Duration = Duration::from_secs(9);
 const ENGINE_START_TIMEOUT: Duration = Duration::from_secs(10);
 
-struct ProbeDirectory(PathBuf);
+struct ProbeDirectory {
+    path: PathBuf,
+    supervisor: ProcessSupervisor,
+}
 
 impl Drop for ProbeDirectory {
     fn drop(&mut self) {
         // Synchronous fallback cleanup also runs if the Tauri command future is cancelled.
-        let _ = fs::remove_dir_all(&self.0);
+        if self.path.exists() && fs::remove_dir_all(&self.path).is_err() {
+            self.supervisor.mark_cleanup_unhealthy();
+        }
     }
 }
 
-struct ProbeConfigFile(PathBuf);
+struct ProbeConfigFile {
+    path: PathBuf,
+    supervisor: ProcessSupervisor,
+}
 
 impl Drop for ProbeConfigFile {
     fn drop(&mut self) {
         // Config validation stores credentials in this file. Remove it even when
-        // the invoking command is cancelled while sing-box is running.
-        let _ = fs::remove_file(&self.0);
+        // the invoking command future is cancelled.
+        match fs::remove_file(&self.path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => self.supervisor.mark_cleanup_unhealthy(),
+        }
     }
 }
 
@@ -869,7 +898,9 @@ pub async fn measure_real_delay(
     app: &AppHandle,
     profile: &ProfileSummary,
     credentials: &BTreeMap<String, String>,
+    supervisor: &ProcessSupervisor,
 ) -> Result<ProbeOutcome, String> {
+    let mut operation = supervisor.begin_operation()?;
     let binary = installed_binary_path(app)?;
     if !binary.is_file() {
         return Err("The pinned sing-box engine is not installed.".to_string());
@@ -902,7 +933,10 @@ pub async fn measure_real_delay(
     tokio::fs::create_dir(&run_dir)
         .await
         .map_err(|_| "Could not create an isolated directory for this node test.".to_string())?;
-    let _directory_guard = ProbeDirectory(run_dir.clone());
+    let _directory_guard = ProbeDirectory {
+        path: run_dir.clone(),
+        supervisor: supervisor.clone(),
+    };
     let config_path = run_dir.join("config.json");
 
     let config_bytes = match serde_json::to_vec(&config) {
@@ -933,10 +967,11 @@ pub async fn measure_real_delay(
 
     let validation = match validation {
         Err(_) => {
+            operation.mark_cleanup_unhealthy();
             cleanup_probe_dir(&run_dir).await?;
             return Ok(ProbeOutcome {
                 config_status: "invalid".to_string(),
-                config_detail: "sing-box configuration validation timed out.".to_string(),
+                config_detail: "sing-box configuration validation timed out; child termination could not be confirmed.".to_string(),
                 real_delay_ms: None,
                 real_delay_detail: "Not run because configuration validation did not finish.".to_string(),
                 tested_url: None,
@@ -962,6 +997,16 @@ pub async fn measure_real_delay(
     };
     drop(validation);
 
+    // Shutdown waits for short, bounded config validation to finish. A cancelled
+    // operation must not start a new long-lived engine process afterwards.
+    if operation.is_cancelled() {
+        if cleanup_probe_dir(&run_dir).await.is_err() {
+            operation.mark_cleanup_unhealthy();
+            return Err("Temporary preflight files could not be removed during shutdown.".to_string());
+        }
+        return Err("Real Delay was cancelled because the application is shutting down.".to_string());
+    }
+
     let mut child = match Command::new(&binary)
         .arg("run")
         .arg("-c")
@@ -979,19 +1024,25 @@ pub async fn measure_real_delay(
         }
     };
 
-    let measurement = async {
-        wait_for_local_socks(&mut child, port).await?;
-        measure_request_through_socks(port).await
-    }
-    .await;
+    let measurement = tokio::select! {
+        _ = operation.cancelled() => {
+            Err("Real Delay was cancelled because the application is shutting down.".to_string())
+        }
+        result = async {
+            wait_for_local_socks(&mut child, port).await?;
+            measure_request_through_socks(port).await
+        } => result,
+    };
 
     let process_cleanup = stop_probe_process(&mut child).await;
     let directory_cleanup = cleanup_probe_dir(&run_dir).await;
 
     if let Err(error) = process_cleanup {
+        operation.mark_cleanup_unhealthy();
         return Err(error);
     }
     if let Err(error) = directory_cleanup {
+        operation.mark_cleanup_unhealthy();
         return Err(error);
     }
 

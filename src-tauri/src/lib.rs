@@ -1,10 +1,14 @@
+use tauri::Manager;
+
 mod commands;
 mod engine;
+mod process_supervisor;
 mod profile_store;
 mod profiles;
 
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
+        .manage(process_supervisor::ProcessSupervisor::default())
         .invoke_handler(tauri::generate_handler![
             commands::get_app_status,
             commands::get_profiles,
@@ -15,6 +19,33 @@ pub fn run() {
             commands::validate_profile_config,
             commands::test_all_profile_real_delays
         ])
-        .run(tauri::generate_context!())
-        .expect("failed to run blacklist-inevitable");
+        .build(tauri::generate_context!())
+        .expect("failed to build blacklist-inevitable");
+
+    app.run(|app_handle, event| {
+        if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
+            let supervisor = app_handle
+                .state::<process_supervisor::ProcessSupervisor>()
+                .inner()
+                .clone();
+
+            // The second exit request is issued only after all supervised operations
+            // have completed their cleanup.
+            if supervisor.shutdown_complete() {
+                return;
+            }
+
+            api.prevent_exit();
+            if supervisor.request_shutdown() {
+                let app_handle = app_handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    // Real Delay workers receive cancellation, stop and reap their
+                    // sing-box child, remove temporary data, then release their lease.
+                    // Short config-check commands are bounded by their own timeout.
+                    let _cleanup_healthy = supervisor.wait_for_idle().await;
+                    app_handle.exit(code.unwrap_or(0));
+                });
+            }
+        }
+    });
 }

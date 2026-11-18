@@ -2,7 +2,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 use tokio::net::TcpStream;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
@@ -10,6 +10,7 @@ use tokio::time::timeout;
 
 use crate::engine::{EngineDescriptor, ENGINE_TARGETS};
 use crate::profile_store;
+use crate::process_supervisor::ProcessSupervisor;
 use crate::profiles::{parse_import_text, ImportIssue, ProfileSummary};
 
 static REAL_DELAY_SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
@@ -29,6 +30,7 @@ pub struct AppStatus {
     profile_management_implemented: bool,
     endpoint_tcp_test_implemented: bool,
     sing_box_installed: bool,
+    runtime_cleanup_healthy: bool,
     engines: Vec<EngineDescriptor>,
 }
 
@@ -55,16 +57,25 @@ pub struct EndpointTestResult {
 
 #[tauri::command]
 pub async fn get_app_status(app: AppHandle) -> AppStatus {
-    let sing_box_installed = crate::engine::sing_box::is_installed(&app).await;
+    let supervisor = app.state::<ProcessSupervisor>().inner().clone();
+    // Version checks start a short-lived engine subprocess. Register it so app
+    // shutdown cannot race an untracked child process.
+    let _operation = supervisor.begin_operation().ok();
+    let sing_box_installed = if _operation.is_some() {
+        crate::engine::sing_box::is_installed(&app, &supervisor).await
+    } else {
+        false
+    };
     AppStatus {
         app_name: "blacklist-inevitable",
         version: env!("CARGO_PKG_VERSION"),
-        development_stage: "sing-box preflight implementation",
+        development_stage: "sing-box preflight with supervised shutdown",
         connection_implemented: false,
         preflight_testing_implemented: true,
         profile_management_implemented: true,
         endpoint_tcp_test_implemented: true,
         sing_box_installed,
+        runtime_cleanup_healthy: app.state::<ProcessSupervisor>().cleanup_healthy(),
         engines: ENGINE_TARGETS.to_vec(),
     }
 }
@@ -201,7 +212,11 @@ pub struct ConfigValidationResult {
 
 #[tauri::command]
 pub async fn install_sing_box_engine(app: AppHandle) -> Result<String, String> {
-    crate::engine::sing_box::install(&app).await
+    let supervisor = app.state::<ProcessSupervisor>().inner().clone();
+    // Installation includes a bounded version-check subprocess and mutates the
+    // engine installation directory; drain it before app shutdown.
+    let _operation = supervisor.begin_operation()?;
+    crate::engine::sing_box::install(&app, &supervisor).await
 }
 
 #[tauri::command]
@@ -209,13 +224,15 @@ pub async fn validate_profile_config(
     app: AppHandle,
     profile_id: String,
 ) -> Result<ConfigValidationResult, String> {
+    let supervisor = app.state::<ProcessSupervisor>().inner().clone();
+    let _operation = supervisor.begin_operation()?;
     let profiles = profile_store::list_profiles(&app)?;
     let profile = profiles
         .into_iter()
         .find(|profile| profile.id == profile_id)
         .ok_or_else(|| "Profile not found.".to_string())?;
     let credentials = profile_store::get_credentials(&profile.id)?;
-    match crate::engine::sing_box::validate_profile_config(&app, &profile, &credentials).await {
+    match crate::engine::sing_box::validate_profile_config(&app, &profile, &credentials, &supervisor).await {
         Ok(()) => Ok(ConfigValidationResult {
             profile_id: profile.id,
             valid: true,
@@ -252,11 +269,13 @@ pub async fn test_all_profile_real_delays(
     // Shared across every invocation, including detached workers from a cancelled
     // command, so the process cap applies to the entire app rather than one batch.
     let semaphore = real_delay_semaphore();
+    let supervisor = app.state::<ProcessSupervisor>().inner().clone();
     let mut tasks = Vec::new();
 
     for profile in profiles {
         let app = app.clone();
         let semaphore = Arc::clone(&semaphore);
+        let supervisor = supervisor.clone();
         let fallback = RealDelayResult {
             profile_id: profile.id.clone(),
             name: profile.name.clone(),
@@ -299,7 +318,14 @@ pub async fn test_all_profile_real_delays(
                 }
             };
 
-            match crate::engine::sing_box::measure_real_delay(&app, &profile, &credentials).await {
+            match crate::engine::sing_box::measure_real_delay(
+                &app,
+                &profile,
+                &credentials,
+                &supervisor,
+            )
+            .await
+            {
                 Ok(outcome) => RealDelayResult {
                     profile_id: profile_id.clone(),
                     name: name.clone(),

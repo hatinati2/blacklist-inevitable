@@ -11,8 +11,10 @@ A Windows-first desktop app for importing proxy profiles and testing them before
 - Generate an isolated sing-box outbound configuration for each supported profile and run the native `sing-box check`.
 - Measure **Real Delay** by sending an HTTPS request through a temporary, loopback-only SOCKS5 proxy backed by that profile's sing-box outbound. The test accepts HTTP 204 only, disallows redirects, and uses a fallback 204 endpoint.
 - Keep the basic TCP endpoint check separate. It is only a TCP connection diagnostic and is not Real Delay.
+- Supervise Real Delay and explicit config-validation operations; on graceful app exit, cancel active probes, stop and wait for their sing-box child process, and finish temporary-file cleanup before exiting.
 
 Real Delay is currently implemented with fixed probe endpoints and timeouts. Xray-core and Mihomo are target engines only; their adapters are not implemented yet.
+The runtime cleanup-health gate is currently in-memory. Recovery after a hard crash or forced termination (including Windows Job Object ownership) is not implemented yet.
 
 ## Not implemented
 

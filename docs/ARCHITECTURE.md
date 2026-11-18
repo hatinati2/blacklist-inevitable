@@ -40,9 +40,11 @@ The Real Delay implementation currently uses fixed endpoints and fixed timeouts.
 
 ## Process ownership and remaining lifecycle work
 
-The Real Delay function owns the temporary sing-box child process during the normal request path, requests termination, waits for exit with a bounded timeout, and removes the unique temporary directory. The child is configured with kill-on-drop, and a directory guard attempts synchronous file cleanup when the command future is dropped.
+Real Delay and explicit config-validation commands acquire leases from an application-scoped process supervisor. The supervisor rejects new engine operations after shutdown starts, signals active Real Delay workers, and waits for registered operations to release their leases before the Tauri app exits. A Real Delay worker responds to shutdown by cancelling the proxied request, stopping its sing-box child, waiting for process exit, and removing its unique temporary directory. Config validation is bounded; a timeout or unconfirmed cleanup marks the in-memory runtime health state as unsafe.
 
-This is not yet a complete application-wide process supervisor. In particular, cancellation and app-shutdown paths do not yet have a shared runtime health state that proves child termination and blocks a future normal Connect. The application has no normal Connect / Disconnect coordinator yet. These are release-blocking requirements before implementing device-wide traffic routing.
+Temporary config-validation files and probe directories also have synchronous Drop guards. A failed final cleanup marks the supervisor unhealthy, and further engine operations are rejected for the remainder of that app session. The app's `ExitRequested` event is deferred until supervised operations finish their cleanup path.
+
+This is a graceful-shutdown supervisor for the currently implemented preflight operations, not yet a crash-proof Windows process supervisor. The health gate is in-memory and does not yet recover stale child processes after forced termination, power loss, or a hard process crash. A Windows Job Object / startup recovery check and forced-termination tests remain release gates. The application still has no normal Connect / Disconnect coordinator.
 
 ## Secrets and diagnostics
 

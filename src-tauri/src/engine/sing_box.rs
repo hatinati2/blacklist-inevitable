@@ -538,6 +538,51 @@ mod tests {
 
         assert!(build_probe_config(&profile, &credentials, 10080).is_err());
     }
+
+    #[test]
+    fn maps_hysteria2_password_obfuscation_and_tls() {
+        let mut profile = sample_profile("hysteria2");
+        profile.options = BTreeMap::from([
+            ("sni".to_string(), "hy2.example.org".to_string()),
+            ("obfs".to_string(), "salamander".to_string()),
+        ]);
+        let credentials = BTreeMap::from([
+            ("password".to_string(), "hy2-secret".to_string()),
+            ("obfsPassword".to_string(), "obfs-secret".to_string()),
+        ]);
+        let config = build_probe_config(&profile, &credentials, 10080).unwrap();
+        let outbound = &config["outbounds"][0];
+
+        assert_eq!(outbound["type"], "hysteria2");
+        assert_eq!(outbound["password"], "hy2-secret");
+        assert_eq!(outbound["obfs"]["type"], "salamander");
+        assert_eq!(outbound["obfs"]["password"], "obfs-secret");
+        assert_eq!(outbound["tls"]["enabled"], true);
+        assert_eq!(outbound["tls"]["server_name"], "hy2.example.org");
+    }
+
+    #[test]
+    fn maps_tuic_credentials_congestion_and_relay_mode() {
+        let mut profile = sample_profile("tuic");
+        profile.options = BTreeMap::from([
+            ("congestion_control".to_string(), "bbr".to_string()),
+            ("udp_relay_mode".to_string(), "quic".to_string()),
+            ("sni".to_string(), "tuic.example.org".to_string()),
+        ]);
+        let credentials = BTreeMap::from([
+            ("uuid".to_string(), "12345678-1234-1234-1234-123456789012".to_string()),
+            ("password".to_string(), "tuic-secret".to_string()),
+        ]);
+        let config = build_probe_config(&profile, &credentials, 10080).unwrap();
+        let outbound = &config["outbounds"][0];
+
+        assert_eq!(outbound["type"], "tuic");
+        assert_eq!(outbound["uuid"], "12345678-1234-1234-1234-123456789012");
+        assert_eq!(outbound["password"], "tuic-secret");
+        assert_eq!(outbound["congestion_control"], "bbr");
+        assert_eq!(outbound["udp_relay_mode"], "quic");
+        assert_eq!(outbound["tls"]["enabled"], true);
+    }
 }
 
 

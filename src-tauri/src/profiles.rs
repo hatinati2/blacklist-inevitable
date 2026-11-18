@@ -532,4 +532,74 @@ mod tests {
         let error = parse_share_uri("madeup://user@example.com:443").unwrap_err();
         assert_eq!(error, "Unsupported link scheme.");
     }
+
+    #[test]
+    fn parses_hysteria2_and_keeps_both_passwords_out_of_metadata() {
+        let parsed = parse_share_uri(
+            "hysteria2://hy2-secret@hy2.example.org:443?sni=hy2.example.org&obfs=salamander&obfs-password=obfs-secret#HY2",
+        )
+        .expect("valid Hysteria2 URI");
+
+        assert_eq!(parsed.profile.protocol, "hysteria2");
+        assert_eq!(parsed.profile.options.get("obfs").map(String::as_str), Some("salamander"));
+        assert_eq!(parsed.credentials.get("password").map(String::as_str), Some("hy2-secret"));
+        assert_eq!(parsed.credentials.get("obfsPassword").map(String::as_str), Some("obfs-secret"));
+
+        let metadata = serde_json::to_string(&parsed.profile).expect("serialize profile metadata");
+        assert!(!metadata.contains("hy2-secret"));
+        assert!(!metadata.contains("obfs-secret"));
+    }
+
+    #[test]
+    fn parses_tuic_uuid_and_password_as_separate_secrets() {
+        let parsed = parse_share_uri(
+            "tuic://12345678-1234-1234-1234-123456789012:tuic-secret@tuic.example.org:443?congestion_control=bbr&udp_relay_mode=quic#TUIC",
+        )
+        .expect("valid TUIC URI");
+
+        assert_eq!(parsed.profile.protocol, "tuic");
+        assert_eq!(parsed.profile.options.get("congestion_control").map(String::as_str), Some("bbr"));
+        assert_eq!(parsed.profile.options.get("udp_relay_mode").map(String::as_str), Some("quic"));
+        assert_eq!(parsed.credentials.get("uuid").map(String::as_str), Some("12345678-1234-1234-1234-123456789012"));
+        assert_eq!(parsed.credentials.get("password").map(String::as_str), Some("tuic-secret"));
+
+        let metadata = serde_json::to_string(&parsed.profile).expect("serialize profile metadata");
+        assert!(!metadata.contains("12345678-1234"));
+        assert!(!metadata.contains("tuic-secret"));
+    }
+
+    #[test]
+    fn vmess_unknown_field_names_are_kept_without_their_values() {
+        let payload = r#"{"v":"2","ps":"VMess","add":"vmess.example.org","port":"443","id":"12345678-1234-1234-1234-123456789012","extra_auth":"must-not-be-copied"}"#;
+        let encoded = STANDARD.encode(payload.as_bytes());
+        let parsed = parse_share_uri(&format!("vmess://{encoded}")).expect("valid VMess URI");
+
+        assert_eq!(parsed.profile.unsupported_options, vec!["extra_auth".to_string()]);
+        let metadata = serde_json::to_string(&parsed.profile).expect("serialize profile metadata");
+        assert!(metadata.contains("extra_auth"));
+        assert!(!metadata.contains("must-not-be-copied"));
+    }
+
+    #[test]
+    fn rejects_shadowsocks_plugin_links_explicitly() {
+        let error = parse_share_uri(
+            "ss://aes-128-gcm:password@ss.example.org:8388/?plugin=v2ray-plugin%3Bmode%3Dwebsocket",
+        )
+        .unwrap_err();
+        assert_eq!(error, "Shadowsocks plugin links are not supported yet.");
+    }
+
+    #[test]
+    fn enforces_import_entry_limit_before_parsing_every_line() {
+        let input = vec!["not-a-link"; MAX_IMPORT_LINES + 1].join("\n");
+        let error = parse_import_text(&input).unwrap_err();
+        assert_eq!(error, "An import can contain at most 500 entries.");
+    }
+
+    #[test]
+    fn enforces_import_byte_limit() {
+        let input = "x".repeat(MAX_IMPORT_BYTES + 1);
+        let error = parse_import_text(&input).unwrap_err();
+        assert_eq!(error, "Import text is larger than 2 MiB.");
+    }
 }

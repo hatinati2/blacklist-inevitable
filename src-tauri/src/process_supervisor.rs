@@ -89,19 +89,89 @@ impl WindowsJobObject {
         Ok(Self { handle })
     }
 
-    fn assign_pid(&self, pid: u32) -> Result<(), String> {
-        use windows_sys::Win32::Foundation::CloseHandle;
+    /// Associate the desktop application itself with this job before it creates
+    /// any engine children. Child processes then inherit job membership at creation.
+    fn assign_current_process(&self) -> Result<(), String> {
         use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+        let assigned = unsafe {
+            AssignProcessToJobObject(self.handle, GetCurrentProcess())
+        };
+        if assigned == 0 {
+            return Err(format!(
+                "AssignProcessToJobObject(current application) failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn is_pid_in_job(&self, pid: u32) -> Result<bool, String> {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::JobObjects::IsProcessInJob;
         use windows_sys::Win32::System::Threading::{
-            OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
         };
 
-        let process = unsafe { OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid) };
+        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if process.is_null() {
+            return Err(format!(
+                "OpenProcess({pid}) failed while verifying inherited Job Object membership: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+
+        let mut is_member = 0;
+        let queried = unsafe { IsProcessInJob(process, self.handle, &mut is_member) };
+        let error = if queried == 0 {
+            Some(std::io::Error::last_os_error())
+        } else {
+            None
+        };
+        unsafe { CloseHandle(process) };
+
+        match error {
+            Some(error) => Err(format!("IsProcessInJob({pid}) failed: {error}")),
+            None => Ok(is_member != 0),
+        }
+    }
+
+    fn assign_pid(&self, pid: u32) -> Result<(), String> {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, IsProcessInJob,
+        };
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA,
+            PROCESS_TERMINATE,
+        };
+
+        let process = unsafe {
+            OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SET_QUOTA | PROCESS_TERMINATE,
+                0,
+                pid,
+            )
+        };
         if process.is_null() {
             return Err(format!(
                 "OpenProcess({pid}) failed: {}",
                 std::io::Error::last_os_error()
             ));
+        }
+
+        let mut is_member = 0;
+        let queried = unsafe { IsProcessInJob(process, self.handle, &mut is_member) };
+        if queried == 0 {
+            let error = std::io::Error::last_os_error();
+            unsafe { CloseHandle(process) };
+            return Err(format!("IsProcessInJob({pid}) failed: {error}"));
+        }
+        if is_member != 0 {
+            unsafe { CloseHandle(process) };
+            return Ok(());
         }
 
         let assigned = unsafe { AssignProcessToJobObject(self.handle, process) };
@@ -113,7 +183,7 @@ impl WindowsJobObject {
         unsafe { CloseHandle(process) };
 
         match error {
-            Some(error) => Err(format!("AssignProcessToJobObject failed: {error}")),
+            Some(error) => Err(format!("AssignProcessToJobObject({pid}) failed: {error}")),
             None => Ok(()),
         }
     }
@@ -126,7 +196,13 @@ impl WindowsJobObject {
         assign_suspended_thread(
             pid,
             find_suspended_primary_thread,
-            |process_id| self.assign_pid(process_id),
+            |process_id| {
+                if self.is_pid_in_job(process_id)? {
+                    Ok(())
+                } else {
+                    self.assign_pid(process_id)
+                }
+            },
             |thread| {
                 let previous_suspend_count = unsafe { ResumeThread(thread.0) };
                 if previous_suspend_count == u32::MAX {
@@ -311,6 +387,23 @@ impl Default for ProcessSupervisor {
 }
 
 impl ProcessSupervisor {
+    /// Production constructor. Joining the application to the kill-on-close job
+    /// before Tauri creates child processes makes every later child inherit job
+    /// membership at process creation, closing the create/assign crash window.
+    pub fn for_app() -> Self {
+        let supervisor = Self::default();
+
+        #[cfg(windows)]
+        if let Some(job) = supervisor.inner.job.as_ref() {
+            if let Err(error) = job.assign_current_process() {
+                eprintln!("Windows process containment could not attach the application to its Job Object: {error}");
+                supervisor.mark_cleanup_unhealthy();
+            }
+        }
+
+        supervisor
+    }
+
     pub fn begin_operation(&self) -> Result<OperationLease, String> {
         let (sender, receiver) = watch::channel(false);
         let mut state = lock_state(&self.inner);

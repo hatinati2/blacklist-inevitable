@@ -8,7 +8,18 @@ mod profiles;
 
 pub fn run() {
     let app = tauri::Builder::default()
-        .manage(process_supervisor::ProcessSupervisor::for_app())
+        .manage(process_supervisor::ProcessSupervisor::default())
+        .setup(|app| {
+            let supervisor = app
+                .state::<process_supervisor::ProcessSupervisor>()
+                .inner()
+                .clone();
+            if let Err(error) = supervisor.attach_current_process_to_job() {
+                eprintln!("Windows process containment is unavailable for this app instance: {error}");
+                supervisor.mark_cleanup_unhealthy();
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::get_app_status,
             commands::get_profiles,

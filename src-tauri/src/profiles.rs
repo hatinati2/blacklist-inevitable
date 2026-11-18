@@ -85,7 +85,7 @@ fn parse_share_uri(input: &str) -> Result<ParsedProfile, String> {
     let mut url = Url::parse(input).map_err(|_| "Malformed share link.".to_string())?;
     let scheme = url.scheme().to_ascii_lowercase();
 
-    if scheme == "ss" && url.host_str().is_none() {
+    if scheme == "ss" && (url.host_str().is_none() || url.port().is_none()) {
         let payload = input
             .strip_prefix("ss://")
             .unwrap_or(input)
@@ -109,6 +109,11 @@ fn parse_share_uri(input: &str) -> Result<ParsedProfile, String> {
 
     if url.query_pairs().any(|(key, _)| key == "plugin") {
         return Err("Shadowsocks plugin links are not supported yet.".to_string());
+    }
+    if protocol_is_hysteria2(&scheme)
+        && url.query_pairs().any(|(key, _)| key == "obfs-password")
+    {
+        return Err("Hysteria2 obfuscation passwords are not supported yet.".to_string());
     }
 
     let server = url
@@ -297,6 +302,10 @@ fn copy_query_options(url: &Url, output: &mut BTreeMap<String, String>) {
     }
 }
 
+fn protocol_is_hysteria2(scheme: &str) -> bool {
+    scheme == "hysteria2" || scheme == "hy2"
+}
+
 fn split_method_password(value: &str) -> Result<(String, String), String> {
     value
         .split_once(':')
@@ -318,8 +327,10 @@ fn try_decode_base64(input: &str) -> Option<Vec<u8>> {
         return None;
     }
 
-    let padding = (4 - compact.len() % 4) % 4;
-    let padded = format!("{}{:=<1$}", compact, padding);
+    let mut padded = compact.clone();
+    while padded.len() % 4 != 0 {
+        padded.push('=');
+    }
     STANDARD
         .decode(&compact)
         .or_else(|_| STANDARD.decode(&padded))

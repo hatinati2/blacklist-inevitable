@@ -533,7 +533,7 @@ mod tests {
             supervisor.prepare_child_command(&mut command);
             let mut child = command.spawn().expect("start suspended marker child");
 
-            sleep(Duration::from_millis(100)).await;
+            sleep(Duration::from_millis(250)).await;
             assert!(
                 !marker.exists(),
                 "engine child executed before Job Object assignment"

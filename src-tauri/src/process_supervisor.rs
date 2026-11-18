@@ -121,45 +121,68 @@ impl WindowsJobObject {
     /// Assigns a process whose initial thread was created suspended, then resumes
     /// that thread only after Job Object membership is established.
     fn assign_suspended_pid(&self, pid: u32) -> Result<(), String> {
-        use windows_sys::Win32::Foundation::CloseHandle;
         use windows_sys::Win32::System::Threading::ResumeThread;
 
-        let thread = find_suspended_primary_thread(pid)?;
-
-        if let Err(error) = self.assign_pid(pid) {
-            unsafe { CloseHandle(thread) };
-            return Err(error);
-        }
-
-        let previous_suspend_count = unsafe { ResumeThread(thread) };
-        let resume_error = if previous_suspend_count == u32::MAX {
-            Some(std::io::Error::last_os_error())
-        } else {
-            None
-        };
-        unsafe { CloseHandle(thread) };
-
-        if let Some(error) = resume_error {
-            return Err(format!("ResumeThread for contained process {pid} failed: {error}"));
-        }
-        if previous_suspend_count != 1 {
-            return Err(format!(
-                "Process {pid} had an unexpected initial-thread suspend count ({previous_suspend_count}); it was not allowed to continue."
-            ));
-        }
-
-        Ok(())
+        assign_suspended_thread(
+            pid,
+            find_suspended_primary_thread,
+            |process_id| self.assign_pid(process_id),
+            |thread| {
+                let previous_suspend_count = unsafe { ResumeThread(thread.0) };
+                if previous_suspend_count == u32::MAX {
+                    Err(format!(
+                        "ResumeThread for contained process {pid} failed: {}",
+                        std::io::Error::last_os_error()
+                    ))
+                } else {
+                    Ok(previous_suspend_count)
+                }
+            },
+        )
     }
 }
 
 
+fn assign_suspended_thread<T>(
+    pid: u32,
+    find_thread: impl FnOnce(u32) -> Result<T, String>,
+    assign_process: impl FnOnce(u32) -> Result<(), String>,
+    resume_thread: impl FnOnce(&T) -> Result<u32, String>,
+) -> Result<(), String> {
+    let thread = find_thread(pid)?;
+    assign_process(pid)?;
+    let previous_suspend_count = resume_thread(&thread)?;
+
+    if previous_suspend_count != 1 {
+        return Err(format!(
+            "Process {pid} had an unexpected initial-thread suspend count ({previous_suspend_count}); it was not allowed to continue."
+        ));
+    }
+
+    Ok(())
+}
+
 #[cfg(windows)]
-fn find_suspended_primary_thread(pid: u32) -> Result<windows_sys::Win32::Foundation::HANDLE, String> {
+struct SuspendedThreadHandle(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl Drop for SuspendedThreadHandle {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        unsafe { CloseHandle(self.0) };
+    }
+}
+
+#[cfg(windows)]
+fn find_suspended_primary_thread(pid: u32) -> Result<SuspendedThreadHandle, String> {
     use windows_sys::Win32::Foundation::{CloseHandle, GetLastError};
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Thread32First, Thread32Next, THREADENTRY32, TH32CS_SNAPTHREAD,
     };
-    use windows_sys::Win32::System::Threading::{OpenThread, THREAD_SUSPEND_RESUME};
+    use windows_sys::Win32::System::Threading::{
+        GetProcessIdOfThread, OpenThread, THREAD_QUERY_LIMITED_INFORMATION,
+        THREAD_SUSPEND_RESUME,
+    };
 
     // CREATE_SUSPENDED prevents the image's primary thread from running. Before it
     // is resumed, the process must have exactly one thread: its initial thread.
@@ -217,7 +240,13 @@ fn find_suspended_primary_thread(pid: u32) -> Result<windows_sys::Win32::Foundat
     let thread_id = thread_id.ok_or_else(|| {
         format!("No initial thread was found for suspended process {pid}.")
     })?;
-    let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, thread_id) };
+    let thread = unsafe {
+        OpenThread(
+            THREAD_SUSPEND_RESUME | THREAD_QUERY_LIMITED_INFORMATION,
+            0,
+            thread_id,
+        )
+    };
     if thread.is_null() {
         return Err(format!(
             "OpenThread({thread_id}) failed for suspended process {pid}: {}",
@@ -225,7 +254,17 @@ fn find_suspended_primary_thread(pid: u32) -> Result<windows_sys::Win32::Foundat
         ));
     }
 
-    Ok(thread)
+    // A Tool Help snapshot contains IDs, not pinned handles. Verify that the
+    // opened thread still belongs to the child PID before it can be resumed.
+    let owner_pid = unsafe { GetProcessIdOfThread(thread) };
+    if owner_pid != pid {
+        unsafe { CloseHandle(thread) };
+        return Err(format!(
+            "The initial thread handle no longer belongs to suspended process {pid}."
+        ));
+    }
+
+    Ok(SuspendedThreadHandle(thread))
 }
 
 #[cfg(windows)]
@@ -444,6 +483,106 @@ impl Drop for OperationLease {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn suspended_launch_stops_when_initial_thread_discovery_fails() {
+        use std::cell::Cell;
+
+        let assigned = Cell::new(false);
+        let resumed = Cell::new(false);
+        let result = assign_suspended_thread(
+            42,
+            |_| Err::<u32, _>("thread discovery failed".to_string()),
+            |_| {
+                assigned.set(true);
+                Ok(())
+            },
+            |_| {
+                resumed.set(true);
+                Ok(1)
+            },
+        );
+
+        assert!(result.unwrap_err().contains("thread discovery failed"));
+        assert!(!assigned.get(), "a process without a verified thread must not be assigned");
+        assert!(!resumed.get(), "a process without a verified thread must never be resumed");
+    }
+
+    #[test]
+    fn suspended_launch_stops_when_job_assignment_fails() {
+        use std::cell::Cell;
+
+        let resumed = Cell::new(false);
+        let result = assign_suspended_thread(
+            42,
+            |_| Ok::<u32, String>(7),
+            |_| Err("Job Object assignment failed".to_string()),
+            |_| {
+                resumed.set(true);
+                Ok(1)
+            },
+        );
+
+        assert!(result.unwrap_err().contains("Job Object assignment failed"));
+        assert!(!resumed.get(), "a process must not be resumed after failed Job Object assignment");
+    }
+
+    #[test]
+    fn suspended_launch_stops_when_resume_fails() {
+        let result = assign_suspended_thread(
+            42,
+            |_| Ok::<u32, String>(7),
+            |_| Ok(()),
+            |_| Err("ResumeThread failed".to_string()),
+        );
+
+        assert!(result.unwrap_err().contains("ResumeThread failed"));
+    }
+
+    #[test]
+    fn suspended_launch_rejects_an_unexpected_suspend_count() {
+        for previous_suspend_count in [0, 2] {
+            let result = assign_suspended_thread(
+                42,
+                |_| Ok::<u32, String>(7),
+                |_| Ok(()),
+                |_| Ok(previous_suspend_count),
+            );
+
+            assert!(
+                result.unwrap_err().contains("unexpected initial-thread suspend count"),
+                "suspend count {previous_suspend_count} must not be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn suspended_launch_assigns_before_resuming_and_requires_count_one() {
+        use std::cell::RefCell;
+
+        let calls = RefCell::new(Vec::new());
+        assign_suspended_thread(
+            42,
+            |pid| {
+                calls.borrow_mut().push(format!("find:{pid}"));
+                Ok::<u32, String>(7)
+            },
+            |pid| {
+                calls.borrow_mut().push(format!("assign:{pid}"));
+                Ok(())
+            },
+            |thread| {
+                calls.borrow_mut().push(format!("resume:{thread}"));
+                Ok(1)
+            },
+        )
+        .expect("a verified suspended launch should succeed");
+
+        assert_eq!(
+            calls.into_inner(),
+            vec!["find:42", "assign:42", "resume:7"]
+        );
+    }
 
     #[cfg(windows)]
     fn supervisor_without_job_for_test() -> ProcessSupervisor {

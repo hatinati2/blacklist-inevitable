@@ -631,7 +631,7 @@ async fn run_engine_command_output(
     supervisor: &ProcessSupervisor,
     command_timeout: Duration,
 ) -> Result<std::process::Output, EngineCommandError> {
-    command.kill_on_drop(true);
+    supervisor.prepare_child_command(command);
     let mut child = command.spawn().map_err(|_| EngineCommandError::Spawn)?;
     supervisor
         .assign_child(&mut child)
@@ -1093,16 +1093,16 @@ pub async fn measure_real_delay(
         return Err("Real Delay was cancelled because the application is shutting down.".to_string());
     }
 
-    let mut child = match Command::new(&binary)
+    let mut run_command = Command::new(&binary);
+    run_command
         .arg("run")
         .arg("-c")
         .arg(&config_path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-    {
+        .stderr(Stdio::null());
+    supervisor.prepare_child_command(&mut run_command);
+    let mut child = match run_command.spawn() {
         Ok(child) => child,
         Err(_) => {
             cleanup_probe_dir(&run_dir).await?;

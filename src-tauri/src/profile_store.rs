@@ -101,7 +101,7 @@ pub fn list_profiles(app: &AppHandle) -> Result<Vec<ProfileSummary>, String> {
 pub fn add_profiles(app: &AppHandle, incoming: Vec<ParsedProfile>) -> Result<Vec<ProfileSummary>, String> {
     let path = profile_file_path(app)?;
     let mut file = read_file(&path)?;
-    let mut added = Vec::new();
+    let mut added: Vec<ProfileSummary> = Vec::new();
 
     for parsed in incoming {
         let profile_id = parsed.profile.id.clone();

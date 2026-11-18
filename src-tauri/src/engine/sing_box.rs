@@ -575,14 +575,14 @@ pub fn installed_binary_path(app: &AppHandle) -> Result<PathBuf, String> {
         .join("sing-box.exe"))
 }
 
-pub async fn is_installed(app: &AppHandle) -> bool {
+pub async fn is_installed(app: &AppHandle, supervisor: &ProcessSupervisor) -> bool {
     let Ok(path) = installed_binary_path(app) else {
         return false;
     };
     if !path.is_file() {
         return false;
     }
-    read_engine_version(&path)
+    read_engine_version(&path, supervisor)
         .await
         .map(|reported| matches_expected_engine_version(&reported))
         .unwrap_or(false)
@@ -594,10 +594,10 @@ fn matches_expected_engine_version(reported: &str) -> bool {
     })
 }
 
-pub async fn install(app: &AppHandle) -> Result<String, String> {
+pub async fn install(app: &AppHandle, supervisor: &ProcessSupervisor) -> Result<String, String> {
     let binary_path = installed_binary_path(app)?;
     if binary_path.is_file() {
-        if let Ok(version) = read_engine_version(&binary_path).await {
+        if let Ok(version) = read_engine_version(&binary_path, supervisor).await {
             if matches_expected_engine_version(&version) {
                 return Ok(version);
             }
@@ -665,7 +665,7 @@ pub async fn install(app: &AppHandle) -> Result<String, String> {
         return Err(error);
     }
 
-    let version = match read_engine_version(&temporary_binary).await {
+    let version = match read_engine_version(&temporary_binary, supervisor).await {
         Ok(version) if matches_expected_engine_version(&version) => version,
         Ok(_) => {
             let _ = fs::remove_file(&temporary_binary);
@@ -735,7 +735,10 @@ fn extract_verified_executable(archive_bytes: &[u8], destination: &Path) -> Resu
     Ok(())
 }
 
-async fn read_engine_version(binary: &Path) -> Result<String, String> {
+async fn read_engine_version(
+    binary: &Path,
+    supervisor: &ProcessSupervisor,
+) -> Result<String, String> {
     let output = timeout(
         Duration::from_secs(10),
         Command::new(binary)
@@ -746,7 +749,10 @@ async fn read_engine_version(binary: &Path) -> Result<String, String> {
             .output(),
     )
     .await
-    .map_err(|_| "The sing-box version check timed out.".to_string())?
+    .map_err(|_| {
+        supervisor.mark_cleanup_unhealthy();
+        "The sing-box version check timed out; child termination could not be confirmed.".to_string()
+    })?
     .map_err(|_| "Could not execute the sing-box engine.".to_string())?;
 
     if !output.status.success() {

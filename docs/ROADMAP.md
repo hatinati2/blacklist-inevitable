@@ -1,6 +1,6 @@
 # Roadmap
 
-The scope is Windows first. Android work starts only after the Windows build has been installed and smoke-tested.
+Windows is the first platform. Android work starts only after the Windows release has been installed and smoke-tested on a clean machine.
 
 ## M0 — Repository and desktop foundation
 
@@ -8,7 +8,7 @@ The scope is Windows first. Android work starts only after the Windows build has
 - [x] Add Tauri 2 + React + TypeScript shell.
 - [x] Add Rust status command and engine target boundary.
 - [x] Add Windows CI build workflow.
-- [x] Confirm Windows installer build in GitHub Actions.
+- [x] Build a Windows NSIS installer in GitHub Actions.
 
 ## M1 — Profiles and basic endpoint checks
 
@@ -17,43 +17,48 @@ The scope is Windows first. Android work starts only after the Windows build has
 - [x] Keep credentials in Windows Credential Manager, separate from profile metadata.
 - [x] Add local profile listing and removal.
 - [x] Add bounded TCP endpoint checks for TCP-capable profiles.
-- [ ] Add fixture coverage for real-world share-link variants and unsupported-option warnings.
+- [ ] Expand fixture coverage for real-world share-link variants and unsupported-option warnings.
 - [ ] Test persistence and credential deletion on a clean Windows machine.
 
-## M2 — First engine integration (sing-box)
+## M2 — First engine integration and preflight (sing-box)
 
-- [ ] Pin a sing-box release after platform, feature, and license review.
-- [ ] Add verified engine installation/update flow; never execute an unverified binary.
-- [ ] Generate one isolated outbound config per imported node.
-- [ ] Run the native `sing-box check` command and report valid/invalid plus actionable errors.
-- [ ] Add a process supervisor with bounded logs and deterministic shutdown.
-- [ ] Add **Real Delay**: HTTP(S) request through the selected node's temporary local proxy.
-- [ ] Measure request round-trip time, not TCP connect time; keep TCP reachability as a separately labelled diagnostic.
-- [ ] Add configurable test URL, timeout, bounded concurrency, and a fallback URL.
-- [ ] Prove preflight never enables TUN or mutates Windows system proxy settings.
-- [ ] Verify cleanup on success, failure, timeout, cancellation, and application shutdown.
+- [x] Pin sing-box 1.14.4 for Windows AMD64 and verify the downloaded archive with a pinned SHA-256 digest.
+- [x] Download, inspect, extract, and version-check the engine executable before installing it.
+- [x] Generate an isolated outbound configuration for each profile supported by the adapter.
+- [x] Run the native `sing-box check -c` validation before a delay probe.
+- [x] Implement Real Delay as an HTTP(S) request through the selected node's temporary loopback SOCKS5 proxy; accept HTTP 204 only and disable redirects.
+- [x] Add a primary and fallback 204 endpoint, bounded request timeouts, and a maximum of four concurrent engine processes.
+- [x] Sort successful results by measured Real Delay and keep failures / unsupported profiles visible.
+- [x] Keep TCP reachability as a separately labelled diagnostic.
+- [x] Keep the current preflight code path free of TUN and Windows system-proxy changes.
+- [ ] Add configurable probe URLs and timeout settings.
+- [ ] Add a cancellation-aware, application-wide process supervisor that verifies termination on cancellation and app shutdown.
+- [ ] Add a shared cleanup-health gate that blocks a future normal Connect when prior runtime cleanup is uncertain.
+- [ ] Verify file cleanup, child-process exit, and listener release under success, failure, timeout, cancellation, and app shutdown on Windows.
+- [ ] Run protocol-aware preflight tests against controlled VLESS, VMess, Trojan, Shadowsocks, Hysteria2, and TUIC test servers.
 
 ## M3 — Multi-engine adapters
 
 - [ ] Add Xray-core adapter and explicitly map supported capabilities.
 - [ ] Add Mihomo adapter and explicitly map supported capabilities.
 - [ ] Report unsupported configuration rather than silently dropping fields.
-- [ ] Add UDP-aware probes for Hysteria2 and TUIC.
+- [ ] Add cross-engine fixture tests so the same imported profile is only advertised as supported where its semantics are preserved.
 
-## M4 — Real connection lifecycle
+## M4 — Normal connection lifecycle
 
-- [ ] Add an explicit connect/disconnect state machine.
+- [ ] Add an explicit Rust-owned Connect / Disconnect state machine.
 - [ ] Add Windows platform integration only for the normal connection path.
-- [ ] Test repeated connect/disconnect, crashes, sleep/resume, and shutdown.
-- [ ] Block normal connect if prior runtime cleanup is uncertain.
+- [ ] Test repeated connect / disconnect, crashes, sleep / resume, and shutdown.
+- [ ] Block normal Connect if prior runtime cleanup is uncertain.
+- [ ] Verify DNS handling and traffic routing without leaking traffic outside the selected tunnel.
 
 ## M5 — Windows release gate
 
-- [ ] Build NSIS installer on Windows CI.
-- [ ] Test installation, upgrade, uninstall, and clean-machine startup.
-- [ ] Run protocol-aware preflight tests against controlled test profiles.
-- [ ] Run real connection smoke tests, including DNS and traffic routing.
-- [ ] Review licenses, notices, signing, and release artifacts.
+- [x] Build the Windows NSIS installer in CI and upload it as a workflow artifact.
+- [ ] Install, upgrade, launch, and uninstall on a clean Windows machine.
+- [ ] Run end-to-end preflight against controlled test profiles on Windows.
+- [ ] Run real connection smoke tests after M4 is implemented, including DNS and traffic routing.
+- [ ] Review licenses, third-party notices, signing, and release artifact integrity.
 - [ ] Publish a Windows release only after all required gates pass.
 
 ## M6 — Android

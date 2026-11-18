@@ -560,6 +560,16 @@ const REAL_DELAY_FALLBACK_URL: &str = "https://cp.cloudflare.com/generate_204";
 const REAL_DELAY_REQUEST_TIMEOUT: Duration = Duration::from_secs(9);
 const ENGINE_START_TIMEOUT: Duration = Duration::from_secs(10);
 
+struct ProbeDirectory(PathBuf);
+
+impl Drop for ProbeDirectory {
+    fn drop(&mut self) {
+        // Synchronous fallback cleanup also runs if the Tauri command future is cancelled.
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+
 pub async fn measure_real_delay(
     app: &AppHandle,
     profile: &ProfileSummary,
@@ -597,6 +607,7 @@ pub async fn measure_real_delay(
     tokio::fs::create_dir(&run_dir)
         .await
         .map_err(|_| "Could not create an isolated directory for this node test.".to_string())?;
+    let _directory_guard = ProbeDirectory(run_dir.clone());
     let config_path = run_dir.join("config.json");
 
     let config_bytes = match serde_json::to_vec(&config) {

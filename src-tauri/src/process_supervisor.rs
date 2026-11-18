@@ -101,6 +101,8 @@ impl ProcessSupervisor {
     /// Waits until all registered engine operations have completed their cleanup.
     /// New work is rejected from the moment request_shutdown is called.
     pub async fn wait_for_idle(&self) -> bool {
+        // Keep this API safe if a future caller forgets to start shutdown explicitly.
+        self.request_shutdown();
         loop {
             let notified = self.inner.idle.notified();
             let mut state = lock_state(&self.inner);
@@ -212,8 +214,8 @@ mod tests {
 
         let worker = tokio::spawn(async move {
             #[cfg(windows)]
-            let mut child = Command::new("cmd")
-                .args(["/C", "ping", "-n", "30", "127.0.0.1"])
+            let mut child = Command::new("powershell.exe")
+                .args(["-NoProfile", "-NonInteractive", "-Command", "Start-Sleep -Seconds 30"])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .kill_on_drop(true)

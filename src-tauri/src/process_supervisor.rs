@@ -387,6 +387,15 @@ impl Default for ProcessSupervisor {
 }
 
 impl ProcessSupervisor {
+    /// Construct the production app supervisor in a blocked state. Engine work
+    /// stays disabled until Tauri setup has attached this application process to
+    /// its kill-on-close Job Object.
+    pub fn for_app() -> Self {
+        let supervisor = Self::default();
+        supervisor.mark_cleanup_unhealthy();
+        supervisor
+    }
+
     /// Attach the application process to its kill-on-close Job Object during
     /// Tauri setup, before the app event loop can invoke engine commands. Existing
     /// Tauri/WebView helper processes remain outside this engine-child job; later
@@ -400,6 +409,8 @@ impl ProcessSupervisor {
             job.assign_current_process()?;
         }
 
+        // Re-enable engine work only after the app itself is job-contained.
+        lock_state(&self.inner).cleanup_healthy = true;
         Ok(())
     }
 
@@ -575,6 +586,17 @@ impl Drop for OperationLease {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn app_supervisor_blocks_engine_work_until_job_attachment() {
+        let supervisor = ProcessSupervisor::for_app();
+
+        assert!(!supervisor.cleanup_healthy());
+        assert!(
+            supervisor.begin_operation().is_err(),
+            "engine work must remain blocked until Tauri setup attaches the app to its Job Object"
+        );
+    }
 
     #[test]
     fn suspended_launch_stops_when_initial_thread_discovery_fails() {

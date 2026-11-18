@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -137,4 +138,20 @@ pub fn remove_profile(app: &AppHandle, profile_id: &str) -> Result<(), String> {
     write_file(&path, &file)?;
     delete_credentials(profile_id);
     Ok(())
+}
+
+#[cfg(windows)]
+pub fn get_credentials(profile_id: &str) -> Result<BTreeMap<String, String>, String> {
+    let entry = keyring::Entry::new(SERVICE_NAME, profile_id)
+        .map_err(|_| "Windows Credential Manager is not available.".to_string())?;
+    let serialized = entry
+        .get_password()
+        .map_err(|_| "Credentials for this profile are missing from Windows Credential Manager.".to_string())?;
+    serde_json::from_str(&serialized)
+        .map_err(|_| "Stored profile credentials are corrupted.".to_string())
+}
+
+#[cfg(not(windows))]
+pub fn get_credentials(_profile_id: &str) -> Result<BTreeMap<String, String>, String> {
+    Err("Secure profile storage is currently supported on Windows only.".to_string())
 }

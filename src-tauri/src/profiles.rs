@@ -110,11 +110,6 @@ fn parse_share_uri(input: &str) -> Result<ParsedProfile, String> {
     if url.query_pairs().any(|(key, _)| key == "plugin") {
         return Err("Shadowsocks plugin links are not supported yet.".to_string());
     }
-    if protocol_is_hysteria2(&scheme)
-        && url.query_pairs().any(|(key, _)| key == "obfs-password")
-    {
-        return Err("Hysteria2 obfuscation passwords are not supported yet.".to_string());
-    }
 
     let server = url
         .host_str()
@@ -188,6 +183,14 @@ fn parse_share_uri(input: &str) -> Result<ParsedProfile, String> {
         _ => return Err("Unsupported link scheme.".to_string()),
     }
 
+    if protocol_is_hysteria2(&scheme) {
+        if let Some((_, value)) = url.query_pairs().find(|(key, _)| key == "obfs-password") {
+            if !value.is_empty() {
+                credentials.insert("obfsPassword".to_string(), value.to_string());
+            }
+        }
+    }
+
     let name = url
         .fragment()
         .map(decode_component)
@@ -235,7 +238,7 @@ fn parse_vmess(input: &str) -> Result<ParsedProfile, String> {
         ("path", "path"),
         ("tls", "tls"),
         ("sni", "sni"),
-        ("scy", "cipher"),
+        ("scy", "security"),
         ("aid", "alterId"),
         ("fp", "fingerprint"),
         ("alpn", "alpn"),
@@ -291,8 +294,13 @@ fn copy_query_options(url: &Url, output: &mut BTreeMap<String, String>) {
         "congestion_control",
         "udp_relay_mode",
         "obfs",
-        "obfs-password",
         "insecure",
+        "pbk",
+        "sid",
+        "spx",
+        "ed",
+        "eh",
+        "allowInsecure",
     ];
 
     for (key, value) in url.query_pairs() {

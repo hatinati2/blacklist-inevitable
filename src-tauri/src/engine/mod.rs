@@ -33,3 +33,6 @@ pub const ENGINE_TARGETS: [EngineDescriptor; 3] = [
         integration_stage: "planned",
     },
 ];
+
+
+pub mod sing_box;

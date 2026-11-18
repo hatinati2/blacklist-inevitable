@@ -56,6 +56,10 @@ jobs:
       - name: Build Windows installer
         run: npm run tauri -- build
 
+      - name: Install, launch, and uninstall smoke test
+        shell: pwsh
+        run: ./scripts/windows-installer-smoke.ps1
+
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:

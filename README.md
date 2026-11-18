@@ -26,7 +26,7 @@ The preflight code path does not enable TUN or change Windows system proxy setti
 
 ## Windows build and verification
 
-The GitHub Actions workflow on `main` runs Rust formatting checks, Rust tests, Rust compilation checks, the frontend build, and the Windows NSIS installer build. A successful CI build confirms compilation and packaging on the GitHub Windows runner; it does **not** replace installation, upgrade, uninstall, or network smoke tests on a clean Windows machine.
+The GitHub Actions workflow on `main` runs Rust formatting checks, Rust tests, Rust compilation checks, the frontend build, and the Windows NSIS installer build. The CI workflow also performs a silent install, launches the app and checks that its process stays alive, then silently uninstalls it on an ephemeral GitHub Windows runner. This catches basic packaging and lifecycle failures, but does **not** replace upgrade testing, clean-machine verification on a user-controlled Windows device, or network smoke tests.
 
 - [Windows build workflow](https://github.com/hatinati2/blacklist-inevitable/actions/workflows/windows.yml)
 - [Repository](https://github.com/hatinati2/blacklist-inevitable)

@@ -89,23 +89,44 @@ impl WindowsJobObject {
         Ok(Self { handle })
     }
 
-    fn assign_pid(&self, pid: u32) -> Result<(), String> {
-        use windows_sys::Win32::Foundation::CloseHandle;
+    /// Associate the desktop application itself with this job before it creates
+    /// any engine children. Child processes then inherit job membership at creation.
+    fn assign_current_process(&self) -> Result<(), String> {
         use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
-        use windows_sys::Win32::System::Threading::{
-            OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
-        };
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
-        let process = unsafe { OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid) };
-        if process.is_null() {
+        let assigned = unsafe {
+            AssignProcessToJobObject(self.handle, GetCurrentProcess())
+        };
+        if assigned == 0 {
             return Err(format!(
-                "OpenProcess({pid}) failed: {}",
+                "AssignProcessToJobObject(current application) failed: {}",
                 std::io::Error::last_os_error()
             ));
         }
 
-        let assigned = unsafe { AssignProcessToJobObject(self.handle, process) };
-        let error = if assigned == 0 {
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn is_pid_in_job(&self, pid: u32) -> Result<bool, String> {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::JobObjects::IsProcessInJob;
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+
+        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if process.is_null() {
+            return Err(format!(
+                "OpenProcess({pid}) failed while verifying inherited Job Object membership: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+
+        let mut is_member = 0;
+        let queried = unsafe { IsProcessInJob(process, self.handle, &mut is_member) };
+        let error = if queried == 0 {
             Some(std::io::Error::last_os_error())
         } else {
             None
@@ -113,53 +134,140 @@ impl WindowsJobObject {
         unsafe { CloseHandle(process) };
 
         match error {
-            Some(error) => Err(format!("AssignProcessToJobObject failed: {error}")),
-            None => Ok(()),
+            Some(error) => Err(format!("IsProcessInJob({pid}) failed: {error}")),
+            None => Ok(is_member != 0),
         }
     }
 
-    /// Assigns a process whose initial thread was created suspended, then resumes
-    /// that thread only after Job Object membership is established.
-    fn assign_suspended_pid(&self, pid: u32) -> Result<(), String> {
-        use windows_sys::Win32::Foundation::CloseHandle;
-        use windows_sys::Win32::System::Threading::ResumeThread;
-
-        let thread = find_suspended_primary_thread(pid)?;
-
-        if let Err(error) = self.assign_pid(pid) {
-            unsafe { CloseHandle(thread) };
-            return Err(error);
-        }
-
-        let previous_suspend_count = unsafe { ResumeThread(thread) };
-        let resume_error = if previous_suspend_count == u32::MAX {
-            Some(std::io::Error::last_os_error())
-        } else {
-            None
+    fn ensure_process_handle_in_job(
+        &self,
+        pid: u32,
+        process: &SuspendedProcessHandle,
+    ) -> Result<(), String> {
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, IsProcessInJob,
         };
-        unsafe { CloseHandle(thread) };
 
-        if let Some(error) = resume_error {
-            return Err(format!("ResumeThread for contained process {pid} failed: {error}"));
-        }
-        if previous_suspend_count != 1 {
+        let mut is_member = 0;
+        let queried = unsafe { IsProcessInJob(process.0, self.handle, &mut is_member) };
+        if queried == 0 {
             return Err(format!(
-                "Process {pid} had an unexpected initial-thread suspend count ({previous_suspend_count}); it was not allowed to continue."
+                "IsProcessInJob({pid}) failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        if is_member != 0 {
+            return Ok(());
+        }
+
+        let assigned = unsafe { AssignProcessToJobObject(self.handle, process.0) };
+        if assigned == 0 {
+            return Err(format!(
+                "AssignProcessToJobObject({pid}) failed: {}",
+                std::io::Error::last_os_error()
             ));
         }
 
         Ok(())
     }
+
+    /// Assigns a process whose initial thread was created suspended, then resumes
+    /// that thread only after Job Object membership is established.
+    fn assign_suspended_pid(&self, pid: u32) -> Result<(), String> {
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, ResumeThread, PROCESS_QUERY_LIMITED_INFORMATION,
+            PROCESS_SET_QUOTA, PROCESS_TERMINATE,
+        };
+
+        // Pin the process object before taking the thread snapshot. Keeping this
+        // handle open prevents a terminated child's PID from being reused while
+        // we validate the initial thread and assign that exact process object.
+        let process = unsafe {
+            OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SET_QUOTA | PROCESS_TERMINATE,
+                0,
+                pid,
+            )
+        };
+        if process.is_null() {
+            return Err(format!(
+                "OpenProcess({pid}) failed before suspended-thread assignment: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let process = SuspendedProcessHandle(process);
+
+        assign_suspended_thread(
+            pid,
+            find_suspended_primary_thread,
+            |process_id| self.ensure_process_handle_in_job(process_id, &process),
+            |thread| {
+                let previous_suspend_count = unsafe { ResumeThread(thread.0) };
+                if previous_suspend_count == u32::MAX {
+                    Err(format!(
+                        "ResumeThread for contained process {pid} failed: {}",
+                        std::io::Error::last_os_error()
+                    ))
+                } else {
+                    Ok(previous_suspend_count)
+                }
+            },
+        )
+    }
 }
 
 
+fn assign_suspended_thread<T>(
+    pid: u32,
+    find_thread: impl FnOnce(u32) -> Result<T, String>,
+    assign_process: impl FnOnce(u32) -> Result<(), String>,
+    resume_thread: impl FnOnce(&T) -> Result<u32, String>,
+) -> Result<(), String> {
+    let thread = find_thread(pid)?;
+    assign_process(pid)?;
+    let previous_suspend_count = resume_thread(&thread)?;
+
+    if previous_suspend_count != 1 {
+        return Err(format!(
+            "Process {pid} had an unexpected initial-thread suspend count ({previous_suspend_count}); it was not allowed to continue."
+        ));
+    }
+
+    Ok(())
+}
+
 #[cfg(windows)]
-fn find_suspended_primary_thread(pid: u32) -> Result<windows_sys::Win32::Foundation::HANDLE, String> {
+struct SuspendedProcessHandle(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl Drop for SuspendedProcessHandle {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        unsafe { CloseHandle(self.0) };
+    }
+}
+
+#[cfg(windows)]
+struct SuspendedThreadHandle(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl Drop for SuspendedThreadHandle {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        unsafe { CloseHandle(self.0) };
+    }
+}
+
+#[cfg(windows)]
+fn find_suspended_primary_thread(pid: u32) -> Result<SuspendedThreadHandle, String> {
     use windows_sys::Win32::Foundation::{CloseHandle, GetLastError};
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Thread32First, Thread32Next, THREADENTRY32, TH32CS_SNAPTHREAD,
     };
-    use windows_sys::Win32::System::Threading::{OpenThread, THREAD_SUSPEND_RESUME};
+    use windows_sys::Win32::System::Threading::{
+        GetProcessIdOfThread, OpenThread, THREAD_QUERY_LIMITED_INFORMATION,
+        THREAD_SUSPEND_RESUME,
+    };
 
     // CREATE_SUSPENDED prevents the image's primary thread from running. Before it
     // is resumed, the process must have exactly one thread: its initial thread.
@@ -217,7 +325,13 @@ fn find_suspended_primary_thread(pid: u32) -> Result<windows_sys::Win32::Foundat
     let thread_id = thread_id.ok_or_else(|| {
         format!("No initial thread was found for suspended process {pid}.")
     })?;
-    let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, thread_id) };
+    let thread = unsafe {
+        OpenThread(
+            THREAD_SUSPEND_RESUME | THREAD_QUERY_LIMITED_INFORMATION,
+            0,
+            thread_id,
+        )
+    };
     if thread.is_null() {
         return Err(format!(
             "OpenThread({thread_id}) failed for suspended process {pid}: {}",
@@ -225,7 +339,17 @@ fn find_suspended_primary_thread(pid: u32) -> Result<windows_sys::Win32::Foundat
         ));
     }
 
-    Ok(thread)
+    // A Tool Help snapshot contains IDs, not pinned handles. Verify that the
+    // opened thread still belongs to the child PID before it can be resumed.
+    let owner_pid = unsafe { GetProcessIdOfThread(thread) };
+    if owner_pid != pid {
+        unsafe { CloseHandle(thread) };
+        return Err(format!(
+            "The initial thread handle no longer belongs to suspended process {pid}."
+        ));
+    }
+
+    Ok(SuspendedThreadHandle(thread))
 }
 
 #[cfg(windows)]
@@ -272,6 +396,33 @@ impl Default for ProcessSupervisor {
 }
 
 impl ProcessSupervisor {
+    /// Construct the production app supervisor in a blocked state. Engine work
+    /// stays disabled until Tauri setup has attached this application process to
+    /// its kill-on-close Job Object.
+    pub fn for_app() -> Self {
+        let supervisor = Self::default();
+        supervisor.mark_cleanup_unhealthy();
+        supervisor
+    }
+
+    /// Attach the application process to its kill-on-close Job Object during
+    /// Tauri setup, before the app event loop can invoke engine commands. Existing
+    /// Tauri/WebView helper processes remain outside this engine-child job; later
+    /// engine children inherit membership at process creation.
+    pub fn attach_current_process_to_job(&self) -> Result<(), String> {
+        #[cfg(windows)]
+        {
+            let job = self.inner.job.as_ref().ok_or_else(|| {
+                "The Windows process-containment Job Object is unavailable.".to_string()
+            })?;
+            job.assign_current_process()?;
+        }
+
+        // Re-enable engine work only after the app itself is job-contained.
+        lock_state(&self.inner).cleanup_healthy = true;
+        Ok(())
+    }
+
     pub fn begin_operation(&self) -> Result<OperationLease, String> {
         let (sender, receiver) = watch::channel(false);
         let mut state = lock_state(&self.inner);
@@ -445,6 +596,117 @@ impl Drop for OperationLease {
 mod tests {
     use super::*;
 
+    #[test]
+    fn app_supervisor_blocks_engine_work_until_job_attachment() {
+        let supervisor = ProcessSupervisor::for_app();
+
+        assert!(!supervisor.cleanup_healthy());
+        assert!(
+            supervisor.begin_operation().is_err(),
+            "engine work must remain blocked until Tauri setup attaches the app to its Job Object"
+        );
+    }
+
+    #[test]
+    fn suspended_launch_stops_when_initial_thread_discovery_fails() {
+        use std::cell::Cell;
+
+        let assigned = Cell::new(false);
+        let resumed = Cell::new(false);
+        let result = assign_suspended_thread(
+            42,
+            |_| Err::<u32, _>("thread discovery failed".to_string()),
+            |_| {
+                assigned.set(true);
+                Ok(())
+            },
+            |_| {
+                resumed.set(true);
+                Ok(1)
+            },
+        );
+
+        assert!(result.unwrap_err().contains("thread discovery failed"));
+        assert!(!assigned.get(), "a process without a verified thread must not be assigned");
+        assert!(!resumed.get(), "a process without a verified thread must never be resumed");
+    }
+
+    #[test]
+    fn suspended_launch_stops_when_job_assignment_fails() {
+        use std::cell::Cell;
+
+        let resumed = Cell::new(false);
+        let result = assign_suspended_thread(
+            42,
+            |_| Ok::<u32, String>(7),
+            |_| Err("Job Object assignment failed".to_string()),
+            |_| {
+                resumed.set(true);
+                Ok(1)
+            },
+        );
+
+        assert!(result.unwrap_err().contains("Job Object assignment failed"));
+        assert!(!resumed.get(), "a process must not be resumed after failed Job Object assignment");
+    }
+
+    #[test]
+    fn suspended_launch_stops_when_resume_fails() {
+        let result = assign_suspended_thread(
+            42,
+            |_| Ok::<u32, String>(7),
+            |_| Ok(()),
+            |_| Err("ResumeThread failed".to_string()),
+        );
+
+        assert!(result.unwrap_err().contains("ResumeThread failed"));
+    }
+
+    #[test]
+    fn suspended_launch_rejects_an_unexpected_suspend_count() {
+        for previous_suspend_count in [0, 2] {
+            let result = assign_suspended_thread(
+                42,
+                |_| Ok::<u32, String>(7),
+                |_| Ok(()),
+                |_| Ok(previous_suspend_count),
+            );
+
+            assert!(
+                result.unwrap_err().contains("unexpected initial-thread suspend count"),
+                "suspend count {previous_suspend_count} must not be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn suspended_launch_assigns_before_resuming_and_requires_count_one() {
+        use std::cell::RefCell;
+
+        let calls = RefCell::new(Vec::new());
+        assign_suspended_thread(
+            42,
+            |pid| {
+                calls.borrow_mut().push(format!("find:{pid}"));
+                Ok::<u32, String>(7)
+            },
+            |pid| {
+                calls.borrow_mut().push(format!("assign:{pid}"));
+                Ok(())
+            },
+            |thread| {
+                calls.borrow_mut().push(format!("resume:{thread}"));
+                Ok(1)
+            },
+        )
+        .expect("a verified suspended launch should succeed");
+
+        assert_eq!(
+            calls.into_inner(),
+            vec!["find:42", "assign:42", "resume:7"]
+        );
+    }
+
     #[cfg(windows)]
     fn supervisor_without_job_for_test() -> ProcessSupervisor {
         ProcessSupervisor {
@@ -534,6 +796,215 @@ mod tests {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         command
+    }
+
+    #[cfg(windows)]
+    const JOB_HELPER_STATUS_ENV: &str = "BLACKLIST_INEVITABLE_TEST_JOB_HELPER_STATUS";
+    #[cfg(windows)]
+    const JOB_HELPER_MARKER_ENV: &str = "BLACKLIST_INEVITABLE_TEST_JOB_HELPER_MARKER";
+    #[cfg(windows)]
+    const JOB_HELPER_RELEASE_ENV: &str = "BLACKLIST_INEVITABLE_TEST_JOB_HELPER_RELEASE";
+
+    // Launched as an isolated test-binary process. Joining the Job Object makes
+    // this helper and its suspended child members; the parent test releases it
+    // by creating the path in JOB_HELPER_RELEASE_ENV.
+    #[cfg(windows)]
+    #[test]
+    fn job_inheritance_helper_process() {
+        use std::os::windows::process::CommandExt;
+        use std::process::{Command as StdCommand, Stdio};
+        use std::time::Duration;
+        use windows_sys::Win32::System::Threading::CREATE_SUSPENDED;
+
+        let Some(status_path) = std::env::var_os(JOB_HELPER_STATUS_ENV).map(std::path::PathBuf::from) else {
+            return;
+        };
+        let marker_path = std::env::var_os(JOB_HELPER_MARKER_ENV)
+            .map(std::path::PathBuf::from)
+            .expect("helper marker path");
+        let release_path = std::env::var_os(JOB_HELPER_RELEASE_ENV)
+            .map(std::path::PathBuf::from)
+            .expect("helper release path");
+
+        let supervisor = ProcessSupervisor::default();
+        if let Err(error) = supervisor.attach_current_process_to_job() {
+            std::fs::write(&status_path, format!("application-could-not-join-job:{error}"))
+                .expect("write failed job status");
+            return;
+        }
+
+        let executable = std::env::current_exe().expect("resolve test executable");
+        let mut command = StdCommand::new(executable);
+        command
+            .args([
+                "--exact",
+                "process_supervisor::tests::write_marker_child_process",
+                "--nocapture",
+            ])
+            .env(MARKER_CHILD_ENV, &marker_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(CREATE_SUSPENDED);
+
+        // std::process::Child does not kill on Drop. The Job Object is the owner.
+        let child = command.spawn().expect("spawn suspended job-inherited child");
+        let child_pid = child.id();
+        let inherited = supervisor
+            .inner
+            .job
+            .as_ref()
+            .expect("application Job Object")
+            .is_pid_in_job(child_pid)
+            .expect("query inherited Job Object membership");
+        std::fs::write(&status_path, format!("{child_pid}:{inherited}"))
+            .expect("write inherited child status");
+        drop(child);
+
+        for _ in 0..1500 {
+            if release_path.exists() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        std::fs::write(&status_path, "parent-test-did-not-release-helper")
+            .expect("write helper timeout status");
+    }
+
+    #[cfg(windows)]
+    fn process_is_active(pid: u32) -> Result<bool, String> {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+
+        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if process.is_null() {
+            return Ok(false);
+        }
+
+        let mut exit_code = 0;
+        let queried = unsafe { GetExitCodeProcess(process, &mut exit_code) };
+        let error = if queried == 0 {
+            Some(std::io::Error::last_os_error())
+        } else {
+            None
+        };
+        unsafe { CloseHandle(process) };
+
+        match error {
+            Some(error) => Err(format!("GetExitCodeProcess({pid}) failed: {error}")),
+            None => Ok(exit_code == 259), // STILL_ACTIVE
+        }
+    }
+
+    #[cfg(windows)]
+    async fn wait_for_process_exit(pid: u32) {
+        use tokio::time::{sleep, timeout, Duration};
+
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if !process_is_active(pid).expect("query process exit state") {
+                    return;
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("process should exit when its own Job Object closes");
+    }
+
+    #[cfg(windows)]
+    async fn wait_for_file(path: &std::path::Path) {
+        use tokio::time::{sleep, timeout, Duration};
+
+        timeout(Duration::from_secs(15), async {
+            loop {
+                if path.is_file() {
+                    return;
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("job helper status file should be written");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn app_job_inheritance_contains_children_and_is_instance_scoped() {
+        use std::process::{Command as StdCommand, Stdio};
+        use tokio::time::sleep;
+        use std::time::Duration;
+
+        let root = std::env::temp_dir().join(format!(
+            "blacklist-inevitable-job-inheritance-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).expect("create test directory");
+
+        let executable = std::env::current_exe().expect("resolve test executable");
+        let mut helpers = Vec::new();
+        let mut records = Vec::new();
+
+        for name in ["first", "second"] {
+            let status_path = root.join(format!("{name}-status.txt"));
+            let marker_path = root.join(format!("{name}-marker.txt"));
+            let release_path = root.join(format!("{name}-release.txt"));
+            let mut helper = StdCommand::new(&executable);
+            helper
+                .args([
+                    "--exact",
+                    "process_supervisor::tests::job_inheritance_helper_process",
+                    "--nocapture",
+                ])
+                .env(JOB_HELPER_STATUS_ENV, &status_path)
+                .env(JOB_HELPER_MARKER_ENV, &marker_path)
+                .env(JOB_HELPER_RELEASE_ENV, &release_path)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+
+            let child = helper.spawn().expect("spawn isolated Job Object owner");
+            let helper_pid = child.id();
+            helpers.push((child, helper_pid, release_path));
+            records.push((status_path, marker_path));
+        }
+
+        wait_for_file(&records[0].0).await;
+        wait_for_file(&records[1].0).await;
+
+        let first = std::fs::read_to_string(&records[0].0).expect("read first helper status");
+        let second = std::fs::read_to_string(&records[1].0).expect("read second helper status");
+        let parse_child_pid = |value: &str| -> u32 {
+            let (pid, inherited) = value.split_once(':').expect("pid:membership status");
+            assert_eq!(inherited, "true", "child must inherit its own app Job Object");
+            pid.parse().expect("parse child PID")
+        };
+        let first_child_pid = parse_child_pid(&first);
+        let second_child_pid = parse_child_pid(&second);
+
+        assert!(!records[0].1.exists(), "suspended first child must not execute");
+        assert!(!records[1].1.exists(), "suspended second child must not execute");
+
+        // Close only the first app instance's job. Its own process and child must
+        // terminate, while the second app instance and its child remain alive.
+        std::fs::write(&helpers[0].2, b"release").expect("release first app instance");
+        wait_for_process_exit(helpers[0].1).await;
+        wait_for_process_exit(first_child_pid).await;
+        assert!(process_is_active(helpers[1].1).expect("check second helper"));
+        assert!(process_is_active(second_child_pid).expect("check second child"));
+        assert!(!records[1].1.exists(), "the other app's suspended child must remain unexecuted");
+
+        std::fs::write(&helpers[1].2, b"release").expect("release second app instance");
+        wait_for_process_exit(helpers[1].1).await;
+        wait_for_process_exit(second_child_pid).await;
+
+        for (mut helper, _, _) in helpers {
+            let _ = helper.try_wait();
+        }
+        std::fs::remove_dir_all(root).expect("remove test directory");
     }
 
     #[cfg(windows)]

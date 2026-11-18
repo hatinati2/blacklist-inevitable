@@ -445,6 +445,23 @@ impl Drop for OperationLease {
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
+    fn supervisor_without_job_for_test() -> ProcessSupervisor {
+        ProcessSupervisor {
+            inner: Arc::new(Inner {
+                state: Mutex::new(State {
+                    shutting_down: false,
+                    shutdown_complete: false,
+                    cleanup_healthy: false,
+                    next_operation_id: 1,
+                    active: HashMap::new(),
+                }),
+                idle: Notify::new(),
+                job: None,
+            }),
+        }
+    }
+
 
     #[cfg(windows)]
     #[tokio::test]
@@ -511,7 +528,8 @@ mod tests {
 
             let mut command = Command::new("powershell.exe");
             command
-                .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+                .args(["-NoProfile", "-NonInteractive", "-Command"])
+                .arg(&script)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
@@ -536,6 +554,39 @@ mod tests {
             assert!(marker.is_file(), "child should run after safe resume");
             std::fs::remove_file(marker).expect("remove marker file");
         }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn unavailable_job_terminates_suspended_child_before_execution() {
+        use std::process::Stdio;
+        use tokio::process::Command;
+
+        let supervisor = supervisor_without_job_for_test();
+        let marker = std::env::temp_dir().join(format!(
+            "blacklist-inevitable-uncontained-start-{}.txt",
+            uuid::Uuid::new_v4()
+        ));
+        let escaped_path = marker.to_string_lossy().replace('\'', "''");
+        let script = format!("Set-Content -LiteralPath '{escaped_path}' -Value started");
+
+        let mut command = Command::new("powershell.exe");
+        command
+            .args(["-NoProfile", "-NonInteractive", "-Command"])
+            .arg(&script)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        supervisor.prepare_child_command(&mut command);
+        let mut child = command.spawn().expect("start suspended child without a job");
+
+        let error = supervisor
+            .assign_child(&mut child)
+            .await
+            .expect_err("job absence must fail closed");
+        assert!(error.contains("child was stopped"));
+        assert!(!marker.exists(), "uncontained child must never execute");
+        assert!(!supervisor.cleanup_healthy());
     }
 
     #[tokio::test]

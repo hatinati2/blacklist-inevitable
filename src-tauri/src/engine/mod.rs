@@ -20,7 +20,7 @@ pub const ENGINE_TARGETS: [EngineDescriptor; 3] = [
     EngineDescriptor {
         kind: EngineKind::SingBox,
         binary_name: "sing-box",
-        integration_stage: "planned",
+        integration_stage: "implemented · preflight only",
     },
     EngineDescriptor {
         kind: EngineKind::XrayCore,

@@ -782,7 +782,7 @@ mod tests {
     #[test]
     fn job_inheritance_helper_process() {
         use std::os::windows::process::CommandExt;
-        use std::process::Command as StdCommand;
+        use std::process::{Command as StdCommand, Stdio};
         use std::time::Duration;
         use windows_sys::Win32::System::Threading::CREATE_SUSPENDED;
 
@@ -904,7 +904,7 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test]
     async fn app_job_inheritance_contains_children_and_is_instance_scoped() {
-        use std::process::Command as StdCommand;
+        use std::process::{Command as StdCommand, Stdio};
         use tokio::time::sleep;
         use std::time::Duration;
 

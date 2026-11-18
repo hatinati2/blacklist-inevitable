@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -11,6 +11,12 @@ use tokio::time::timeout;
 use crate::engine::{EngineDescriptor, ENGINE_TARGETS};
 use crate::profile_store;
 use crate::profiles::{parse_import_text, ImportIssue, ProfileSummary};
+
+static REAL_DELAY_SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
+
+fn real_delay_semaphore() -> Arc<Semaphore> {
+    Arc::clone(REAL_DELAY_SEMAPHORE.get_or_init(|| Arc::new(Semaphore::new(4))))
+}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -243,7 +249,9 @@ pub async fn test_all_profile_real_delays(
     app: AppHandle,
 ) -> Result<Vec<RealDelayResult>, String> {
     let profiles = profile_store::list_profiles(&app)?;
-    let semaphore = Arc::new(Semaphore::new(4));
+    // Shared across every invocation, including detached workers from a cancelled
+    // command, so the process cap applies to the entire app rather than one batch.
+    let semaphore = real_delay_semaphore();
     let mut tasks = Vec::new();
 
     for profile in profiles {

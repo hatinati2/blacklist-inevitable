@@ -506,10 +506,39 @@ mod tests {
 
 
     #[cfg(windows)]
-    #[tokio::test]
-    async fn suspended_engine_child_cannot_execute_before_job_assignment() {
+    const MARKER_CHILD_ENV: &str = "BLACKLIST_INEVITABLE_TEST_MARKER_PATH";
+
+    #[cfg(windows)]
+    #[test]
+    fn write_marker_child_process() {
+        if let Some(path) = std::env::var_os(MARKER_CHILD_ENV) {
+            std::fs::write(path, b"started").expect("write child marker");
+        }
+    }
+
+    #[cfg(windows)]
+    fn marker_child_command(marker: &std::path::Path) -> tokio::process::Command {
         use std::process::Stdio;
         use tokio::process::Command;
+
+        let executable = std::env::current_exe().expect("resolve current test executable");
+        let mut command = Command::new(executable);
+        command
+            .args([
+                "--exact",
+                "process_supervisor::tests::write_marker_child_process",
+                "--nocapture",
+            ])
+            .env(MARKER_CHILD_ENV, marker)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        command
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn suspended_engine_child_cannot_execute_before_job_assignment() {
         use tokio::time::{sleep, timeout, Duration};
 
         let supervisor = ProcessSupervisor::default();
@@ -521,15 +550,7 @@ mod tests {
                 "blacklist-inevitable-contained-start-{}.txt",
                 uuid::Uuid::new_v4()
             ));
-            let command_line = format!("echo started > \"{}\"", marker.display());
-
-            let mut command = Command::new("cmd.exe");
-            command
-                .args(["/D", "/C"])
-                .arg(&command_line)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
+            let mut command = marker_child_command(&marker);
             supervisor.prepare_child_command(&mut command);
             let mut child = command.spawn().expect("start suspended marker child");
 
@@ -544,10 +565,11 @@ mod tests {
                 .await
                 .expect("assign child before allowing its first instruction");
 
-            timeout(Duration::from_secs(10), child.wait())
+            let status = timeout(Duration::from_secs(10), child.wait())
                 .await
                 .expect("marker child completion timeout")
                 .expect("wait for marker child");
+            assert!(status.success(), "marker child exited unsuccessfully: {status}");
             assert!(marker.is_file(), "child should run after safe resume");
             std::fs::remove_file(marker).expect("remove marker file");
         }
@@ -556,27 +578,18 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test]
     async fn unavailable_job_terminates_suspended_child_before_execution() {
-        use std::process::Stdio;
-        use tokio::process::Command;
+        use tokio::time::{sleep, Duration};
 
         let supervisor = supervisor_without_job_for_test();
         let marker = std::env::temp_dir().join(format!(
             "blacklist-inevitable-uncontained-start-{}.txt",
             uuid::Uuid::new_v4()
         ));
-        let command_line = format!("echo started > \"{}\"", marker.display());
-
-        let mut command = Command::new("cmd.exe");
-        command
-            .args(["/D", "/C"])
-            .arg(&command_line)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+        let mut command = marker_child_command(&marker);
         supervisor.prepare_child_command(&mut command);
         let mut child = command.spawn().expect("start suspended child without a job");
 
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        sleep(Duration::from_millis(250)).await;
         assert!(
             !marker.exists(),
             "child executed before Job Object assignment was attempted"

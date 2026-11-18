@@ -220,7 +220,7 @@ pub async fn validate_profile_config(
         .find(|profile| profile.id == profile_id)
         .ok_or_else(|| "Profile not found.".to_string())?;
     let credentials = profile_store::get_credentials(&profile.id)?;
-    match crate::engine::sing_box::validate_profile_config(&app, &profile, &credentials).await {
+    match crate::engine::sing_box::validate_profile_config(&app, &profile, &credentials, &supervisor).await {
         Ok(()) => Ok(ConfigValidationResult {
             profile_id: profile.id,
             valid: true,

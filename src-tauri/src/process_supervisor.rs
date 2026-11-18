@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use tokio::sync::{watch, Notify};
 
@@ -11,6 +11,18 @@ pub struct ProcessSupervisor {
 struct Inner {
     state: Mutex<State>,
     idle: Notify,
+}
+
+fn lock_state(inner: &Inner) -> MutexGuard<'_, State> {
+    match inner.state.lock() {
+        Ok(state) => state,
+        Err(poisoned) => {
+            let mut state = poisoned.into_inner();
+            // Recover enough state to finish shutdown, but never permit new engine work.
+            state.cleanup_healthy = false;
+            state
+        }
+    }
 }
 
 struct State {
@@ -47,11 +59,7 @@ impl Default for ProcessSupervisor {
 impl ProcessSupervisor {
     pub fn begin_operation(&self) -> Result<OperationLease, String> {
         let (sender, receiver) = watch::channel(false);
-        let mut state = self
-            .inner
-            .state
-            .lock()
-            .map_err(|_| "The process supervisor state is unavailable.".to_string())?;
+        let mut state = lock_state(&self.inner);
 
         if state.shutting_down {
             return Err("The application is shutting down; no new engine process may start.".to_string());
@@ -75,9 +83,7 @@ impl ProcessSupervisor {
     /// Returns true only for the first caller that begins shutdown.
     pub fn request_shutdown(&self) -> bool {
         let senders = {
-            let Ok(mut state) = self.inner.state.lock() else {
-                return false;
-            };
+            let mut state = lock_state(&self.inner);
             if state.shutting_down {
                 return false;
             }
@@ -97,9 +103,7 @@ impl ProcessSupervisor {
     pub async fn wait_for_idle(&self) -> bool {
         loop {
             let notified = self.inner.idle.notified();
-            let Ok(mut state) = self.inner.state.lock() else {
-                return false;
-            };
+            let mut state = lock_state(&self.inner);
 
             if state.active.is_empty() {
                 state.shutdown_complete = true;
@@ -112,25 +116,15 @@ impl ProcessSupervisor {
     }
 
     pub fn shutdown_complete(&self) -> bool {
-        self.inner
-            .state
-            .lock()
-            .map(|state| state.shutdown_complete)
-            .unwrap_or(false)
+        lock_state(&self.inner).shutdown_complete
     }
 
     pub fn cleanup_healthy(&self) -> bool {
-        self.inner
-            .state
-            .lock()
-            .map(|state| state.cleanup_healthy)
-            .unwrap_or(false)
+        lock_state(&self.inner).cleanup_healthy
     }
 
     pub(crate) fn mark_cleanup_unhealthy(&self) {
-        if let Ok(mut state) = self.inner.state.lock() {
-            state.cleanup_healthy = false;
-        }
+        lock_state(&self.inner).cleanup_healthy = false;
     }
 }
 
@@ -147,23 +141,17 @@ impl OperationLease {
     }
 
     pub fn mark_cleanup_unhealthy(&self) {
-        if let Ok(mut state) = self.inner.state.lock() {
-            state.cleanup_healthy = false;
-        }
+        lock_state(&self.inner).cleanup_healthy = false;
     }
 }
 
 impl Drop for OperationLease {
     fn drop(&mut self) {
-        let became_idle = self
-            .inner
-            .state
-            .lock()
-            .map(|mut state| {
-                state.active.remove(&self.id);
-                state.active.is_empty()
-            })
-            .unwrap_or(false);
+        let became_idle = {
+            let mut state = lock_state(&self.inner);
+            state.active.remove(&self.id);
+            state.active.is_empty()
+        };
 
         if became_idle {
             self.inner.idle.notify_waiters();

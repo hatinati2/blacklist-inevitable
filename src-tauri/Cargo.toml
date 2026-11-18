@@ -27,4 +27,10 @@ url = "2.5"
 uuid = { version = "1", features = ["v4"] }
 
 [target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
 keyring = { version = "4.2", default-features = false, features = ["v1", "windows-native-keyring-store"] }

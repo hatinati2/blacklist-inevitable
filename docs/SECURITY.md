@@ -26,18 +26,21 @@ Current implementation:
 - The normal request path asks the temporary child to stop and waits for its exit with a bounded timeout.
 - Child processes use kill-on-drop, and a temporary-directory Drop guard attempts fallback file cleanup if the command future is dropped.
 
-Current graceful-shutdown supervision:
+Current process supervision:
 
 - Real Delay, explicit config-validation, engine installation, and installed-version status commands register operation leases with an application-scoped Rust supervisor.
 - New supervised engine operations are rejected after shutdown begins.
 - Tauri exit is deferred while active Real Delay operations cancel their HTTP probe, stop and wait for the sing-box child, and remove temporary probe files.
 - Config validation remains bounded by a 15-second timeout. If process termination or config-file cleanup is uncertain, the in-memory runtime health flag is set to unsafe and later engine operations are blocked for the rest of that app session.
 - Temporary config and probe-directory Drop guards make a final synchronous cleanup attempt.
+- On Windows, the supervisor owns a Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`; each engine child is assigned immediately after spawn. Closing the final job handle makes Windows terminate assigned processes even if the app exits unexpectedly.
+- If Job Object initialization or child assignment fails, engine work is blocked; an uncontained child is killed and awaited before the operation returns.
 
 Remaining requirements:
 
-- Verify child termination, listener release, and file cleanup on success, failure, timeout, user cancellation, graceful app shutdown, and forced termination on Windows.
-- Add Windows Job Object ownership and startup recovery so stale child processes are handled after hard crashes or power loss.
+- Close or recover the narrow crash window between process creation and Job Object assignment.
+- Verify child termination, listener release, and file cleanup on success, failure, timeout, user cancellation, graceful app shutdown, and app-level forced termination on Windows.
+- Keep startup recovery fail-closed so a stale engine process can never be mistaken for a clean normal-connection runtime.
 - Add explicit access-control hardening for credential-bearing temporary files where needed.
 - Keep preflight isolated from all normal connection and device-routing state.
 
@@ -47,7 +50,7 @@ Before normal connection functionality is implemented:
 
 - Extend the current preflight supervisor into a connection-runtime owner for all engine process handles.
 - Child processes must not be detached; shutdown and cancellation must await process exit.
-- Windows Job Object ownership and startup recovery must cover forced termination and hard crashes.
+- Windows Job Object ownership covers children after assignment; startup recovery and app-level crash/forced-termination validation must cover the pre-assignment edge case.
 - Connect, Disconnect, cancellation, crash recovery, and app shutdown must be serialized through one Rust-owned state machine.
 - Uncertain cleanup must fail closed and block the next normal connection, including after an application restart.
 
@@ -65,6 +68,6 @@ Before normal connection functionality is implemented:
 - The current download flow verifies the pinned archive digest; it does not perform a separate upstream signature-verification step.
 - The sing-box executable is downloaded on demand and is not bundled in the app installer.
 - A third-party notice is written beside the installed executable.
-- Real Delay workers are detached from the invoking Tauri command so closing the invoking window or cancelling that command does not abort the worker before its normal child-process and temporary-directory cleanup. A process-wide supervisor that confirms child termination during application shutdown remains a release requirement.
+- Real Delay workers are detached from the invoking Tauri command so closing the invoking window or cancelling that command does not abort the worker before cleanup. The process-wide supervisor waits for graceful cleanup, while the Windows Job Object provides kill-on-close containment for assigned children.
 - Complete license, notice, redistribution, signing, and release review remains a release gate.
 - Never download or execute an engine binary merely because a profile references it.

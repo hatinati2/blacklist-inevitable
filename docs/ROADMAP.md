@@ -35,8 +35,10 @@ Windows is the first platform. Android work starts only after the Windows releas
 - [x] Add an application-scoped supervisor for Real Delay and config-validation operations; defer graceful app exit until registered operations finish cleanup.
 - [x] Cancel active Real Delay workers on graceful app shutdown, stop and await their sing-box child process, and reject new engine work once shutdown begins.
 - [x] Add an in-memory cleanup-health gate that blocks subsequent engine operations in the current app session when cleanup is uncertain.
-- [ ] Add Windows Job Object ownership and startup recovery for orphaned engine processes after hard crashes or forced termination.
-- [ ] Verify file cleanup, child-process exit, and listener release under success, failure, timeout, cancellation, graceful shutdown, and forced termination on Windows.
+- [x] Add Windows Job Object ownership with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`; assign each engine child immediately after spawn so Windows terminates assigned processes when the app's final job handle closes.
+- [x] Add a Windows unit test confirming that closing the final Job Object handle terminates an assigned child.
+- [ ] Close or recover the narrow process-creation-to-job-assignment crash window during startup.
+- [ ] Verify file cleanup, child-process exit, and listener release under success, failure, timeout, cancellation, graceful shutdown, and app-level forced termination on Windows.
 - [ ] Run protocol-aware preflight tests against controlled VLESS, VMess, Trojan, Shadowsocks, Hysteria2, and TUIC test servers.
 
 ## M3 — Multi-engine adapters

@@ -795,9 +795,9 @@ mod tests {
             .map(std::path::PathBuf::from)
             .expect("helper release path");
 
-        let supervisor = ProcessSupervisor::for_app();
-        if !supervisor.cleanup_healthy() {
-            std::fs::write(&status_path, "application-could-not-join-job")
+        let supervisor = ProcessSupervisor::default();
+        if let Err(error) = supervisor.attach_current_process_to_job() {
+            std::fs::write(&status_path, format!("application-could-not-join-job:{error}"))
                 .expect("write failed job status");
             return;
         }

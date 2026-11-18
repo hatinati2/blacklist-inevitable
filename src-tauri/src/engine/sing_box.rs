@@ -14,6 +14,12 @@ pub fn build_probe_config(
     if listen_port == 0 {
         return Err("The temporary local proxy port is invalid.".to_string());
     }
+    if !profile.unsupported_options.is_empty() {
+        return Err(format!(
+            "The imported link contains options not handled by this engine: {}.",
+            profile.unsupported_options.join(", ")
+        ));
+    }
 
     let mut outbound = Map::new();
     outbound.insert("type".to_string(), json!(profile.protocol));
@@ -23,12 +29,32 @@ pub fn build_probe_config(
 
     match profile.protocol.as_str() {
         "vless" => {
+            ensure_allowed_options(profile, &[
+                "security", "sni", "host", "path", "serviceName", "flow", "fp",
+                "fingerprint", "alpn", "encryption", "packetEncoding", "type",
+                "transport", "ed", "eh", "pbk", "sid", "spx", "insecure",
+                "allowInsecure",
+            ])?;
+            if profile.options.get("encryption").is_some_and(|value| value != "none") {
+                return Err("The current sing-box adapter supports only VLESS encryption=none.".to_string());
+            }
+            if profile.options.contains_key("spx") {
+                return Err("The sing-box adapter does not currently map the Reality spiderX (spx) option.".to_string());
+            }
             outbound.insert("uuid".to_string(), json!(required(credentials, "uuid")?));
             insert_option(&mut outbound, "flow", &profile.options, "flow");
             insert_tls(&mut outbound, profile, false)?;
             insert_transport(&mut outbound, &profile.options)?;
         }
         "vmess" => {
+            ensure_allowed_options(profile, &[
+                "transport", "headerType", "host", "path", "tls", "sni",
+                "security", "alterId", "fingerprint", "alpn", "fp",
+                "packetEncoding", "ed", "eh", "insecure", "allowInsecure",
+            ])?;
+            if profile.options.get("headerType").is_some_and(|value| value != "none" && !value.is_empty()) {
+                return Err("VMess header types other than 'none' are not supported by the sing-box adapter.".to_string());
+            }
             outbound.insert("uuid".to_string(), json!(required(credentials, "uuid")?));
             outbound.insert(
                 "security".to_string(),
@@ -43,11 +69,17 @@ pub fn build_probe_config(
             insert_transport(&mut outbound, &profile.options)?;
         }
         "trojan" => {
+            ensure_allowed_options(profile, &[
+                "security", "sni", "host", "path", "serviceName", "flow", "fp",
+                "fingerprint", "alpn", "insecure", "allowInsecure", "type",
+                "transport", "ed", "eh",
+            ])?;
             outbound.insert("password".to_string(), json!(required(credentials, "password")?));
             insert_tls(&mut outbound, profile, true)?;
             insert_transport(&mut outbound, &profile.options)?;
         }
         "shadowsocks" => {
+            ensure_allowed_options(profile, &["method"])?;
             outbound.insert(
                 "method".to_string(),
                 json!(profile.options.get("method").ok_or_else(|| "Shadowsocks encryption method is missing.".to_string())?),
@@ -55,6 +87,10 @@ pub fn build_probe_config(
             outbound.insert("password".to_string(), json!(required(credentials, "password")?));
         }
         "hysteria2" => {
+            ensure_allowed_options(profile, &[
+                "sni", "alpn", "fp", "fingerprint", "insecure",
+                "allowInsecure", "obfs",
+            ])?;
             outbound.insert("password".to_string(), json!(required(credentials, "password")?));
             insert_tls(&mut outbound, profile, true)?;
             if let Some(kind) = profile.options.get("obfs") {
@@ -66,6 +102,10 @@ pub fn build_probe_config(
             }
         }
         "tuic" => {
+            ensure_allowed_options(profile, &[
+                "sni", "alpn", "fp", "fingerprint", "insecure", "allowInsecure",
+                "congestion_control", "udp_relay_mode",
+            ])?;
             outbound.insert("uuid".to_string(), json!(required(credentials, "uuid")?));
             outbound.insert("password".to_string(), json!(required(credentials, "password")?));
             outbound.insert(
@@ -92,6 +132,25 @@ pub fn build_probe_config(
         "outbounds": [Value::Object(outbound)],
         "route": {"final": OUTBOUND_TAG}
     }))
+}
+
+
+fn ensure_allowed_options(profile: &ProfileSummary, allowed: &[&str]) -> Result<(), String> {
+    let unsupported = profile
+        .options
+        .keys()
+        .filter(|key| !allowed.contains(&key.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if unsupported.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "The sing-box adapter does not yet map these {} options: {}.",
+            profile.protocol,
+            unsupported.join(", ")
+        ))
+    }
 }
 
 fn required<'a>(
@@ -133,7 +192,22 @@ fn insert_tls(
         || security.eq_ignore_ascii_case("tls")
         || vmess_tls.eq_ignore_ascii_case("tls");
 
+    if profile.protocol == "vless"
+        && !security.is_empty()
+        && !["tls", "reality", "none"].contains(&security.to_ascii_lowercase().as_str())
+    {
+        return Err(format!("VLESS security mode '{security}' is not supported by the sing-box adapter."));
+    }
+    if profile.protocol == "vmess"
+        && !vmess_tls.is_empty()
+        && !["tls", "none"].contains(&vmess_tls.to_ascii_lowercase().as_str())
+    {
+        return Err(format!("VMess TLS mode '{vmess_tls}' is not supported by the sing-box adapter."));
+    }
     if !tls_enabled {
+        if profile.options.contains_key("sni") || profile.options.contains_key("fp") || profile.options.contains_key("alpn") {
+            return Err("TLS-related options were supplied for a profile without TLS enabled.".to_string());
+        }
         return Ok(());
     }
 
@@ -199,13 +273,24 @@ fn insert_transport(
     let path = options.get("path").cloned().unwrap_or_default();
 
     let value = match transport.as_str() {
-        "" | "tcp" | "raw" => return Ok(()),
+        "" | "none" | "tcp" | "raw" => return Ok(()),
+        "quic" => json!({"type":"quic"}),
         "ws" | "websocket" => {
             let mut headers = Map::new();
             if let Some(host) = host {
                 headers.insert("Host".to_string(), json!(host));
             }
-            json!({"type":"ws","path":path,"headers":headers})
+            let mut websocket = json!({"type":"ws","path":path,"headers":headers});
+            if let Some(early_data) = options.get("ed") {
+                let size = early_data
+                    .parse::<u32>()
+                    .map_err(|_| "WebSocket early-data (ed) must be a valid non-negative integer.".to_string())?;
+                websocket["max_early_data"] = json!(size);
+            }
+            if let Some(header_name) = options.get("eh").filter(|value| !value.is_empty()) {
+                websocket["early_data_header_name"] = json!(header_name);
+            }
+            websocket
         }
         "grpc" => {
             let service = options.get("serviceName").cloned().unwrap_or_default();
@@ -240,6 +325,35 @@ mod tests {
             port: 443,
             options: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn refuses_profiles_with_unmapped_source_options() {
+        let mut profile = sample_profile("vless");
+        profile.unsupported_options.push("xhttp".to_string());
+        let credentials = BTreeMap::from([("uuid".to_string(), "uuid-value".to_string())]);
+
+        assert!(build_probe_config(&profile, &credentials, 10080)
+            .unwrap_err()
+            .contains("xhttp"));
+    }
+
+    #[test]
+    fn maps_websocket_early_data_fields() {
+        let mut profile = sample_profile("vless");
+        profile.options = BTreeMap::from([
+            ("type".to_string(), "ws".to_string()),
+            ("ed".to_string(), "2048".to_string()),
+            ("eh".to_string(), "Sec-WebSocket-Protocol".to_string()),
+        ]);
+        let credentials = BTreeMap::from([("uuid".to_string(), "uuid-value".to_string())]);
+        let config = build_probe_config(&profile, &credentials, 10080).unwrap();
+
+        assert_eq!(config["outbounds"][0]["transport"]["max_early_data"], 2048);
+        assert_eq!(
+            config["outbounds"][0]["transport"]["early_data_header_name"],
+            "Sec-WebSocket-Protocol"
+        );
     }
 
     #[test]

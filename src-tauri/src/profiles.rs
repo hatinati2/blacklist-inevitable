@@ -20,6 +20,8 @@ pub struct ProfileSummary {
     pub server: String,
     pub port: u16,
     pub options: BTreeMap<String, String>,
+    #[serde(default)]
+    pub unsupported_options: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -122,6 +124,7 @@ fn parse_share_uri(input: &str) -> Result<ParsedProfile, String> {
 
     let mut options = BTreeMap::new();
     copy_query_options(&url, &mut options);
+    let unsupported_options = collect_unsupported_query_options(&url);
 
     let mut credentials = BTreeMap::new();
     match protocol {
@@ -205,6 +208,7 @@ fn parse_share_uri(input: &str) -> Result<ParsedProfile, String> {
             server,
             port,
             options,
+            unsupported_options,
         },
         credentials,
     })
@@ -231,6 +235,7 @@ fn parse_vmess(input: &str) -> Result<ParsedProfile, String> {
         .ok_or_else(|| "The VMess link has no user ID.".to_string())?;
 
     let mut options = BTreeMap::new();
+    let unsupported_options = collect_unsupported_vmess_fields(&value);
     for (source, target) in [
         ("net", "transport"),
         ("type", "headerType"),
@@ -263,6 +268,7 @@ fn parse_vmess(input: &str) -> Result<ParsedProfile, String> {
             server,
             port,
             options,
+            unsupported_options,
         },
         credentials,
     })
@@ -294,6 +300,7 @@ fn copy_query_options(url: &Url, output: &mut BTreeMap<String, String>) {
         "congestion_control",
         "udp_relay_mode",
         "obfs",
+        "obfs-password",
         "insecure",
         "pbk",
         "sid",
@@ -308,6 +315,65 @@ fn copy_query_options(url: &Url, output: &mut BTreeMap<String, String>) {
             output.insert(key.to_string(), value.to_string());
         }
     }
+}
+
+
+fn collect_unsupported_query_options(url: &Url) -> Vec<String> {
+    const KNOWN: &[&str] = &[
+        "type",
+        "security",
+        "sni",
+        "host",
+        "path",
+        "serviceName",
+        "flow",
+        "fp",
+        "alpn",
+        "encryption",
+        "packetEncoding",
+        "headerType",
+        "mode",
+        "congestion_control",
+        "udp_relay_mode",
+        "obfs",
+        "obfs-password",
+        "insecure",
+        "pbk",
+        "sid",
+        "spx",
+        "ed",
+        "eh",
+        "allowInsecure",
+    ];
+
+    let mut unsupported = url
+        .query_pairs()
+        .filter(|(key, _)| !KNOWN.contains(&key.as_ref()))
+        .map(|(key, _)| key.to_string())
+        .collect::<Vec<_>>();
+    unsupported.sort();
+    unsupported.dedup();
+    unsupported
+}
+
+fn collect_unsupported_vmess_fields(value: &Value) -> Vec<String> {
+    const KNOWN: &[&str] = &[
+        "v", "ps", "add", "port", "id", "aid", "net", "type", "host",
+        "path", "tls", "sni", "scy", "fp", "alpn",
+    ];
+
+    let mut unsupported = value
+        .as_object()
+        .map(|object| {
+            object
+                .keys()
+                .filter(|key| !KNOWN.contains(&key.as_str()))
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    unsupported.sort();
+    unsupported
 }
 
 fn protocol_is_hysteria2(scheme: &str) -> bool {
@@ -363,6 +429,7 @@ mod tests {
         assert_eq!(parsed.profile.name, "Fast Node");
         assert_eq!(parsed.profile.server, "example.com");
         assert_eq!(parsed.profile.port, 443);
+        assert!(parsed.profile.unsupported_options.is_empty());
         assert_eq!(parsed.profile.options.get("security").unwrap(), "tls");
         assert_eq!(
             parsed.credentials.get("uuid").unwrap(),
@@ -423,6 +490,17 @@ mod tests {
         assert_eq!(batch.profiles.len(), 1);
         assert_eq!(batch.rejected.len(), 1);
         assert_eq!(batch.rejected[0].line, 2);
+    }
+
+
+    #[test]
+    fn preserves_unrecognized_query_keys_for_adapter_validation() {
+        let parsed = parse_share_uri(
+            "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@example.com:443?security=tls&xhttp=1#node",
+        )
+        .expect("valid URI with an unsupported adapter option");
+
+        assert_eq!(parsed.profile.unsupported_options, vec!["xhttp".to_string()]);
     }
 
     #[test]

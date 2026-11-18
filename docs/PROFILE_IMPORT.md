@@ -11,9 +11,9 @@ The current importer accepts one link per line:
 - Hysteria2 / hy2 URI
 - TUIC URI
 
-Subscription URLs, Clash YAML, sing-box JSON, plugin-based Shadowsocks links, and less common URI variants are not accepted yet. Unknown URI query fields are not silently converted into engine settings; only a small allowlist of non-secret options is retained.
+Subscription URLs, Clash YAML, sing-box JSON, plugin-based Shadowsocks links, and less common URI variants are not accepted yet. Only an allowlist of recognized non-secret fields is mapped into the normalized profile options. Unknown source option names are preserved separately; their values are not copied into public metadata.
 
-The importer rejects invalid lines independently so valid links in the same paste can still be saved.
+The importer rejects invalid lines independently so valid links in the same paste can still be saved. Unknown URI query keys and unrecognized VMess JSON fields are retained by key name in `unsupportedOptions`. The sing-box adapter refuses to validate or test a profile while such unmapped source options remain, rather than silently dropping them.
 
 ## Credential handling
 

@@ -26,6 +26,7 @@ type Profile = {
   server: string;
   port: number;
   options: Record<string, string>;
+  unsupportedOptions: string[];
 };
 
 type ImportIssue = { line: number; reason: string };
@@ -273,9 +274,9 @@ export default function App() {
             <span className="count-tag">TCP only</span>
           </div>
           <p className="panel-copy">
-            TCP reachability only — not Real Delay and not configuration validation. The required
-            engine config check and real HTTP(S) delay test through each proxy will be implemented
-            with the first protocol-aware engine adapter. No VPN/TUN/system proxy is enabled.
+            Real Delay first validates a generated sing-box config and then sends a real HTTP(S)
+            request through that node. Unmapped source options are retained and block testing.
+            No VPN/TUN/system proxy is enabled.
           </p>
           <div className="probe-summary">
             <div>
@@ -369,6 +370,7 @@ export default function App() {
                   </button>
                 </div>
                 {delayResult && <p className="profile-detail">{delayResult.configDetail} · {delayResult.realDelayDetail}</p>}
+                {profile.unsupportedOptions?.length > 0 && <p className="profile-detail">Unmapped source options: {profile.unsupportedOptions.join(", ")}</p>}
                 {delayResult?.testedUrl && <p className="profile-detail">Measured via {delayResult.testedUrl}</p>}
                 {result && <p className="profile-detail">{result.detail}</p>}
                 {configResults[profile.id] && <p className="profile-detail">{configResults[profile.id].detail}</p>}

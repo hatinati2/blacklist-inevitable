@@ -57,7 +57,15 @@ pub struct EndpointTestResult {
 
 #[tauri::command]
 pub async fn get_app_status(app: AppHandle) -> AppStatus {
-    let sing_box_installed = crate::engine::sing_box::is_installed(&app).await;
+    let supervisor = app.state::<ProcessSupervisor>().inner().clone();
+    // Version checks start a short-lived engine subprocess. Register it so app
+    // shutdown cannot race an untracked child process.
+    let _operation = supervisor.begin_operation().ok();
+    let sing_box_installed = if _operation.is_some() {
+        crate::engine::sing_box::is_installed(&app).await
+    } else {
+        false
+    };
     AppStatus {
         app_name: "blacklist-inevitable",
         version: env!("CARGO_PKG_VERSION"),
@@ -204,6 +212,10 @@ pub struct ConfigValidationResult {
 
 #[tauri::command]
 pub async fn install_sing_box_engine(app: AppHandle) -> Result<String, String> {
+    let supervisor = app.state::<ProcessSupervisor>().inner().clone();
+    // Installation includes a bounded version-check subprocess and mutates the
+    // engine installation directory; drain it before app shutdown.
+    let _operation = supervisor.begin_operation()?;
     crate::engine::sing_box::install(&app).await
 }
 

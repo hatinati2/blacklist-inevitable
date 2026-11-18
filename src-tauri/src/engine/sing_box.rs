@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use futures_util::StreamExt;
 use serde_json::{json, Map, Value};
 
 use crate::profiles::ProfileSummary;
@@ -559,6 +560,8 @@ const WINDOWS_AMD64_ARCHIVE_URL: &str =
 const WINDOWS_AMD64_ARCHIVE_SHA256: &str =
     "99185d75d314a07dbba4a130c8ad986cbeb629a07927975636b341ca61f991df";
 const CONFIG_CHECK_TIMEOUT: Duration = Duration::from_secs(15);
+const MAX_ENGINE_ARCHIVE_BYTES: usize = 128 * 1024 * 1024;
+const MAX_ENGINE_EXECUTABLE_BYTES: u64 = 128 * 1024 * 1024;
 
 pub fn installed_binary_path(app: &AppHandle) -> Result<PathBuf, String> {
     let root = app
@@ -571,17 +574,30 @@ pub fn installed_binary_path(app: &AppHandle) -> Result<PathBuf, String> {
         .join("sing-box.exe"))
 }
 
-pub fn is_installed(app: &AppHandle) -> bool {
-    installed_binary_path(app)
-        .map(|path| path.is_file())
+pub async fn is_installed(app: &AppHandle) -> bool {
+    let Ok(path) = installed_binary_path(app) else {
+        return false;
+    };
+    if !path.is_file() {
+        return false;
+    }
+    read_engine_version(&path)
+        .await
+        .map(|reported| matches_expected_engine_version(&reported))
         .unwrap_or(false)
+}
+
+fn matches_expected_engine_version(reported: &str) -> bool {
+    reported
+        .split_whitespace()
+        .any(|token| token.trim_start_matches('v') == SING_BOX_VERSION)
 }
 
 pub async fn install(app: &AppHandle) -> Result<String, String> {
     let binary_path = installed_binary_path(app)?;
     if binary_path.is_file() {
         if let Ok(version) = read_engine_version(&binary_path).await {
-            if version.contains(SING_BOX_VERSION) {
+            if matches_expected_engine_version(&version) {
                 return Ok(version);
             }
         }
@@ -609,10 +625,30 @@ pub async fn install(app: &AppHandle) -> Result<String, String> {
         ));
     }
 
-    let archive_bytes = response
-        .bytes()
-        .await
-        .map_err(|_| "The sing-box archive download was incomplete.".to_string())?;
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_ENGINE_ARCHIVE_BYTES as u64)
+    {
+        return Err("The sing-box archive exceeds the 128 MiB download limit.".to_string());
+    }
+
+    let expected_length = response.content_length();
+    let mut archive_stream = response.bytes_stream();
+    let mut archive_bytes = Vec::new();
+    while let Some(chunk) = archive_stream.next().await {
+        let chunk = chunk
+            .map_err(|_| "The sing-box archive download was incomplete.".to_string())?;
+        if archive_bytes.len().saturating_add(chunk.len()) > MAX_ENGINE_ARCHIVE_BYTES {
+            return Err("The sing-box archive exceeds the 128 MiB download limit.".to_string());
+        }
+        archive_bytes.extend_from_slice(&chunk);
+    }
+    if archive_bytes.is_empty()
+        || expected_length.is_some_and(|expected| expected != archive_bytes.len() as u64)
+    {
+        return Err("The sing-box archive download was empty or incomplete.".to_string());
+    }
+
     let actual_hash = Sha256::digest(&archive_bytes)
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -676,6 +712,9 @@ fn extract_verified_executable(archive_bytes: &[u8], destination: &Path) -> Resu
         }
         if found {
             return Err("The sing-box archive contains more than one executable.".to_string());
+        }
+        if entry.size() == 0 || entry.size() > MAX_ENGINE_EXECUTABLE_BYTES {
+            return Err("The sing-box executable has an invalid or excessive uncompressed size.".to_string());
         }
 
         let mut output = File::create(destination)

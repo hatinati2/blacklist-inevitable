@@ -48,7 +48,8 @@ pub struct EndpointTestResult {
 }
 
 #[tauri::command]
-pub fn get_app_status(app: AppHandle) -> AppStatus {
+pub async fn get_app_status(app: AppHandle) -> AppStatus {
+    let sing_box_installed = crate::engine::sing_box::is_installed(&app).await;
     AppStatus {
         app_name: "blacklist-inevitable",
         version: env!("CARGO_PKG_VERSION"),
@@ -57,7 +58,7 @@ pub fn get_app_status(app: AppHandle) -> AppStatus {
         preflight_testing_implemented: true,
         profile_management_implemented: true,
         endpoint_tcp_test_implemented: true,
-        sing_box_installed: crate::engine::sing_box::is_installed(&app),
+        sing_box_installed,
         engines: ENGINE_TARGETS.to_vec(),
     }
 }
@@ -243,12 +244,23 @@ pub async fn test_all_profile_real_delays(
 ) -> Result<Vec<RealDelayResult>, String> {
     let profiles = profile_store::list_profiles(&app)?;
     let semaphore = Arc::new(Semaphore::new(4));
-    let mut tasks = JoinSet::new();
+    let mut tasks = Vec::new();
 
     for profile in profiles {
         let app = app.clone();
         let semaphore = Arc::clone(&semaphore);
-        tasks.spawn(async move {
+        let fallback = RealDelayResult {
+            profile_id: profile.id.clone(),
+            name: profile.name.clone(),
+            server: profile.server.clone(),
+            port: profile.port,
+            config_status: "not_checked".to_string(),
+            config_detail: "The preflight worker did not complete normally.".to_string(),
+            real_delay_ms: None,
+            real_delay_detail: "No delay result is available for this profile.".to_string(),
+            tested_url: None,
+        };
+        let task = tokio::spawn(async move {
             let _permit = semaphore.acquire_owned().await.ok();
             let profile_id = profile.id.clone();
             let name = profile.name.clone();
@@ -298,13 +310,15 @@ pub async fn test_all_profile_real_delays(
                 ),
             }
         });
+        // Dropping this JoinHandle detaches the worker instead of aborting it. If the
+        // invoking window closes or the command future is cancelled, the worker can
+        // still stop and reap its child process and remove its temporary directory.
+        tasks.push((task, fallback));
     }
 
     let mut results = Vec::new();
-    while let Some(result) = tasks.join_next().await {
-        if let Ok(result) = result {
-            results.push(result);
-        }
+    for (task, fallback) in tasks {
+        results.push(task.await.unwrap_or(fallback));
     }
 
     results.sort_by(|left, right| {
@@ -315,6 +329,5 @@ pub async fn test_all_profile_real_delays(
             (None, None) => left.name.cmp(&right.name),
         }
     });
-
     Ok(results)
 }

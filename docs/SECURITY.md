@@ -54,9 +54,10 @@ Before normal connection functionality is implemented:
 
 ## Supply chain and third-party code
 
-- The Windows AMD64 sing-box 1.14.4 archive is fetched from the official upstream GitHub release and checked against a pinned SHA-256 digest before extraction. The executable's reported version is checked after extraction.
+- The Windows AMD64 sing-box 1.14.4 archive is fetched from the official upstream GitHub release and checked against a pinned SHA-256 digest before extraction. The download and uncompressed executable are each limited to 128 MiB, and the executable's reported version is checked after extraction and whenever the app reports the engine as installed.
 - The current download flow verifies the pinned archive digest; it does not perform a separate upstream signature-verification step.
 - The sing-box executable is downloaded on demand and is not bundled in the app installer.
 - A third-party notice is written beside the installed executable.
+- Real Delay workers are detached from the invoking Tauri command so closing the invoking window or cancelling that command does not abort the worker before its normal child-process and temporary-directory cleanup. A process-wide supervisor that confirms child termination during application shutdown remains a release requirement.
 - Complete license, notice, redistribution, signing, and release review remains a release gate.
 - Never download or execute an engine binary merely because a profile references it.

@@ -61,7 +61,7 @@ pub async fn get_app_status(app: AppHandle) -> AppStatus {
     AppStatus {
         app_name: "blacklist-inevitable",
         version: env!("CARGO_PKG_VERSION"),
-        development_stage: "sing-box preflight implementation",
+        development_stage: "sing-box preflight with supervised shutdown",
         connection_implemented: false,
         preflight_testing_implemented: true,
         profile_management_implemented: true,

@@ -221,3 +221,96 @@ pub async fn validate_profile_config(
         }),
     }
 }
+
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RealDelayResult {
+    profile_id: String,
+    name: String,
+    server: String,
+    port: u16,
+    config_status: String,
+    config_detail: String,
+    real_delay_ms: Option<u64>,
+    real_delay_detail: String,
+    tested_url: Option<String>,
+}
+
+#[tauri::command]
+pub async fn test_all_profile_real_delays(
+    app: AppHandle,
+) -> Result<Vec<RealDelayResult>, String> {
+    let profiles = profile_store::list_profiles(&app)?;
+    let semaphore = Arc::new(Semaphore::new(4));
+    let mut tasks = JoinSet::new();
+
+    for profile in profiles {
+        let app = app.clone();
+        let semaphore = Arc::clone(&semaphore);
+        tasks.spawn(async move {
+            let _permit = semaphore.acquire_owned().await.ok();
+            let base = |config_status: &str, config_detail: String, delay_detail: String| {
+                RealDelayResult {
+                    profile_id: profile.id.clone(),
+                    name: profile.name.clone(),
+                    server: profile.server.clone(),
+                    port: profile.port,
+                    config_status: config_status.to_string(),
+                    config_detail,
+                    real_delay_ms: None,
+                    real_delay_detail: delay_detail,
+                    tested_url: None,
+                }
+            };
+
+            let credentials = match profile_store::get_credentials(&profile.id) {
+                Ok(credentials) => credentials,
+                Err(error) => {
+                    return base(
+                        "not_checked",
+                        error,
+                        "Not run because profile credentials could not be retrieved.".to_string(),
+                    );
+                }
+            };
+
+            match crate::engine::sing_box::measure_real_delay(&app, &profile, &credentials).await {
+                Ok(outcome) => RealDelayResult {
+                    profile_id: profile.id,
+                    name: profile.name,
+                    server: profile.server,
+                    port: profile.port,
+                    config_status: outcome.config_status,
+                    config_detail: outcome.config_detail,
+                    real_delay_ms: outcome.real_delay_ms,
+                    real_delay_detail: outcome.real_delay_detail,
+                    tested_url: outcome.tested_url,
+                },
+                Err(error) => base(
+                    "not_checked",
+                    error,
+                    "Not run because the preflight runtime could not be prepared safely.".to_string(),
+                ),
+            }
+        });
+    }
+
+    let mut results = Vec::new();
+    while let Some(result) = tasks.join_next().await {
+        if let Ok(result) = result {
+            results.push(result);
+        }
+    }
+
+    results.sort_by(|left, right| {
+        match (left.real_delay_ms, right.real_delay_ms) {
+            (Some(left), Some(right)) => left.cmp(&right),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => left.name.cmp(&right.name),
+        }
+    });
+
+    Ok(results)
+}

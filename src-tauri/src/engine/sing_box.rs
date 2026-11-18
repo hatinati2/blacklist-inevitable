@@ -298,15 +298,16 @@ mod tests {
 
 
 use std::fs::{self, File};
-use std::io::{Cursor, Read, Write};
+use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager};
-use tokio::process::Command;
-use tokio::time::timeout;
+use tokio::net::TcpStream;
+use tokio::process::{Child, Command};
+use tokio::time::{sleep, timeout};
 use uuid::Uuid;
 use zip::ZipArchive;
 
@@ -542,4 +543,275 @@ fn redact_diagnostic(
     } else {
         sanitized.chars().take(1200).collect()
     }
+}
+
+
+#[derive(Debug, Clone)]
+pub struct ProbeOutcome {
+    pub config_status: String,
+    pub config_detail: String,
+    pub real_delay_ms: Option<u64>,
+    pub real_delay_detail: String,
+    pub tested_url: Option<String>,
+}
+
+const REAL_DELAY_PRIMARY_URL: &str = "https://www.gstatic.com/generate_204";
+const REAL_DELAY_FALLBACK_URL: &str = "https://cp.cloudflare.com/generate_204";
+const REAL_DELAY_REQUEST_TIMEOUT: Duration = Duration::from_secs(9);
+const ENGINE_START_TIMEOUT: Duration = Duration::from_secs(10);
+
+pub async fn measure_real_delay(
+    app: &AppHandle,
+    profile: &ProfileSummary,
+    credentials: &BTreeMap<String, String>,
+) -> Result<ProbeOutcome, String> {
+    let binary = installed_binary_path(app)?;
+    if !binary.is_file() {
+        return Err("The pinned sing-box engine is not installed.".to_string());
+    }
+
+    let port = pick_loopback_port()?;
+    let config = match build_probe_config(profile, credentials, port) {
+        Ok(config) => config,
+        Err(detail) => {
+            return Ok(ProbeOutcome {
+                config_status: "unsupported".to_string(),
+                config_detail: detail,
+                real_delay_ms: None,
+                real_delay_detail: "Not run because this profile cannot be represented safely by the sing-box adapter.".to_string(),
+                tested_url: None,
+            });
+        }
+    };
+
+    let cache = app
+        .path()
+        .app_cache_dir()
+        .map_err(|_| "Could not resolve the temporary preflight directory.".to_string())?
+        .join("preflight");
+    tokio::fs::create_dir_all(&cache)
+        .await
+        .map_err(|_| "Could not create the temporary preflight directory.".to_string())?;
+
+    let run_dir = cache.join(format!("probe-{}", Uuid::new_v4()));
+    tokio::fs::create_dir(&run_dir)
+        .await
+        .map_err(|_| "Could not create an isolated directory for this node test.".to_string())?;
+    let config_path = run_dir.join("config.json");
+
+    let config_bytes = match serde_json::to_vec(&config) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            cleanup_probe_dir(&run_dir).await?;
+            return Err("Could not encode the isolated sing-box configuration.".to_string());
+        }
+    };
+    if tokio::fs::write(&config_path, config_bytes).await.is_err() {
+        cleanup_probe_dir(&run_dir).await?;
+        return Err("Could not write the isolated sing-box configuration.".to_string());
+    }
+
+    let validation = timeout(
+        CONFIG_CHECK_TIMEOUT,
+        Command::new(&binary)
+            .arg("check")
+            .arg("-c")
+            .arg(&config_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await;
+
+    let validation = match validation {
+        Err(_) => {
+            cleanup_probe_dir(&run_dir).await?;
+            return Ok(ProbeOutcome {
+                config_status: "invalid".to_string(),
+                config_detail: "sing-box configuration validation timed out.".to_string(),
+                real_delay_ms: None,
+                real_delay_detail: "Not run because configuration validation did not finish.".to_string(),
+                tested_url: None,
+            });
+        }
+        Ok(Err(_)) => {
+            cleanup_probe_dir(&run_dir).await?;
+            return Err("Could not start sing-box configuration validation.".to_string());
+        }
+        Ok(Ok(output)) if output.status.success() => output,
+        Ok(Ok(output)) => {
+            let diagnostic = String::from_utf8_lossy(&output.stderr);
+            let detail = redact_diagnostic(&diagnostic, credentials);
+            cleanup_probe_dir(&run_dir).await?;
+            return Ok(ProbeOutcome {
+                config_status: "invalid".to_string(),
+                config_detail: detail,
+                real_delay_ms: None,
+                real_delay_detail: "Not run because sing-box rejected this node configuration.".to_string(),
+                tested_url: None,
+            });
+        }
+    };
+    drop(validation);
+
+    let mut child = match Command::new(&binary)
+        .arg("run")
+        .arg("-c")
+        .arg(&config_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => {
+            cleanup_probe_dir(&run_dir).await?;
+            return Err("Could not start the temporary sing-box probe process.".to_string());
+        }
+    };
+
+    let measurement = async {
+        wait_for_local_socks(&mut child, port).await?;
+        measure_request_through_socks(port).await
+    }
+    .await;
+
+    let process_cleanup = stop_probe_process(&mut child).await;
+    let directory_cleanup = cleanup_probe_dir(&run_dir).await;
+
+    if let Err(error) = process_cleanup {
+        return Err(error);
+    }
+    if let Err(error) = directory_cleanup {
+        return Err(error);
+    }
+
+    match measurement {
+        Ok((delay_ms, tested_url)) => Ok(ProbeOutcome {
+            config_status: "valid".to_string(),
+            config_detail: "sing-box accepted the generated configuration.".to_string(),
+            real_delay_ms: Some(delay_ms),
+            real_delay_detail: "HTTP 204 was received through this node's temporary local proxy.".to_string(),
+            tested_url: Some(tested_url),
+        }),
+        Err(detail) => Ok(ProbeOutcome {
+            config_status: "valid".to_string(),
+            config_detail: "sing-box accepted the generated configuration.".to_string(),
+            real_delay_ms: None,
+            real_delay_detail: detail,
+            tested_url: None,
+        }),
+    }
+}
+
+fn pick_loopback_port() -> Result<u16, String> {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
+        .map_err(|_| "Could not reserve a loopback port for the temporary proxy.".to_string())?;
+    let port = listener
+        .local_addr()
+        .map_err(|_| "Could not read the temporary loopback port.".to_string())?
+        .port();
+    drop(listener);
+    Ok(port)
+}
+
+async fn wait_for_local_socks(child: &mut Child, port: u16) -> Result<(), String> {
+    let address = ("127.0.0.1", port);
+    for _ in 0..100 {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return Err(format!(
+                    "The temporary sing-box process exited before its local proxy was ready (code: {}).",
+                    status.code().map(|code| code.to_string()).unwrap_or_else(|| "unknown".to_string())
+                ));
+            }
+            Ok(None) => {}
+            Err(_) => return Err("Could not inspect the temporary sing-box process.".to_string()),
+        }
+
+        if let Ok(Ok(stream)) =
+            timeout(Duration::from_millis(200), TcpStream::connect(address)).await
+        {
+            drop(stream);
+            return Ok(());
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+
+    Err("The temporary sing-box local proxy did not become ready within 10 seconds.".to_string())
+}
+
+async fn measure_request_through_socks(port: u16) -> Result<(u64, String), String> {
+    let proxy = reqwest::Proxy::all(format!("socks5h://127.0.0.1:{port}"))
+        .map_err(|_| "Could not configure the isolated SOCKS5 probe proxy.".to_string())?;
+    let client = reqwest::Client::builder()
+        .proxy(proxy)
+        .connect_timeout(Duration::from_secs(6))
+        .timeout(REAL_DELAY_REQUEST_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| "Could not create the isolated HTTP probe client.".to_string())?;
+
+    let mut failures = Vec::new();
+    for url in [REAL_DELAY_PRIMARY_URL, REAL_DELAY_FALLBACK_URL] {
+        let started = Instant::now();
+        let response = client
+            .get(url)
+            .header("Cache-Control", "no-cache")
+            .send()
+            .await;
+
+        match response {
+            Ok(response) if response.status() == reqwest::StatusCode::NO_CONTENT => {
+                let elapsed = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                return Ok((elapsed, url.to_string()));
+            }
+            Ok(response) => failures.push(format!(
+                "{} returned HTTP {} instead of 204",
+                url,
+                response.status().as_u16()
+            )),
+            Err(error) if error.is_timeout() => {
+                failures.push(format!("{url} timed out"));
+            }
+            Err(error) if error.is_connect() => {
+                failures.push(format!("{url} could not connect through the proxy"));
+            }
+            Err(_) => failures.push(format!("{url} failed through the proxy")),
+        }
+    }
+
+    Err(format!(
+        "Real Delay failed: {}. The proxy protocol, credentials, remote server, DNS, or TLS may be unavailable.",
+        failures.join("; ")
+    ))
+}
+
+async fn stop_probe_process(child: &mut Child) -> Result<(), String> {
+    match child.try_wait() {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => {
+            child
+                .start_kill()
+                .map_err(|_| "Could not stop the temporary sing-box process.".to_string())?;
+            timeout(Duration::from_secs(4), child.wait())
+                .await
+                .map_err(|_| "The temporary sing-box process did not stop within 4 seconds.".to_string())?
+                .map_err(|_| "Could not confirm termination of the temporary sing-box process.".to_string())?;
+            Ok(())
+        }
+        Err(_) => Err("Could not inspect the temporary sing-box process during cleanup.".to_string()),
+    }
+}
+
+async fn cleanup_probe_dir(path: &Path) -> Result<(), String> {
+    if path.exists() {
+        tokio::fs::remove_dir_all(path)
+            .await
+            .map_err(|_| "Temporary preflight files could not be removed; connection startup must remain blocked.".to_string())?;
+    }
+    Ok(())
 }

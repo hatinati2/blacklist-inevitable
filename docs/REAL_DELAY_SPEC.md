@@ -20,7 +20,7 @@ A config that parses is not necessarily a reachable server. A reachable TCP port
 - Do not measure only a TCP connect to the proxy server.
 - Do not measure a direct request that bypasses the selected profile.
 - Require an expected response from the configured probe (the default endpoint should return HTTP 204); treat captive-portal redirects and unexpected bodies/statuses as failures, not successful delays.
-- Use a bounded timeout and concurrency. Start conservatively (four parallel engine processes) and tune only after resource tests.
+- Use a bounded timeout and concurrency. The first implementation is capped at four parallel engine processes.
 - Sort successful results by measured Real Delay, with failures and unsupported profiles after them.
 - Show the URL and test time so results can be interpreted and reproduced.
 

@@ -12,7 +12,8 @@ pub fn run() {
             commands::delete_profile,
             commands::test_all_profile_endpoints,
             commands::install_sing_box_engine,
-            commands::validate_profile_config
+            commands::validate_profile_config,
+            commands::test_all_profile_real_delays
         ])
         .run(tauri::generate_context!())
         .expect("failed to run blacklist-inevitable");

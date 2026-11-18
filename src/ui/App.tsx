@@ -30,6 +30,18 @@ type Profile = {
 
 type ImportIssue = { line: number; reason: string };
 type ImportResponse = { imported: Profile[]; rejected: ImportIssue[] };
+type RealDelayResult = {
+  profileId: string;
+  name: string;
+  server: string;
+  port: number;
+  configStatus: string;
+  configDetail: string;
+  realDelayMs: number | null;
+  realDelayDetail: string;
+  testedUrl: string | null;
+};
+
 type EndpointResult = {
   profileId: string;
   name: string;
@@ -47,6 +59,7 @@ export default function App() {
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [shareText, setShareText] = useState("");
   const [endpointResults, setEndpointResults] = useState<EndpointResult[] | null>(null);
+  const [realDelayResults, setRealDelayResults] = useState<RealDelayResult[] | null>(null);
   const [message, setMessage] = useState("Checking desktop runtime…");
   const [busy, setBusy] = useState(false);
   const [previewMode, setPreviewMode] = useState(false);
@@ -98,6 +111,8 @@ export default function App() {
       const result = await invoke<ImportResponse>("import_profiles", { input: shareText });
       setShareText("");
       setEndpointResults(null);
+      setRealDelayResults(null);
+      setConfigResults({});
       await refreshProfiles();
       const summary = `${result.imported.length} imported, ${result.rejected.length} skipped.`;
       setMessage(summary);
@@ -153,6 +168,22 @@ export default function App() {
         [profileId]: { valid: false, detail: typeof error === "string" ? error : "Validation failed." },
       }));
       setMessage(typeof error === "string" ? error : "Could not validate the configuration.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const testRealDelay = async () => {
+    setBusy(true);
+    setRealDelayResults(null);
+    try {
+      const results = await invoke<RealDelayResult[]>("test_all_profile_real_delays");
+      setRealDelayResults(results);
+      const valid = results.filter((item) => item.configStatus === "valid").length;
+      const measured = results.filter((item) => item.realDelayMs !== null).length;
+      setMessage(`Config checked: ${valid}/${results.length}; real delay measured: ${measured}/${results.length}.`);
+    } catch (error) {
+      setMessage(typeof error === "string" ? error : "Real Delay testing could not be completed.");
     } finally {
       setBusy(false);
     }
@@ -257,7 +288,10 @@ export default function App() {
             </div>
           </div>
           <button className="secondary-button" onClick={() => void testEndpoints()} disabled={previewMode || busy || profiles.length === 0}>
-            {busy ? "Working…" : "Test all TCP endpoints"}
+            {busy ? "Working…" : "TCP reachability only"}
+          </button>
+          <button className="primary-button engine-install-button" onClick={() => void testRealDelay()} disabled={previewMode || busy || profiles.length === 0 || !status?.singBoxInstalled}>
+            {busy ? "Testing…" : "Test config + Real Delay"}
           </button>
           {!previewMode && !status?.singBoxInstalled && (
             <button className="primary-button engine-install-button" onClick={() => void installEngine()} disabled={installingEngine || busy}>
@@ -265,7 +299,7 @@ export default function App() {
             </button>
           )}
           {!previewMode && status?.singBoxInstalled && (
-            <p className="engine-installed-note">sing-box { "1.14.4" } is installed. Native config validation is available per profile.</p>
+            <p className="engine-installed-note">sing-box { "1.14.4" } is installed. Native config validation and isolated Real Delay are available.</p>
           )}
         </article>
       </section>
@@ -290,6 +324,7 @@ export default function App() {
         ) : (
           profiles.map((profile) => {
             const result = endpointResults?.find((item) => item.profileId === profile.id);
+            const delayResult = realDelayResults?.find((item) => item.profileId === profile.id);
             return (
               <article className="profile-row" key={profile.id}>
                 <div className="profile-main">
@@ -305,6 +340,16 @@ export default function App() {
                       {configResults[profile.id].valid ? "Config valid" : "Config invalid"}
                     </span>
                   )}
+                  {delayResult ? (
+                    <span className={delayResult.configStatus === "valid" ? "result-pill success" : "result-pill failure"}>
+                      {delayResult.configStatus === "valid" ? "Config valid" : delayResult.configStatus === "unsupported" ? "Unsupported" : "Config invalid"}
+                    </span>
+                  ) : null}
+                  {delayResult?.realDelayMs !== null && delayResult?.realDelayMs !== undefined ? (
+                    <span className="result-pill success">{delayResult.realDelayMs} ms</span>
+                  ) : delayResult ? (
+                    <span className="result-pill failure">Delay failed</span>
+                  ) : null}
                   {result ? (
                     result.supported ? (
                       <span className={result.reachable ? "result-pill success" : "result-pill failure"}>
@@ -323,6 +368,8 @@ export default function App() {
                     Remove
                   </button>
                 </div>
+                {delayResult && <p className="profile-detail">{delayResult.configDetail} · {delayResult.realDelayDetail}</p>}
+                {delayResult?.testedUrl && <p className="profile-detail">Measured via {delayResult.testedUrl}</p>}
                 {result && <p className="profile-detail">{result.detail}</p>}
                 {configResults[profile.id] && <p className="profile-detail">{configResults[profile.id].detail}</p>}
               </article>
@@ -336,9 +383,10 @@ export default function App() {
         <div>
           <h3>TCP reachability is not Real Delay</h3>
           <p>
-            The sing-box native config checker validates a generated per-node config. Real Delay
-            still requires a separate HTTP(S) request through the selected node and is not implemented
-            yet. TCP reachability remains a separate diagnostic. No device traffic is routed.
+            The Test config + Real Delay action runs sing-box's native config check, then starts a
+            temporary loopback-only proxy and sends an HTTP 204 request through that node. TCP
+            reachability remains a separate diagnostic. Preflight never enables TUN or changes the
+            Windows system proxy.
           </p>
         </div>
       </section>
@@ -346,7 +394,7 @@ export default function App() {
       <section className="section-heading engine-heading">
         <div>
           <p className="eyebrow">ENGINE STRATEGY</p>
-          <h2>Config validation and Real Delay come next</h2>
+          <h2>Multi-engine support comes next</h2>
         </div>
       </section>
       <section className="engine-grid">

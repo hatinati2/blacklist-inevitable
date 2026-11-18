@@ -347,15 +347,24 @@ mod tests {
             .assign_child(&mut child)
             .await
             .expect("assign child through process supervisor");
+        // Ensure the command is genuinely still running before releasing the final job handle.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            child
+                .try_wait()
+                .expect("check test child before job close")
+                .is_none(),
+            "test child should still be alive before job close"
+        );
         drop(operation);
 
         // Simulate the app losing its last job handle during abrupt termination.
         drop(supervisor);
-        let status = timeout(Duration::from_secs(5), child.wait())
+        // KILL_ON_JOB_CLOSE guarantees termination, not a particular process exit code.
+        timeout(Duration::from_secs(5), child.wait())
             .await
             .expect("job close should terminate the child")
             .expect("wait for job-terminated child");
-        assert!(!status.success(), "the job-owned child should be terminated");
     }
 
     #[tokio::test]

@@ -117,6 +117,115 @@ impl WindowsJobObject {
             None => Ok(()),
         }
     }
+
+    /// Assigns a process whose initial thread was created suspended, then resumes
+    /// that thread only after Job Object membership is established.
+    fn assign_suspended_pid(&self, pid: u32) -> Result<(), String> {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::ResumeThread;
+
+        let thread = find_suspended_primary_thread(pid)?;
+
+        if let Err(error) = self.assign_pid(pid) {
+            unsafe { CloseHandle(thread) };
+            return Err(error);
+        }
+
+        let previous_suspend_count = unsafe { ResumeThread(thread) };
+        let resume_error = if previous_suspend_count == u32::MAX {
+            Some(std::io::Error::last_os_error())
+        } else {
+            None
+        };
+        unsafe { CloseHandle(thread) };
+
+        if let Some(error) = resume_error {
+            return Err(format!("ResumeThread for contained process {pid} failed: {error}"));
+        }
+        if previous_suspend_count != 1 {
+            return Err(format!(
+                "Process {pid} had an unexpected initial-thread suspend count ({previous_suspend_count}); it was not allowed to continue."
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+
+#[cfg(windows)]
+fn find_suspended_primary_thread(pid: u32) -> Result<windows_sys::Win32::Foundation::HANDLE, String> {
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Thread32First, Thread32Next, THREADENTRY32, TH32CS_SNAPTHREAD,
+    };
+    use windows_sys::Win32::System::Threading::{OpenThread, THREAD_SUSPEND_RESUME};
+
+    // CREATE_SUSPENDED prevents the image's primary thread from running. Before it
+    // is resumed, the process must have exactly one thread: its initial thread.
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+    if snapshot as isize == -1 {
+        return Err(format!(
+            "CreateToolhelp32Snapshot failed while locating process {pid}'s suspended initial thread: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    let mut entry = THREADENTRY32 {
+        dwSize: std::mem::size_of::<THREADENTRY32>() as u32,
+        ..Default::default()
+    };
+    let mut thread_id = None;
+    let mut failure = None;
+
+    if unsafe { Thread32First(snapshot, &mut entry) } == 0 {
+        failure = Some(format!(
+            "Thread32First failed while locating process {pid}'s suspended initial thread: {}",
+            std::io::Error::last_os_error()
+        ));
+    } else {
+        loop {
+            if entry.th32OwnerProcessID == pid {
+                if thread_id.replace(entry.th32ThreadID).is_some() {
+                    failure = Some(format!(
+                        "Process {pid} had more than one thread before its initial thread was resumed."
+                    ));
+                    break;
+                }
+            }
+
+            entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
+            if unsafe { Thread32Next(snapshot, &mut entry) } == 0 {
+                let error = unsafe { GetLastError() };
+                // ERROR_NO_MORE_FILES is the normal end of the Tool Help snapshot.
+                if error != 18 {
+                    failure = Some(format!(
+                        "Thread32Next failed while locating process {pid}'s suspended initial thread (Win32 error {error})."
+                    ));
+                }
+                break;
+            }
+        }
+    }
+
+    unsafe { CloseHandle(snapshot) };
+
+    if let Some(error) = failure {
+        return Err(error);
+    }
+
+    let thread_id = thread_id.ok_or_else(|| {
+        format!("No initial thread was found for suspended process {pid}.")
+    })?;
+    let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, thread_id) };
+    if thread.is_null() {
+        return Err(format!(
+            "OpenThread({thread_id}) failed for suspended process {pid}: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    Ok(thread)
 }
 
 #[cfg(windows)]
@@ -185,9 +294,20 @@ impl ProcessSupervisor {
         })
     }
 
-    /// Assigns a newly spawned engine child to the app-owned Windows Job Object.
-    /// The job is configured with KILL_ON_JOB_CLOSE, so Windows terminates assigned
-    /// children if the app process exits unexpectedly and its final job handle closes.
+    /// Configure an engine command so its primary thread cannot execute before
+    /// Windows Job Object assignment is confirmed by assign_child.
+    pub fn prepare_child_command(&self, command: &mut tokio::process::Command) {
+        command.kill_on_drop(true);
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::System::Threading::CREATE_SUSPENDED;
+            command.creation_flags(CREATE_SUSPENDED);
+        }
+    }
+
+    /// Assigns a suspended engine child to the app-owned Windows Job Object and
+    /// resumes it only after containment is confirmed. On failure the child is
+    /// terminated while still suspended wherever possible.
     pub async fn assign_child(
         &self,
         child: &mut tokio::process::Child,
@@ -195,7 +315,7 @@ impl ProcessSupervisor {
         #[cfg(windows)]
         {
             let assignment = match (self.inner.job.as_ref(), child.id()) {
-                (Some(job), Some(pid)) => job.assign_pid(pid),
+                (Some(job), Some(pid)) => job.assign_suspended_pid(pid),
                 (None, _) => Err("The Windows process-containment Job Object is unavailable.".to_string()),
                 (_, None) => Err("The newly spawned engine process has no process identifier.".to_string()),
             };
@@ -325,6 +445,23 @@ impl Drop for OperationLease {
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
+    fn supervisor_without_job_for_test() -> ProcessSupervisor {
+        ProcessSupervisor {
+            inner: Arc::new(Inner {
+                state: Mutex::new(State {
+                    shutting_down: false,
+                    shutdown_complete: false,
+                    cleanup_healthy: false,
+                    next_operation_id: 1,
+                    active: HashMap::new(),
+                }),
+                idle: Notify::new(),
+                job: None,
+            }),
+        }
+    }
+
 
     #[cfg(windows)]
     #[tokio::test]
@@ -335,14 +472,14 @@ mod tests {
 
         let supervisor = ProcessSupervisor::default();
         let operation = supervisor.begin_operation().expect("register test operation");
-        let mut child = Command::new("powershell.exe")
+        let mut command = Command::new("powershell.exe");
+        command
             .args(["-NoProfile", "-NonInteractive", "-Command", "Start-Sleep -Seconds 30"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .expect("start test child");
+            .stderr(Stdio::null());
+        supervisor.prepare_child_command(&mut command);
+        let mut child = command.spawn().expect("start suspended test child");
         supervisor
             .assign_child(&mut child)
             .await
@@ -365,6 +502,106 @@ mod tests {
             .await
             .expect("job close should terminate the child")
             .expect("wait for job-terminated child");
+    }
+
+
+    #[cfg(windows)]
+    const MARKER_CHILD_ENV: &str = "BLACKLIST_INEVITABLE_TEST_MARKER_PATH";
+
+    #[cfg(windows)]
+    #[test]
+    fn write_marker_child_process() {
+        if let Some(path) = std::env::var_os(MARKER_CHILD_ENV) {
+            std::fs::write(path, b"started").expect("write child marker");
+        }
+    }
+
+    #[cfg(windows)]
+    fn marker_child_command(marker: &std::path::Path) -> tokio::process::Command {
+        use std::process::Stdio;
+        use tokio::process::Command;
+
+        let executable = std::env::current_exe().expect("resolve current test executable");
+        let mut command = Command::new(executable);
+        command
+            .args([
+                "--exact",
+                "process_supervisor::tests::write_marker_child_process",
+                "--nocapture",
+            ])
+            .env(MARKER_CHILD_ENV, marker)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        command
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn suspended_engine_child_cannot_execute_before_job_assignment() {
+        use tokio::time::{sleep, timeout, Duration};
+
+        let supervisor = ProcessSupervisor::default();
+
+        // Repeat the launch sequence to exercise thread discovery, job assignment,
+        // and resume under normal Windows process churn.
+        for _ in 0..8 {
+            let marker = std::env::temp_dir().join(format!(
+                "blacklist-inevitable-contained-start-{}.txt",
+                uuid::Uuid::new_v4()
+            ));
+            let mut command = marker_child_command(&marker);
+            supervisor.prepare_child_command(&mut command);
+            let mut child = command.spawn().expect("start suspended marker child");
+
+            sleep(Duration::from_millis(250)).await;
+            assert!(
+                !marker.exists(),
+                "engine child executed before Job Object assignment"
+            );
+
+            supervisor
+                .assign_child(&mut child)
+                .await
+                .expect("assign child before allowing its first instruction");
+
+            let status = timeout(Duration::from_secs(10), child.wait())
+                .await
+                .expect("marker child completion timeout")
+                .expect("wait for marker child");
+            assert!(status.success(), "marker child exited unsuccessfully: {status}");
+            assert!(marker.is_file(), "child should run after safe resume");
+            std::fs::remove_file(marker).expect("remove marker file");
+        }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn unavailable_job_terminates_suspended_child_before_execution() {
+        use tokio::time::{sleep, Duration};
+
+        let supervisor = supervisor_without_job_for_test();
+        let marker = std::env::temp_dir().join(format!(
+            "blacklist-inevitable-uncontained-start-{}.txt",
+            uuid::Uuid::new_v4()
+        ));
+        let mut command = marker_child_command(&marker);
+        supervisor.prepare_child_command(&mut command);
+        let mut child = command.spawn().expect("start suspended child without a job");
+
+        sleep(Duration::from_millis(250)).await;
+        assert!(
+            !marker.exists(),
+            "child executed before Job Object assignment was attempted"
+        );
+
+        let error = supervisor
+            .assign_child(&mut child)
+            .await
+            .expect_err("job absence must fail closed");
+        assert!(error.contains("child was stopped"));
+        assert!(!marker.exists(), "uncontained child must never execute");
+        assert!(!supervisor.cleanup_healthy());
     }
 
     #[tokio::test]

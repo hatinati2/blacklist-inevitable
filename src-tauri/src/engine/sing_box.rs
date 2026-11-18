@@ -631,7 +631,7 @@ async fn run_engine_command_output(
     supervisor: &ProcessSupervisor,
     command_timeout: Duration,
 ) -> Result<std::process::Output, EngineCommandError> {
-    command.kill_on_drop(true);
+    supervisor.prepare_child_command(command);
     let mut child = command.spawn().map_err(|_| EngineCommandError::Spawn)?;
     supervisor
         .assign_child(&mut child)
@@ -1093,16 +1093,16 @@ pub async fn measure_real_delay(
         return Err("Real Delay was cancelled because the application is shutting down.".to_string());
     }
 
-    let mut child = match Command::new(&binary)
+    let mut run_command = Command::new(&binary);
+    run_command
         .arg("run")
         .arg("-c")
         .arg(&config_path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-    {
+        .stderr(Stdio::null());
+    supervisor.prepare_child_command(&mut run_command);
+    let mut child = match run_command.spawn() {
         Ok(child) => child,
         Err(_) => {
             cleanup_probe_dir(&run_dir).await?;
@@ -1168,28 +1168,37 @@ fn pick_loopback_port() -> Result<u16, String> {
 
 async fn wait_for_local_socks(child: &mut Child, port: u16) -> Result<(), String> {
     let address = ("127.0.0.1", port);
-    for _ in 0..100 {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                return Err(format!(
-                    "The temporary sing-box process exited before its local proxy was ready (code: {}).",
-                    status.code().map(|code| code.to_string()).unwrap_or_else(|| "unknown".to_string())
-                ));
+    let startup = timeout(ENGINE_START_TIMEOUT, async {
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    return Err(format!(
+                        "The temporary sing-box process exited before its local proxy was ready (code: {}).",
+                        status.code().map(|code| code.to_string()).unwrap_or_else(|| "unknown".to_string())
+                    ));
+                }
+                Ok(None) => {}
+                Err(_) => return Err("Could not inspect the temporary sing-box process.".to_string()),
             }
-            Ok(None) => {}
-            Err(_) => return Err("Could not inspect the temporary sing-box process.".to_string()),
-        }
 
-        if let Ok(Ok(stream)) =
-            timeout(Duration::from_millis(200), TcpStream::connect(address)).await
-        {
-            drop(stream);
-            return Ok(());
+            if let Ok(Ok(stream)) =
+                timeout(Duration::from_millis(200), TcpStream::connect(address)).await
+            {
+                drop(stream);
+                return Ok(());
+            }
+            sleep(Duration::from_millis(100)).await;
         }
-        sleep(Duration::from_millis(100)).await;
+    })
+    .await;
+
+    match startup {
+        Ok(result) => result,
+        Err(_) => Err(format!(
+            "The temporary sing-box local proxy did not become ready within {} seconds.",
+            ENGINE_START_TIMEOUT.as_secs()
+        )),
     }
-
-    Err("The temporary sing-box local proxy did not become ready within 10 seconds.".to_string())
 }
 
 async fn measure_request_through_socks(port: u16) -> Result<(u64, String), String> {

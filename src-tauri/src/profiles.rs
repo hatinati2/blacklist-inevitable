@@ -120,7 +120,8 @@ fn parse_share_uri(input: &str) -> Result<ParsedProfile, String> {
         .to_string();
     let port = url
         .port()
-        .ok_or_else(|| "The link must include an explicit port.".to_string())?;
+        .filter(|port| *port > 0)
+        .ok_or_else(|| "The link must include an explicit non-zero port.".to_string())?;
 
     let mut options = BTreeMap::new();
     copy_query_options(&url, &mut options);
@@ -515,6 +516,15 @@ mod tests {
         .expect("valid URI with an unsupported adapter option");
 
         assert_eq!(parsed.profile.unsupported_options, vec!["xhttp".to_string()]);
+    }
+
+    #[test]
+    fn refuses_zero_port_in_share_links() {
+        let error = parse_share_uri(
+            "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@example.com:0",
+        )
+        .unwrap_err();
+        assert_eq!(error, "The link must include an explicit non-zero port.");
     }
 
     #[test]

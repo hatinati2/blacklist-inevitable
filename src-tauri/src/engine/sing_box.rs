@@ -968,6 +968,37 @@ impl Drop for ProbeDirectory {
     }
 }
 
+/// Remove probe data left behind when Windows forcibly terminates the app.
+/// Drop guards cannot run after a process kill, so startup performs this recovery
+/// before exposing any engine commands.
+pub fn recover_stale_preflight_data(
+    app: &AppHandle,
+    supervisor: &ProcessSupervisor,
+) -> Result<(), String> {
+    let path = app
+        .path()
+        .app_cache_dir()
+        .map_err(|_| "Could not resolve the temporary preflight recovery directory.".to_string())?
+        .join("preflight");
+    recover_preflight_directory(&path, supervisor)
+}
+
+fn recover_preflight_directory(
+    path: &Path,
+    supervisor: &ProcessSupervisor,
+) -> Result<(), String> {
+    match fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => {
+            supervisor.mark_cleanup_unhealthy();
+            Err(format!(
+                "Stale preflight data could not be removed; engine startup is blocked: {error}"
+            ))
+        }
+    }
+}
+
 struct ProbeConfigFile {
     path: PathBuf,
     supervisor: ProcessSupervisor,

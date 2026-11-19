@@ -2324,7 +2324,7 @@ mod socks_probe_cancellation_tests {
 
             let mut request_bytes = Vec::new();
             let mut buffer = [0_u8; 512];
-            while !request_bytes.windows(4).any(|window| window == b"\r\\n\r\\n") {
+            while !request_bytes.windows(4).any(|window| window == b"\r\n\r\n") {
                 let count = stream.read(&mut buffer).expect("read proxied HTTP request");
                 assert!(count > 0, "proxy client closed before sending HTTP headers");
                 request_bytes.extend_from_slice(&buffer[..count]);
@@ -2358,7 +2358,7 @@ mod socks_probe_cancellation_tests {
     async fn http_204_through_controlled_socks_proxy_returns_measured_delay() {
         const URL: &str = "http://probe.invalid/generate_204";
         const RESPONSE: &[u8] =
-            b"HTTP/1.1 204 No Content\r\\nContent-Length: 0\r\\nConnection: close\r\\n\r\\n";
+            b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 
         let (port, request_seen, server) = start_socks_proxy_with_http_response(RESPONSE);
         let client = build_probe_http_client(port, Duration::from_secs(3))
@@ -2380,11 +2380,11 @@ mod socks_probe_cancellation_tests {
         const RESPONSES: &[(&str, &[u8])] = &[
             (
                 "HTTP 200",
-                b"HTTP/1.1 200 OK\r\\nContent-Length: 0\r\\nConnection: close\r\\n\r\\n",
+                b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
             ),
             (
                 "HTTP redirect",
-                b"HTTP/1.1 302 Found\r\\nLocation: http://probe.invalid/elsewhere\r\\nContent-Length: 0\r\\nConnection: close\r\\n\r\\n",
+                b"HTTP/1.1 302 Found\r\nLocation: http://probe.invalid/elsewhere\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
             ),
         ];
 

@@ -7,7 +7,7 @@ A Windows-first desktop app for importing proxy profiles and testing them before
 - Import one share link per line: VLESS, VMess Base64 JSON, Trojan, Shadowsocks SIP002, Hysteria2 / hy2, TUIC, and Naive HTTPS / QUIC.
 - Keep profile metadata separate from credentials. On Windows, credentials are stored through Windows Credential Manager.
 - Preserve the names of unknown source options without retaining their values. The sing-box adapter refuses profiles with options it cannot map instead of silently dropping settings.
-- Download and install the pinned Windows AMD64 sing-box 1.14.4 release. The downloaded archive is checked against a pinned SHA-256 digest, the executable is extracted, and its reported version is checked.
+- Download and install the pinned Windows AMD64 sing-box 1.14.4 release. The downloaded archive is checked against a pinned SHA-256 digest, the executable and required `libcronet.dll` are extracted together into a versioned installation directory, and the executable's reported version is checked.
 - Generate an isolated sing-box outbound configuration for each supported profile and run the native `sing-box check`.
 - Measure **Real Delay** by sending an HTTPS request through a temporary, loopback-only SOCKS5 proxy backed by that profile's sing-box outbound. The test accepts HTTP 204 only, disallows redirects, and uses a fallback 204 endpoint.
 - Configure and persist the primary/fallback HTTPS probe URLs and request timeout in the application settings. The timeout is bounded to 2–30 seconds (9 seconds by default); endpoint URLs cannot contain embedded credentials or fragments.
@@ -56,6 +56,7 @@ npm run tauri -- build
 - `docs/PROFILE_IMPORT.md` — import, credential, and test behavior
 - `docs/REAL_DELAY_SPEC.md` — Real Delay semantics and remaining acceptance requirements
 - `docs/ROADMAP.md` — staged delivery and release gates
+- `docs/REFERENCE_CLIENTS.md` — lessons and license boundaries from Karing, v2rayN, v2rayNG, and Hiddify
 - `docs/SECURITY.md` — security invariants and current limitations
 
 ## Third-party engine

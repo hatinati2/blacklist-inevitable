@@ -4,7 +4,7 @@ A Windows-first desktop app for importing proxy profiles and testing them before
 
 ## Current implementation
 
-- Import one share link per line: VLESS, VMess Base64 JSON, Trojan, Shadowsocks SIP002, Hysteria2 / hy2, and TUIC.
+- Import one share link per line: VLESS, VMess Base64 JSON, Trojan, Shadowsocks SIP002, Hysteria2 / hy2, TUIC, and Naive HTTPS / QUIC.
 - Keep profile metadata separate from credentials. On Windows, credentials are stored through Windows Credential Manager.
 - Preserve the names of unknown source options without retaining their values. The sing-box adapter refuses profiles with options it cannot map instead of silently dropping settings.
 - Download and install the pinned Windows AMD64 sing-box 1.14.4 release. The downloaded archive is checked against a pinned SHA-256 digest, the executable is extracted, and its reported version is checked.
@@ -22,6 +22,7 @@ On Windows, during Tauri setup the application joins its own Job Object configur
 - Normal Connect / Disconnect and device traffic routing.
 - TUN, Wintun, packet capture, or Windows system-proxy integration.
 - Xray-core and Mihomo adapters.
+- Mieru profiles (the upstream sing-box 1.14.4 adapter does not implement Mieru).
 - Subscription URL, Clash YAML, sing-box JSON, or plugin-based Shadowsocks import.
 - Android support.
 

@@ -289,7 +289,7 @@ fn sanitize_detail(
     }
     detail
         .chars()
-        .filter(|ch| !ch.is_control() || matches!(ch, '\n' | '\t'))
+        .filter(|ch| !ch.is_control() || matches!(*ch, '\n' | '\t'))
         .take(1200)
         .collect()
 }

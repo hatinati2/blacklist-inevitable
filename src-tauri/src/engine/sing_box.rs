@@ -824,11 +824,18 @@ pub fn installed_binary_path(app: &AppHandle) -> Result<PathBuf, String> {
         .join("sing-box.exe"))
 }
 
+fn has_naive_runtime_library(binary: &Path) -> bool {
+    binary
+        .parent()
+        .map(|directory| directory.join("libcronet.dll").is_file())
+        .unwrap_or(false)
+}
+
 pub async fn is_installed(app: &AppHandle, supervisor: &ProcessSupervisor) -> bool {
     let Ok(path) = installed_binary_path(app) else {
         return false;
     };
-    if !path.is_file() {
+    if !path.is_file() || !has_naive_runtime_library(&path) {
         return false;
     }
     read_engine_version(&path, supervisor)
@@ -847,7 +854,7 @@ pub async fn install(app: &AppHandle, supervisor: &ProcessSupervisor) -> Result<
     let binary_path = installed_binary_path(app)?;
     if binary_path.is_file() {
         match read_engine_version(&binary_path, supervisor).await {
-            Ok(version) if matches_expected_engine_version(&version) => return Ok(version),
+            Ok(version) if matches_expected_engine_version(&version) && has_naive_runtime_library(&binary_path) => return Ok(version),
             // A timeout means the previous version-check child may not have been
             // reaped. Do not download/replace an engine while cleanup is uncertain.
             Err(error) if error.contains("timed out") => return Err(error),
@@ -1058,8 +1065,8 @@ pub async fn validate_profile_config(
     supervisor: &ProcessSupervisor,
 ) -> Result<(), String> {
     let binary = installed_binary_path(app)?;
-    if !binary.is_file() {
-        return Err("The sing-box engine is not installed.".to_string());
+    if !binary.is_file() || !has_naive_runtime_library(&binary) {
+        return Err("The sing-box engine or its required Windows runtime libraries are missing; reinstall the engine.".to_string());
     }
 
     let config = build_probe_config(profile, credentials, 17381)?;
@@ -1214,8 +1221,8 @@ pub async fn measure_real_delay(
 ) -> Result<ProbeOutcome, String> {
     let mut operation = supervisor.begin_operation()?;
     let binary = installed_binary_path(app)?;
-    if !binary.is_file() {
-        return Err("The pinned sing-box engine is not installed.".to_string());
+    if !binary.is_file() || !has_naive_runtime_library(&binary) {
+        return Err("The pinned sing-box engine or its required Windows runtime libraries are not installed.".to_string());
     }
 
     let port = pick_loopback_port()?;

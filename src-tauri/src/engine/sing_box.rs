@@ -1651,6 +1651,10 @@ mod runtime_guard_tests {
             "listener child must be reaped before checking the port"
         );
 
+        assert!(
+            TcpStream::connect(address).await.is_err(),
+            "the stopped child must no longer accept connections on its former port"
+        );
         let released_listener = timeout(Duration::from_secs(5), async {
             loop {
                 if let Ok(listener) = std::net::TcpListener::bind(address) {
@@ -1661,11 +1665,6 @@ mod runtime_guard_tests {
         })
         .await
         .expect("loopback port must become bindable after child exit");
-
-        assert!(
-            TcpStream::connect(address).await.is_err(),
-            "the stopped child must no longer accept connections on its former port"
-        );
         drop(released_listener);
         std::fs::remove_dir_all(root).expect("remove listener test directory");
     }

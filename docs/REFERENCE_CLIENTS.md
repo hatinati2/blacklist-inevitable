@@ -72,10 +72,10 @@ The official Mieru client supports Windows and its documented configuration is a
 
 Candidate architecture for our Windows client:
 - Treat Mieru as a separate engine adapter / supervised sidecar, not as an unsupported outbound type in upstream sing-box.
-- Generate a unique Mieru client JSON config from an imported Mieru config/profile, with credentials isolated in a temporary directory protected by a restrictive ACL.
+- Generate a unique Mieru client JSON config from an imported Mieru config/profile, with credentials isolated in a temporary directory protected by a restrictive ACL. The upstream CLI supports the `MIERU_CONFIG_JSON_FILE` environment variable, which lets the agent point the child process at that per-session JSON file instead of the default `%AppData%\\mieru` config path.
 - Start and supervise the official Mieru client as a long-lived child process owned by the privileged Windows agent.
 - Connect the main sing-box session to the Mieru client's loopback SOCKS5 listener using a SOCKS5 outbound, but only after testing TCP and UDP ASSOCIATE semantics, crash detection, and cleanup.
-- Never use the Mieru CLI's default persistent user configuration for a VPN session unless its profile isolation and credential-at-rest behavior are proven; avoid leaving user secrets in the machine's normal Mieru config directory.
+- Never use the Mieru CLI's default persistent user configuration for a VPN session; set `MIERU_CONFIG_JSON_FILE` explicitly to a per-session file, and delete the session directory after the child exits and cleanup is confirmed.
 - Check the GPL-3.0 obligations and third-party dependencies before distributing a Mieru binary.
 
 This is a researched option, not implemented support. It does not prove arbitrary Mieru URLs/config formats are interoperable; the initial importer should accept an explicit JSON config file or a documented supported format and reject unknown fields rather than invent a share-link scheme.

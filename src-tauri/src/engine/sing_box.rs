@@ -949,9 +949,6 @@ pub struct ProbeOutcome {
     pub tested_url: Option<String>,
 }
 
-const REAL_DELAY_PRIMARY_URL: &str = "https://www.gstatic.com/generate_204";
-const REAL_DELAY_FALLBACK_URL: &str = "https://cp.cloudflare.com/generate_204";
-const REAL_DELAY_REQUEST_TIMEOUT: Duration = Duration::from_secs(9);
 const ENGINE_START_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct ProbeDirectory {
@@ -1021,6 +1018,7 @@ pub async fn measure_real_delay(
     app: &AppHandle,
     profile: &ProfileSummary,
     credentials: &BTreeMap<String, String>,
+    settings: &crate::real_delay_settings::RealDelaySettings,
     supervisor: &ProcessSupervisor,
 ) -> Result<ProbeOutcome, String> {
     let mut operation = supervisor.begin_operation()?;
@@ -1157,7 +1155,7 @@ pub async fn measure_real_delay(
         }
         result = async {
             wait_for_local_socks(&mut child, port).await?;
-            measure_request_through_socks(port).await
+            measure_request_through_socks(port, settings).await
         } => result,
     };
 
@@ -1245,9 +1243,19 @@ async fn wait_for_local_socks_with_timeout(
     }
 }
 
-async fn measure_request_through_socks(port: u16) -> Result<(u64, String), String> {
-    let client = build_probe_http_client(port, REAL_DELAY_REQUEST_TIMEOUT)?;
-    measure_request_with_client(&client, &[REAL_DELAY_PRIMARY_URL, REAL_DELAY_FALLBACK_URL]).await
+async fn measure_request_through_socks(
+    port: u16,
+    settings: &crate::real_delay_settings::RealDelaySettings,
+) -> Result<(u64, String), String> {
+    let client = build_probe_http_client(
+        port,
+        Duration::from_secs(settings.timeout_seconds),
+    )?;
+    measure_request_with_client(
+        &client,
+        &[settings.primary_url.as_str(), settings.fallback_url.as_str()],
+    )
+    .await
 }
 
 fn build_probe_http_client(

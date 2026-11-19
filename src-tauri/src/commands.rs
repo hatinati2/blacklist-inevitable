@@ -262,9 +262,25 @@ pub struct RealDelayResult {
 }
 
 #[tauri::command]
+pub fn get_real_delay_settings(
+    app: AppHandle,
+) -> Result<crate::real_delay_settings::RealDelaySettings, String> {
+    crate::real_delay_settings::load(&app)
+}
+
+#[tauri::command]
+pub fn save_real_delay_settings(
+    app: AppHandle,
+    settings: crate::real_delay_settings::RealDelaySettings,
+) -> Result<crate::real_delay_settings::RealDelaySettings, String> {
+    crate::real_delay_settings::save(&app, settings)
+}
+
+#[tauri::command]
 pub async fn test_all_profile_real_delays(
     app: AppHandle,
 ) -> Result<Vec<RealDelayResult>, String> {
+    let settings = crate::real_delay_settings::load(&app)?;
     let profiles = profile_store::list_profiles(&app)?;
     // Shared across every invocation, including detached workers from a cancelled
     // command, so the process cap applies to the entire app rather than one batch.
@@ -276,6 +292,7 @@ pub async fn test_all_profile_real_delays(
         let app = app.clone();
         let semaphore = Arc::clone(&semaphore);
         let supervisor = supervisor.clone();
+        let settings = settings.clone();
         let fallback = RealDelayResult {
             profile_id: profile.id.clone(),
             name: profile.name.clone(),
@@ -322,6 +339,7 @@ pub async fn test_all_profile_real_delays(
                 &app,
                 &profile,
                 &credentials,
+                &settings,
                 &supervisor,
             )
             .await

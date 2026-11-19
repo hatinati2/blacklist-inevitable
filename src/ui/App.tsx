@@ -44,6 +44,12 @@ type RealDelayResult = {
   testedUrl: string | null;
 };
 
+type RealDelaySettings = {
+  primaryUrl: string;
+  fallbackUrl: string;
+  timeoutSeconds: number;
+};
+
 type EndpointResult = {
   profileId: string;
   name: string;
@@ -67,6 +73,13 @@ export default function App() {
   const [previewMode, setPreviewMode] = useState(false);
   const [installingEngine, setInstallingEngine] = useState(false);
   const [configResults, setConfigResults] = useState<Record<string, { valid: boolean; detail: string }>>({});
+  const [realDelaySettings, setRealDelaySettings] = useState<RealDelaySettings>({
+    primaryUrl: "https://www.gstatic.com/generate_204",
+    fallbackUrl: "https://cp.cloudflare.com/generate_204",
+    timeoutSeconds: 9,
+  });
+  const [settingsLoading, setSettingsLoading] = useState(true);
+  const [settingsSaving, setSettingsSaving] = useState(false);
 
   const refreshStatus = useCallback(async () => {
     try {
@@ -99,10 +112,38 @@ export default function App() {
     }
   }, []);
 
+  const refreshRealDelaySettings = useCallback(async () => {
+    setSettingsLoading(true);
+    try {
+      const settings = await invoke<RealDelaySettings>("get_real_delay_settings");
+      setRealDelaySettings(settings);
+    } catch (error) {
+      setMessage(typeof error === "string" ? error : "Could not load Real Delay settings.");
+    } finally {
+      setSettingsLoading(false);
+    }
+  }, []);
+
+  const saveRealDelaySettings = async () => {
+    setSettingsSaving(true);
+    try {
+      const settings = await invoke<RealDelaySettings>("save_real_delay_settings", {
+        settings: realDelaySettings,
+      });
+      setRealDelaySettings(settings);
+      setMessage("Real Delay settings saved.");
+    } catch (error) {
+      setMessage(typeof error === "string" ? error : "Could not save Real Delay settings.");
+    } finally {
+      setSettingsSaving(false);
+    }
+  };
+
   useEffect(() => {
     void refreshStatus();
     void refreshProfiles();
-  }, [refreshStatus, refreshProfiles]);
+    void refreshRealDelaySettings();
+  }, [refreshStatus, refreshProfiles, refreshRealDelaySettings]);
 
   const engines = status?.engines ?? [
     { kind: "sing-box", binaryName: "sing-box", integrationStage: "implemented · preflight only" },
@@ -338,6 +379,69 @@ export default function App() {
             <p className="engine-installed-note">sing-box { "1.14.4" } is installed. Native config validation and isolated Real Delay are available.</p>
           )}
         </article>
+      </section>
+
+      <section className="panel settings-panel">
+        <div className="panel-heading">
+          <div>
+            <p className="eyebrow">REAL DELAY CONFIGURATION</p>
+            <h2>Probe endpoints and timeout</h2>
+          </div>
+          <span className="count-tag">HTTPS · HTTP 204</span>
+        </div>
+        <p className="panel-copy">
+          These endpoints are requested through each selected node's temporary SOCKS5 proxy.
+          Only HTTP 204 is accepted; redirects are not followed and requests never fall back to the direct network.
+        </p>
+        <div className="settings-fields">
+          <label className="setting-field">
+            <span>Primary HTTPS endpoint</span>
+            <input
+              type="url"
+              value={realDelaySettings.primaryUrl}
+              onChange={(event) => setRealDelaySettings((current) => ({ ...current, primaryUrl: event.target.value }))}
+              disabled={previewMode || settingsLoading || settingsSaving}
+              spellCheck={false}
+            />
+          </label>
+          <label className="setting-field">
+            <span>Fallback HTTPS endpoint</span>
+            <input
+              type="url"
+              value={realDelaySettings.fallbackUrl}
+              onChange={(event) => setRealDelaySettings((current) => ({ ...current, fallbackUrl: event.target.value }))}
+              disabled={previewMode || settingsLoading || settingsSaving}
+              spellCheck={false}
+            />
+          </label>
+          <label className="setting-field timeout-field">
+            <span>Timeout (seconds)</span>
+            <input
+              type="number"
+              min={2}
+              max={30}
+              step={1}
+              value={realDelaySettings.timeoutSeconds}
+              onChange={(event) => setRealDelaySettings((current) => ({
+                ...current,
+                timeoutSeconds: Number(event.target.value),
+              }))}
+              disabled={previewMode || settingsLoading || settingsSaving}
+            />
+          </label>
+        </div>
+        <div className="settings-actions">
+          <span className="hint-text">
+            {settingsLoading ? "Loading saved settings…" : "Timeout range: 2–30 seconds. Default: 9 seconds."}
+          </span>
+          <button
+            className="primary-button"
+            onClick={() => void saveRealDelaySettings()}
+            disabled={previewMode || settingsLoading || settingsSaving}
+          >
+            {settingsSaving ? "Saving…" : "Save Real Delay settings"}
+          </button>
+        </div>
       </section>
 
       <section className="section-heading">

@@ -1678,16 +1678,25 @@ mod socks_probe_cancellation_tests {
     #[tokio::test]
     async fn http_probe_request_times_out_inside_controlled_socks_proxy() {
         let (port, connected, disconnected, server) = start_stalled_socks_proxy();
-        let client = build_probe_http_client(port, Duration::from_millis(250))
+        let client = build_probe_http_client(port, Duration::from_secs(1))
             .expect("build test HTTP client");
+        let request_client = client.clone();
+        let request = tokio::spawn(async move {
+            measure_request_with_client(&request_client, &["http://probe.invalid/generate_204"])
+                .await
+        });
 
-        let result = measure_request_with_client(&client, &["http://probe.invalid/generate_204"])
-            .await;
+        // Wait for a completed SOCKS5 handshake before evaluating the HTTP timeout,
+        // so slow Windows scheduling cannot turn this into a pre-connect timeout test.
+        receive_signal(connected).await;
+        let result = tokio::time::timeout(Duration::from_secs(4), request)
+            .await
+            .expect("HTTP request timeout test did not finish")
+            .expect("HTTP request task panicked");
         assert!(
             result.unwrap_err().contains("timed out"),
             "a stalled upstream response must be reported as a timeout"
         );
-        receive_signal(connected).await;
         assert!(
             receive_signal(disconnected).await,
             "the HTTP timeout must release the SOCKS tunnel while the client remains alive"

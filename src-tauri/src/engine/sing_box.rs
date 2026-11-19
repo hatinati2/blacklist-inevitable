@@ -632,6 +632,85 @@ mod tests {
             .contains("xhttp"));
     }
 
+    fn sample_tun_options() -> TunSessionOptions {
+        TunSessionOptions {
+            interface_name: "blacklist-tun".to_string(),
+            addresses: vec![
+                "172.19.0.1/30".to_string(),
+                "fdfe:dcba:9876::1/126".to_string(),
+            ],
+            mtu: 1500,
+            resolved_server_ip: "203.0.113.44".to_string(),
+            dns_server_ip: "1.1.1.1".to_string(),
+            dns_server_name: "cloudflare-dns.com".to_string(),
+        }
+    }
+
+    #[test]
+    fn builds_windows_tun_config_with_dns_hijack_and_proxy_detour() {
+        let profile = sample_profile("trojan");
+        let credentials = BTreeMap::from([("password".to_string(), "trojan-secret".to_string())]);
+        let config = build_tun_session_config(&profile, &credentials, &sample_tun_options())
+            .expect("valid normal-session TUN config");
+
+        let tun = &config["inbounds"][0];
+        assert_eq!(tun["type"], "tun");
+        assert_eq!(tun["tag"], "tun-in");
+        assert_eq!(tun["interface_name"], "blacklist-tun");
+        assert_eq!(tun["address"][0], "172.19.0.1/30");
+        assert_eq!(tun["address"][1], "fdfe:dcba:9876::1/126");
+        assert_eq!(tun["mtu"], 1500);
+        assert_eq!(tun["dns_mode"], "hijack");
+        assert_eq!(tun["auto_route"], true);
+        assert_eq!(tun["strict_route"], true);
+        assert!(tun.get("listen").is_none());
+
+        let outbound = &config["outbounds"][0];
+        assert_eq!(outbound["server"], "203.0.113.44");
+        assert_eq!(outbound["tls"]["server_name"], "proxy.example.com");
+
+        assert_eq!(config["route"]["auto_detect_interface"], true);
+        assert_eq!(config["route"]["final"], OUTBOUND_TAG);
+        assert_eq!(config["dns"]["final"], "blacklist-remote-dns");
+        assert_eq!(config["dns"]["servers"][0]["type"], "https");
+        assert_eq!(config["dns"]["servers"][0]["server"], "1.1.1.1");
+        assert_eq!(config["dns"]["servers"][0]["tls"]["server_name"], "cloudflare-dns.com");
+        assert_eq!(config["dns"]["servers"][0]["detour"], OUTBOUND_TAG);
+        // sing-box derives the per-family TUN DNS addresses from the address
+        // list and automatically hijacks those addresses when dns_address is unset.
+        assert!(tun.get("dns_address").is_none());
+    }
+
+    #[test]
+    fn rejects_invalid_windows_tun_addresses_dns_bootstrap_and_mtu() {
+        let mut options = sample_tun_options();
+        options.addresses.pop();
+        assert!(validate_tun_session_options(&options).is_err());
+
+        let mut options = sample_tun_options();
+        options.dns_server_ip = "cloudflare-dns.com".to_string();
+        assert!(validate_tun_session_options(&options).is_err());
+
+        let mut options = sample_tun_options();
+        options.mtu = 1000;
+        assert!(validate_tun_session_options(&options).is_err());
+
+        let mut options = sample_tun_options();
+        options.interface_name = "bad interface".to_string();
+        assert!(validate_tun_session_options(&options).is_err());
+    }
+
+    #[test]
+    fn refuses_tun_config_when_profile_has_unmapped_protocol_options() {
+        let mut profile = sample_profile("trojan");
+        profile.unsupported_options.push("custom_transport".to_string());
+        let credentials = BTreeMap::from([("password".to_string(), "secret".to_string())]);
+
+        let error = build_tun_session_config(&profile, &credentials, &sample_tun_options())
+            .unwrap_err();
+        assert!(error.contains("custom_transport"));
+    }
+
     #[test]
     fn maps_websocket_early_data_fields() {
         let mut profile = sample_profile("vless");

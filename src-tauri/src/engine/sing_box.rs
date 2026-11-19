@@ -1688,11 +1688,11 @@ mod socks_probe_cancellation_tests {
             "a stalled upstream response must be reported as a timeout"
         );
         receive_signal(connected).await;
-        drop(client);
         assert!(
             receive_signal(disconnected).await,
-            "the HTTP timeout must release the SOCKS tunnel"
+            "the HTTP timeout must release the SOCKS tunnel while the client remains alive"
         );
+        drop(client);
         server.join().expect("join SOCKS5 test proxy");
     }
 
@@ -1713,12 +1713,12 @@ mod socks_probe_cancellation_tests {
         receive_signal(connected).await;
         request.abort();
         let _ = request.await;
-        drop(client);
 
         assert!(
             receive_signal(disconnected).await,
-            "dropping the cancelled request must release its SOCKS tunnel"
+            "cancelling the request must release its SOCKS tunnel while the client remains alive"
         );
+        drop(client);
         server.join().expect("join SOCKS5 test proxy");
     }
 }

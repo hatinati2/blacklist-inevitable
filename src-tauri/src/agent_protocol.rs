@@ -123,13 +123,18 @@ impl AgentResponse {
         }
     }
 
-    pub fn failed(request_id: String, connection: Option<ConnectionSnapshot>, detail: impl Into<String>) -> Self {
+    pub fn failed_redacted(
+        request_id: String,
+        connection: Option<ConnectionSnapshot>,
+        detail: impl Into<String>,
+        credentials: &BTreeMap<String, String>,
+    ) -> Self {
         Self {
             version: AGENT_PROTOCOL_VERSION,
             request_id,
             status: AgentResponseStatus::Failed,
             connection,
-            detail: Some(sanitize_detail(detail.into())),
+            detail: Some(sanitize_detail(detail.into(), credentials)),
         }
     }
 }
@@ -156,8 +161,8 @@ pub fn validate_agent_request(request: &AgentRequest) -> Result<(), String> {
         validate_credentials(&payload.profile.protocol, &payload.credentials)?;
     }
 
-    if let AgentOperation::Disconnect { session_id } = request.operation {
-        if session_id == 0 {
+    if let AgentOperation::Disconnect { session_id } = &request.operation {
+        if *session_id == 0 {
             return Err("A valid connection session identifier is required.".to_string());
         }
     }
@@ -177,6 +182,27 @@ fn validate_request_id(request_id: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn is_valid_server_host(value: &str) -> bool {
+    if value.trim() != value || value.is_empty() || value.len() > MAX_SERVER_NAME_BYTES {
+        return false;
+    }
+    if value.parse::<std::net::IpAddr>().is_ok() {
+        return true;
+    }
+
+    let hostname = value.strip_suffix('.').unwrap_or(value);
+    !hostname.is_empty()
+        && hostname.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
+                && label.as_bytes().last().is_some_and(u8::is_ascii_alphanumeric)
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+}
+
 fn validate_profile(profile: &AgentProfile) -> Result<(), String> {
     if profile.id.is_empty() || profile.id.len() > MAX_PROFILE_ID_BYTES {
         return Err("The profile identifier is invalid.".to_string());
@@ -184,7 +210,7 @@ fn validate_profile(profile: &AgentProfile) -> Result<(), String> {
     if profile.name.trim().is_empty() || profile.name.len() > MAX_PROFILE_NAME_BYTES {
         return Err("The profile name is invalid.".to_string());
     }
-    if profile.server.trim().is_empty() || profile.server.len() > MAX_SERVER_NAME_BYTES {
+    if !is_valid_server_host(&profile.server) {
         return Err("The proxy server address is invalid.".to_string());
     }
     if profile.port == 0 {
@@ -254,10 +280,18 @@ fn validate_credentials(
     Ok(())
 }
 
-fn sanitize_detail(detail: String) -> String {
-    // Responses intentionally have a low size ceiling. Callers must pass only
-    // pre-sanitized errors; credential-aware redaction happens before this point.
-    detail.chars().take(1200).collect()
+fn sanitize_detail(
+    mut detail: String,
+    credentials: &BTreeMap<String, String>,
+) -> String {
+    for secret in credentials.values().filter(|value| !value.is_empty()) {
+        detail = detail.replace(secret, "[redacted]");
+    }
+    detail
+        .chars()
+        .filter(|ch| !ch.is_control() || matches!(ch, '\n' | '\t'))
+        .take(1200)
+        .collect()
 }
 
 #[cfg(test)]
@@ -377,13 +411,18 @@ mod tests {
 
     #[test]
     fn agent_response_does_not_include_credentials() {
-        let response = AgentResponse::failed(
+        let credentials =
+            BTreeMap::from([("password".to_string(), "sensitive-passphrase".to_string())]);
+        let response = AgentResponse::failed_redacted(
             "request-01".to_string(),
             None,
-            "The proxy engine failed to start.",
+            "The proxy engine failed to start; secret=sensitive-passphrase".to_string(),
+            &credentials,
         );
         let encoded = serde_json::to_string(&response).unwrap();
         assert!(!encoded.contains("password"));
         assert!(encoded.contains("proxy engine failed"));
+        assert!(!encoded.contains("sensitive-passphrase"));
+        assert!(encoded.contains("[redacted]"));
     }
 }

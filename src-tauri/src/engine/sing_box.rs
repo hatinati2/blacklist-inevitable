@@ -1774,6 +1774,159 @@ mod runtime_guard_tests {
         std::fs::remove_dir_all(root).expect("remove listener test directory");
     }
 
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn graceful_shutdown_during_proxy_startup_stops_child_and_cleans_probe_files() {
+        use tokio::sync::oneshot;
+
+        let supervisor = ProcessSupervisor::default();
+        let mut operation = supervisor
+            .begin_operation()
+            .expect("register Real Delay startup operation");
+        let root = std::env::temp_dir().join(format!(
+            "blacklist-inevitable-startup-shutdown-{}",
+            Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).expect("create probe directory");
+        let config_path = root.join("config.json");
+        std::fs::write(&config_path, br#"{"password":"test-only-secret"}"#)
+            .expect("write credential-bearing test config");
+
+        let ready_path = root.join("listener.port");
+        let mut command = listening_child_command(&ready_path);
+        supervisor.prepare_child_command(&mut command);
+        let mut child = command.spawn().expect("spawn supervised proxy startup child");
+        supervisor
+            .assign_child(&mut child)
+            .await
+            .expect("contain proxy startup child before it can run");
+        let child_pid = child.id().expect("read proxy startup child PID");
+
+        let listener_port = wait_for_listener_port(&ready_path).await;
+        let listener_address = ("127.0.0.1", listener_port);
+        let connection = timeout(Duration::from_secs(2), TcpStream::connect(listener_address))
+            .await
+            .expect("controlled startup child listener timed out")
+            .expect("controlled startup child must be listening");
+        drop(connection);
+
+        // This port remains unbound, so the startup waiter cannot mistake the
+        // helper's separate listener for a ready SOCKS proxy.
+        let unavailable_listener =
+            std::net::TcpListener::bind(("127.0.0.1", 0)).expect("reserve startup probe port");
+        let startup_port = unavailable_listener
+            .local_addr()
+            .expect("read startup probe port")
+            .port();
+        drop(unavailable_listener);
+
+        let (startup_wait_started_tx, startup_wait_started_rx) = oneshot::channel();
+        let (cleanup_paused_tx, cleanup_paused_rx) = oneshot::channel();
+        let (allow_cleanup_tx, allow_cleanup_rx) = oneshot::channel();
+        let worker_root = root.clone();
+
+        let worker = tokio::spawn(async move {
+            let _ = startup_wait_started_tx.send(());
+            let cancelled = tokio::select! {
+                _ = operation.cancelled() => true,
+                result = wait_for_local_socks_with_timeout(
+                    &mut child,
+                    startup_port,
+                    Duration::from_secs(30),
+                ) => {
+                    panic!("proxy startup should be cancelled, not complete: {result:?}");
+                }
+            };
+
+            stop_probe_process(&mut child)
+                .await
+                .expect("shutdown must stop and reap the proxy startup child");
+            assert!(
+                child.try_wait().expect("inspect stopped startup child").is_some(),
+                "startup child must be reaped before its operation lease is released"
+            );
+
+            // Hold the lease after process cleanup to prove the supervisor also
+            // waits for the credential-bearing directory cleanup below.
+            let _ = cleanup_paused_tx.send(());
+            allow_cleanup_rx
+                .await
+                .expect("test must release the temporary-file cleanup gate");
+            cleanup_probe_dir(&worker_root)
+                .await
+                .expect("shutdown must remove the temporary probe directory");
+            drop(operation);
+            cancelled
+        });
+
+        startup_wait_started_rx
+            .await
+            .expect("startup worker should enter the readiness wait");
+        // Allow the readiness loop to make at least one failed connection
+        // attempt before requesting shutdown.
+        sleep(Duration::from_millis(150)).await;
+
+        assert!(
+            supervisor.request_shutdown(),
+            "the first shutdown request must begin cancellation"
+        );
+        assert!(
+            supervisor.begin_operation().is_err(),
+            "new engine operations must be rejected after shutdown starts"
+        );
+        let drain_supervisor = supervisor.clone();
+        let drain = tokio::spawn(async move { drain_supervisor.wait_for_idle().await });
+
+        timeout(Duration::from_secs(5), cleanup_paused_rx)
+            .await
+            .expect("startup child cleanup should reach the directory-cleanup gate")
+            .expect("startup worker should signal completed process cleanup");
+        assert!(
+            !drain.is_finished(),
+            "shutdown must keep waiting while the temporary probe directory still exists"
+        );
+        assert!(root.exists(), "temporary config must remain until its cleanup completes");
+
+        wait_for_child_exit(child_pid).await;
+        assert!(
+            TcpStream::connect(listener_address).await.is_err(),
+            "shutdown must release the child-owned listener"
+        );
+        let released_listener = timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(listener) = std::net::TcpListener::bind(listener_address) {
+                    return listener;
+                }
+                sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("listener port must be reusable after startup child termination");
+        drop(released_listener);
+
+        allow_cleanup_tx
+            .send(())
+            .expect("release temporary-file cleanup gate");
+        assert!(
+            timeout(Duration::from_secs(5), drain)
+                .await
+                .expect("supervisor should drain after probe directory cleanup")
+                .expect("supervisor drain task should not panic"),
+            "successful startup cancellation must leave cleanup healthy"
+        );
+        assert!(
+            worker.await.expect("startup cancellation worker should not panic"),
+            "the readiness wait must observe graceful shutdown cancellation"
+        );
+        assert!(!root.exists(), "credential-bearing probe files must be removed");
+        assert!(
+            supervisor.shutdown_complete(),
+            "shutdown completes only after child and temporary-file cleanup"
+        );
+        assert!(supervisor.cleanup_healthy());
+    }
+
     #[test]
     fn installed_version_check_requires_an_exact_version_token() {
         assert!(matches_expected_engine_version("sing-box version 1.14.4"));

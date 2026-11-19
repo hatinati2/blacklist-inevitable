@@ -13,7 +13,7 @@ Windows is the first platform. Android work starts only after the Windows releas
 ## M1 — Profiles and basic endpoint checks
 
 - [x] Define a normalized profile model.
-- [x] Import VLESS, VMess, Trojan, Shadowsocks SIP002, Hysteria2, and TUIC share links.
+- [x] Import VLESS, VMess, Trojan, Shadowsocks SIP002, Hysteria2, TUIC, and Naive HTTPS / QUIC share links.
 - [x] Keep credentials in Windows Credential Manager, separate from profile metadata.
 - [x] Add local profile listing and removal.
 - [x] Add bounded TCP endpoint checks for TCP-capable profiles.
@@ -21,6 +21,8 @@ Windows is the first platform. Android work starts only after the Windows releas
 - [ ] Test persistence and credential deletion on a clean Windows machine.
 
 ## M2 — First engine integration and preflight (sing-box)
+
+- [x] Import Naive HTTPS / QUIC links, map the supported outbound fields, and install the required official Windows `libcronet.dll` beside sing-box.
 
 - [x] Pin sing-box 1.14.4 for Windows AMD64 and verify the downloaded archive with a pinned SHA-256 digest.
 - [x] Download, inspect, extract, and version-check the engine executable before installing it.

@@ -270,7 +270,7 @@ mod tests {
 
     #[test]
     fn include_and_exclude_selected_modes_invert_the_fallback_route() {
-        let apps = vec![application(r"C:\\Apps\\Discord\\Discord.exe", ApplicationRoute::Vpn)];
+        let apps = vec![application(r"C:\Apps\Discord\Discord.exe", ApplicationRoute::Vpn)];
 
         let mut include = base_config();
         apply_split_tunnel_policy(&mut include, &SplitTunnelPolicy {
@@ -298,9 +298,9 @@ mod tests {
             mode: SplitTunnelMode::Custom,
             default_route: ApplicationRoute::Direct,
             applications: vec![
-                application(r"C:\\Apps\\Discord\\Discord.exe", ApplicationRoute::Vpn),
-                application(r"C:\\Apps\\Telegram\\Telegram.exe", ApplicationRoute::Direct),
-                application(r"C:\\Tools\\Restricted.exe", ApplicationRoute::Block),
+                application(r"C:\Apps\Discord\Discord.exe", ApplicationRoute::Vpn),
+                application(r"C:\Apps\Telegram\Telegram.exe", ApplicationRoute::Direct),
+                application(r"C:\Tools\Restricted.exe", ApplicationRoute::Block),
             ],
         };
         apply_split_tunnel_policy(&mut config, &policy).unwrap();
@@ -313,7 +313,7 @@ mod tests {
 
     #[test]
     fn rejects_relative_invalid_duplicate_and_oversized_application_paths() {
-        for path in ["Discord.exe", r"C:\\Apps\\..\\Discord.exe", r"C:\\bad|name.exe", r"C:\\folder\\file.txt"] {
+        for path in ["Discord.exe", r"C:\Apps\..\Discord.exe", r"C:\bad|name.exe", r"C:\folder\file.txt"] {
             let policy = SplitTunnelPolicy {
                 mode: SplitTunnelMode::IncludeSelected,
                 applications: vec![application(path, ApplicationRoute::Vpn)],
@@ -325,8 +325,8 @@ mod tests {
         let duplicate = SplitTunnelPolicy {
             mode: SplitTunnelMode::Custom,
             applications: vec![
-                application(r"C:\\Apps\\Discord.exe", ApplicationRoute::Vpn),
-                application(r"c:\\apps\\DISCORD.exe", ApplicationRoute::Direct),
+                application(r"C:\Apps\Discord.exe", ApplicationRoute::Vpn),
+                application(r"c:\apps\DISCORD.exe", ApplicationRoute::Direct),
             ],
             ..SplitTunnelPolicy::default()
         };
@@ -335,7 +335,7 @@ mod tests {
         let oversized = SplitTunnelPolicy {
             mode: SplitTunnelMode::Custom,
             applications: (0..=MAX_APPLICATIONS)
-                .map(|index| application(&format!(r"C:\\Apps\\{index}.exe"), ApplicationRoute::Vpn))
+                .map(|index| application(&format!(r"C:\Apps\{index}.exe"), ApplicationRoute::Vpn))
                 .collect(),
             ..SplitTunnelPolicy::default()
         };

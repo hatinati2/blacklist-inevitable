@@ -56,7 +56,7 @@ Windows is the first platform. Android work starts only after the Windows releas
 ## Windows protocol compatibility backlog
 
 - [x] Add a bounded Naive HTTPS / QUIC share-link importer and sing-box outbound mapping for Windows.
-- [ ] Evaluate Mieru profile/config import and sing-box mapping for the Windows release; do not assume a share-link URI format.
+- [ ] Evaluate Mieru as a separate supervised Windows sidecar with JSON config and a local SOCKS5 bridge; test UDP ASSOCIATE, credential isolation, process lifetime, and recovery. Do not assume a share-link URI format or upstream sing-box outbound.
 - [ ] Run controlled-server Naive authentication tests, including both HTTPS and QUIC modes, before claiming end-to-end protocol compatibility.
 - [ ] For Mieru, verify upstream engine support, canonical config format, credential isolation, transport semantics, and controlled-server behavior before implementation.
 - [ ] Keep unsupported fields visible by name and reject profiles that cannot be represented without semantic loss.

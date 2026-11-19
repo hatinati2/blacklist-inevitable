@@ -51,6 +51,15 @@ Windows is the first platform. Android work starts only after the Windows releas
 - [ ] Report unsupported configuration rather than silently dropping fields.
 - [ ] Add cross-engine fixture tests so the same imported profile is only advertised as supported where its semantics are preserved.
 
+## Windows protocol compatibility backlog
+
+- [ ] Evaluate NaiveProxy (naive) profile/config import and sing-box mapping for the Windows release.
+- [ ] Evaluate Mieru profile/config import and sing-box mapping for the Windows release; do not assume a share-link URI format.
+- [ ] For both protocols, verify support in the pinned sing-box version, canonical source format, credential isolation, TLS/transport semantics, and controlled-server behavior before advertising support.
+- [ ] Keep unsupported fields visible by name and reject profiles that cannot be represented without semantic loss.
+
+These are future Windows compatibility targets, not currently supported protocols. Android and other OS work remains blocked until the Windows release gate is complete.
+
 ## M4 — Normal connection lifecycle
 
 - [ ] Add an explicit Rust-owned Connect / Disconnect state machine.

@@ -975,11 +975,11 @@ pub fn recover_stale_preflight_data(
     app: &AppHandle,
     supervisor: &ProcessSupervisor,
 ) -> Result<(), String> {
-    let path = app
-        .path()
-        .app_cache_dir()
-        .map_err(|_| "Could not resolve the temporary preflight recovery directory.".to_string())?
-        .join("preflight");
+    let path = app.path().app_cache_dir().map_err(|_| {
+        supervisor.mark_cleanup_unhealthy();
+        "Could not resolve the temporary preflight recovery directory; engine startup is blocked."
+            .to_string()
+    })?.join("preflight");
     recover_preflight_directory(&path, supervisor)
 }
 

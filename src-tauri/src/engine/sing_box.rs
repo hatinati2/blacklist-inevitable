@@ -167,6 +167,130 @@ pub fn build_probe_config(
 }
 
 
+/// Runtime-selected Windows tunnel values. The agent must choose collision-free
+/// interface addresses and resolve the proxy endpoint before starting TUN.
+#[derive(Debug, Clone)]
+pub struct TunSessionOptions {
+    pub interface_name: String,
+    /// Exactly one IPv4 and one IPv6 CIDR. Keep the first address in each family
+    /// available for the interface; sing-box derives the next address for DNS.
+    pub addresses: Vec<String>,
+    pub mtu: u16,
+    /// Numeric address resolved before TUN starts, to avoid DNS recursion for the
+    /// VPN endpoint. TLS SNI remains the original profile hostname.
+    pub resolved_server_ip: String,
+    /// Numeric DoH endpoint; no bootstrap DNS lookup is needed for this resolver.
+    pub dns_server_ip: String,
+    pub dns_server_name: String,
+}
+
+fn validate_ip_prefix(value: &str) -> Result<bool, String> {
+    let (address, prefix) = value
+        .split_once('/')
+        .ok_or_else(|| "Each TUN address must include an IP prefix length.".to_string())?;
+    let ip = address
+        .parse::<std::net::IpAddr>()
+        .map_err(|_| "A TUN address contains an invalid IP address.".to_string())?;
+    let prefix = prefix
+        .parse::<u8>()
+        .map_err(|_| "A TUN address contains an invalid prefix length.".to_string())?;
+
+    match ip {
+        std::net::IpAddr::V4(_) if prefix <= 30 => Ok(false),
+        std::net::IpAddr::V6(_) if prefix <= 126 => Ok(true),
+        std::net::IpAddr::V4(_) => Err("The IPv4 TUN prefix must leave a usable next address for DNS.".to_string()),
+        std::net::IpAddr::V6(_) => Err("The IPv6 TUN prefix must leave a usable next address for DNS.".to_string()),
+    }
+}
+
+fn validate_tun_session_options(options: &TunSessionOptions) -> Result<(), String> {
+    if options.interface_name.is_empty()
+        || options.interface_name.len() > 64
+        || !options.interface_name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+        return Err("The TUN interface name must be 1–64 ASCII letters, digits, '-' or '_'.".to_string());
+    }
+    if !(1280..=9000).contains(&options.mtu) {
+        return Err("The TUN MTU must be between 1280 and 9000.".to_string());
+    }
+    if options.addresses.len() != 2 {
+        return Err("The TUN requires exactly one IPv4 and one IPv6 interface address.".to_string());
+    }
+
+    let mut has_v4 = false;
+    let mut has_v6 = false;
+    for address in &options.addresses {
+        match validate_ip_prefix(address)? {
+            true if !has_v6 => has_v6 = true,
+            false if !has_v4 => has_v4 = true,
+            true => return Err("Only one IPv6 TUN address is currently supported.".to_string()),
+            false => return Err("Only one IPv4 TUN address is currently supported.".to_string()),
+        }
+    }
+    if !has_v4 || !has_v6 {
+        return Err("The TUN requires both IPv4 and IPv6 interface addresses.".to_string());
+    }
+
+    options.resolved_server_ip
+        .parse::<std::net::IpAddr>()
+        .map_err(|_| "The VPN server must be resolved to a numeric IP before TUN starts.".to_string())?;
+    options.dns_server_ip
+        .parse::<std::net::IpAddr>()
+        .map_err(|_| "The encrypted DNS server must use a numeric IP to avoid bootstrap DNS recursion.".to_string())?;
+    if options.dns_server_name.trim().is_empty()
+        || options.dns_server_name.contains(['/', ':', ' '])
+    {
+        return Err("The encrypted DNS server requires a valid TLS server name.".to_string());
+    }
+    Ok(())
+}
+
+/// Build a normal-session TUN configuration. This generates config only; it does
+/// not start sing-box, create an adapter, or change Windows routes/DNS.
+pub fn build_tun_session_config(
+    profile: &ProfileSummary,
+    credentials: &BTreeMap<String, String>,
+    options: &TunSessionOptions,
+) -> Result<Value, String> {
+    validate_tun_session_options(options)?;
+
+    // Reuse the strict profile adapter mapping, then replace its probe-only SOCKS
+    // inbound with the Windows TUN inbound. The endpoint IP is resolved before
+    // TUN starts; generated TLS SNI continues to use the original profile hostname.
+    let mut config = build_probe_config(profile, credentials, 17381)?;
+    config["inbounds"] = json!([{
+        "type": "tun",
+        "tag": "tun-in",
+        "interface_name": options.interface_name,
+        "address": options.addresses,
+        "mtu": options.mtu,
+        "dns_mode": "hijack",
+        "auto_route": true,
+        "strict_route": true
+    }]);
+    config["outbounds"][0]["server"] = json!(options.resolved_server_ip);
+    config["route"]["auto_detect_interface"] = json!(true);
+    config["dns"] = json!({
+        "servers": [{
+            "type": "https",
+            "tag": "blacklist-remote-dns",
+            "server": options.dns_server_ip,
+            "server_port": 443,
+            "path": "/dns-query",
+            "tls": {
+                "enabled": true,
+                "server_name": options.dns_server_name
+            },
+            "detour": OUTBOUND_TAG
+        }],
+        "final": "blacklist-remote-dns",
+        "strategy": "prefer_ipv4"
+    });
+
+    Ok(config)
+}
+
+
 
 fn validate_profile_options(
     profile: &ProfileSummary,

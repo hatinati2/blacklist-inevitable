@@ -1781,7 +1781,7 @@ mod runtime_guard_tests {
         use tokio::sync::oneshot;
 
         let supervisor = ProcessSupervisor::default();
-        let operation = supervisor
+        let mut operation = supervisor
             .begin_operation()
             .expect("register Real Delay startup operation");
         let root = std::env::temp_dir().join(format!(

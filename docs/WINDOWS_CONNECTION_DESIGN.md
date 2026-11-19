@@ -46,6 +46,14 @@ Every successful network mutation must have a corresponding recorded rollback ac
 
 Do not blindly restore a machine-wide setting to a guessed default. Record the previous state and restore only resources owned by this session. If restoration cannot be verified, mark runtime cleanup unhealthy, block another Connect, and provide recovery diagnostics.
 
+## Privileged Windows agent
+
+The UI must remain unelevated. The normal VPN session is planned to run through a narrowly scoped Windows background agent that owns the TUN interface, routes, DNS, firewall policy, and long-lived engine process. The agent communicates with the desktop app over authenticated local IPC (prefer a Windows named pipe with a restrictive DACL and caller-token verification). It must expose a fixed operation allowlist, not a generic shell/process-spawn interface.
+
+The desktop process and service run under potentially different Windows security identities, so the agent must not assume it can directly read the user's Credential Manager. The preferred MVP design is a one-shot credential handoff over the authenticated IPC channel, with credentials held in memory and only temporary restrictive-ACL engine config files where required. Durable session recovery data must never contain profile secrets.
+
+See [WINDOWS_AGENT_DESIGN.md](WINDOWS_AGENT_DESIGN.md) for the service boundary, credential handoff, authorization, transaction, recovery, and verification requirements.
+
 ## Windows tunnel and routing
 
 The implementation must select and document a supported Windows TUN/Wintun integration before coding the production path. Evaluate maintenance status, redistribution/licensing, signing requirements, architecture support, and clean-machine installation behavior of the selected driver/runtime.

@@ -330,10 +330,16 @@ mod tests {
         assert!(coordinator.network_verified(session).is_err());
 
         coordinator.begin_engine(session).unwrap();
-        assert_eq!(coordinator.snapshot().phase, ConnectionPhase::StartingEngine);
+        assert_eq!(
+            coordinator.snapshot().phase,
+            ConnectionPhase::StartingEngine
+        );
 
         coordinator.engine_ready(session).unwrap();
-        assert_eq!(coordinator.snapshot().phase, ConnectionPhase::ConfiguringNetwork);
+        assert_eq!(
+            coordinator.snapshot().phase,
+            ConnectionPhase::ConfiguringNetwork
+        );
 
         coordinator.network_verified(session).unwrap();
         assert_eq!(coordinator.snapshot().phase, ConnectionPhase::Connected);

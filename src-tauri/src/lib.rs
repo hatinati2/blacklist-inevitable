@@ -18,6 +18,11 @@ pub fn run() {
                 eprintln!("Windows process containment is unavailable for this app instance: {error}");
                 supervisor.mark_cleanup_unhealthy();
             }
+            if let Err(error) =
+                crate::engine::sing_box::recover_stale_preflight_data(app.handle(), &supervisor)
+            {
+                eprintln!("Stale preflight recovery failed; engine startup remains blocked: {error}");
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

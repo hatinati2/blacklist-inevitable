@@ -2271,6 +2271,79 @@ mod socks_probe_cancellation_tests {
         (port, connected_rx, disconnected_rx, server)
     }
 
+    fn start_socks_proxy_with_http_response(
+        response: &'static [u8],
+    ) -> (u16, Receiver<()>, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
+            .expect("bind local SOCKS5 response proxy");
+        let port = listener.local_addr().expect("read response proxy address").port();
+        let (request_seen_tx, request_seen_rx) = mpsc::channel();
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept SOCKS5 response client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set bounded response proxy read timeout");
+
+            let mut greeting = [0_u8; 2];
+            stream.read_exact(&mut greeting).expect("read SOCKS5 greeting");
+            assert_eq!(greeting[0], 5, "client must negotiate SOCKS5");
+            let mut methods = vec![0_u8; greeting[1] as usize];
+            stream.read_exact(&mut methods).expect("read SOCKS5 methods");
+            assert!(methods.contains(&0), "client must offer no-auth SOCKS5");
+            stream.write_all(&[5, 0]).expect("accept no-auth SOCKS5");
+
+            let mut request = [0_u8; 4];
+            stream.read_exact(&mut request).expect("read SOCKS5 CONNECT request");
+            assert_eq!(&request[..3], &[5, 1, 0]);
+            match request[3] {
+                1 => {
+                    let mut address = [0_u8; 4];
+                    stream.read_exact(&mut address).expect("read IPv4 destination");
+                }
+                3 => {
+                    let mut length = [0_u8; 1];
+                    stream.read_exact(&mut length).expect("read domain length");
+                    let mut address = vec![0_u8; length[0] as usize];
+                    stream.read_exact(&mut address).expect("read domain destination");
+                }
+                4 => {
+                    let mut address = [0_u8; 16];
+                    stream.read_exact(&mut address).expect("read IPv6 destination");
+                }
+                atyp => panic!("unexpected SOCKS5 address type: {atyp}"),
+            }
+            let mut destination_port = [0_u8; 2];
+            stream
+                .read_exact(&mut destination_port)
+                .expect("read destination port");
+
+            stream
+                .write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 0])
+                .expect("complete SOCKS5 handshake");
+
+            let mut request_bytes = Vec::new();
+            let mut buffer = [0_u8; 512];
+            while !request_bytes.windows(4).any(|window| window == b"\\r\\n\\r\\n") {
+                let count = stream.read(&mut buffer).expect("read proxied HTTP request");
+                assert!(count > 0, "proxy client closed before sending HTTP headers");
+                request_bytes.extend_from_slice(&buffer[..count]);
+                assert!(request_bytes.len() <= 8192, "HTTP request headers exceeded test bound");
+            }
+            assert!(
+                request_bytes.starts_with(b"GET "),
+                "the local proxy must receive the generated HTTP probe request"
+            );
+            request_seen_tx.send(()).expect("signal received HTTP probe request");
+
+            stream
+                .write_all(response)
+                .expect("send controlled HTTP response");
+        });
+
+        (port, request_seen_rx, server)
+    }
+
     async fn receive_signal<T: Send + 'static>(receiver: Receiver<T>) -> T {
         tokio::task::spawn_blocking(move || {
             receiver
@@ -2279,6 +2352,62 @@ mod socks_probe_cancellation_tests {
         })
         .await
         .expect("SOCKS5 signal worker panicked")
+    }
+
+    #[tokio::test]
+    async fn http_204_through_controlled_socks_proxy_returns_measured_delay() {
+        const URL: &str = "http://probe.invalid/generate_204";
+        const RESPONSE: &[u8] =
+            b"HTTP/1.1 204 No Content\\r\\nContent-Length: 0\\r\\nConnection: close\\r\\n\\r\\n";
+
+        let (port, request_seen, server) = start_socks_proxy_with_http_response(RESPONSE);
+        let client = build_probe_http_client(port, Duration::from_secs(3))
+            .expect("build controlled HTTP probe client");
+
+        let (delay_ms, tested_url) = measure_request_with_client(&client, &[URL])
+            .await
+            .expect("only the proxied HTTP 204 response should count as success");
+
+        receive_signal(request_seen).await;
+        assert_eq!(tested_url, URL, "the result must identify the successful probe URL");
+        assert!(delay_ms < 3_000, "the successful local probe must respect its timeout");
+        server.join().expect("join controlled SOCKS5 response proxy");
+    }
+
+    #[tokio::test]
+    async fn non_204_http_responses_are_not_reported_as_real_delay_success() {
+        const URL: &str = "http://probe.invalid/generate_204";
+        const RESPONSES: &[(&str, &[u8])] = &[
+            (
+                "HTTP 200",
+                b"HTTP/1.1 200 OK\\r\\nContent-Length: 0\\r\\nConnection: close\\r\\n\\r\\n",
+            ),
+            (
+                "HTTP redirect",
+                b"HTTP/1.1 302 Found\\r\\nLocation: http://probe.invalid/elsewhere\\r\\nContent-Length: 0\\r\\nConnection: close\\r\\n\\r\\n",
+            ),
+        ];
+
+        for (label, response) in RESPONSES {
+            let (port, request_seen, server) = start_socks_proxy_with_http_response(response);
+            let client = build_probe_http_client(port, Duration::from_secs(3))
+                .expect("build controlled HTTP probe client");
+
+            let error = measure_request_with_client(&client, &[URL])
+                .await
+                .expect_err("non-204 response must never be accepted as Real Delay success");
+
+            receive_signal(request_seen).await;
+            assert!(
+                error.contains("instead of 204"),
+                "{label} should be reported as a non-204 response: {error}"
+            );
+            assert!(
+                !error.contains("elsewhere"),
+                "redirects must not be followed: {error}"
+            );
+            server.join().expect("join controlled SOCKS5 response proxy");
+        }
     }
 
     #[tokio::test]

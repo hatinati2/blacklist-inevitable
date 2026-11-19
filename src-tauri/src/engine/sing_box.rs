@@ -1304,6 +1304,111 @@ async fn cleanup_probe_dir(path: &Path) -> Result<(), String> {
 mod runtime_guard_tests {
     use super::*;
 
+    const CONFIG_CHECK_CHILD_STARTED_ENV: &str = "BLACKLIST_INEVITABLE_CONFIG_CHECK_CHILD_STARTED";
+    const CONFIG_CHECK_CHILD_FINISHED_ENV: &str = "BLACKLIST_INEVITABLE_CONFIG_CHECK_CHILD_FINISHED";
+
+    #[test]
+    fn bounded_config_check_child_process() {
+        let Some(started_path) = std::env::var_os(CONFIG_CHECK_CHILD_STARTED_ENV) else {
+            return;
+        };
+        let finished_path = std::env::var_os(CONFIG_CHECK_CHILD_FINISHED_ENV)
+            .expect("config-check child finished marker path");
+
+        std::fs::write(started_path, b"started").expect("publish config-check start");
+        std::thread::sleep(Duration::from_millis(900));
+        std::fs::write(finished_path, b"finished").expect("publish config-check completion");
+    }
+
+    fn bounded_config_check_child_command(started_path: &Path, finished_path: &Path) -> Command {
+        let executable = std::env::current_exe().expect("resolve current test executable");
+        let mut command = Command::new(executable);
+        command
+            .args([
+                "--exact",
+                "engine::sing_box::runtime_guard_tests::bounded_config_check_child_process",
+                "--nocapture",
+            ])
+            .env(CONFIG_CHECK_CHILD_STARTED_ENV, started_path)
+            .env(CONFIG_CHECK_CHILD_FINISHED_ENV, finished_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        command
+    }
+
+    #[tokio::test]
+    async fn graceful_shutdown_waits_for_bounded_config_check_child_to_finish() {
+        let supervisor = ProcessSupervisor::default();
+        let operation = supervisor
+            .begin_operation()
+            .expect("register config-check operation");
+        let root = std::env::temp_dir().join(format!(
+            "blacklist-inevitable-config-check-shutdown-{}",
+            Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).expect("create config-check test directory");
+        let started_path = root.join("child.started");
+        let finished_path = root.join("child.finished");
+        let mut command = bounded_config_check_child_command(&started_path, &finished_path);
+        let worker_supervisor = supervisor.clone();
+
+        let worker = tokio::spawn(async move {
+            let output = run_engine_command_output(
+                &mut command,
+                &worker_supervisor,
+                Duration::from_secs(5),
+            )
+            .await
+            .expect("bounded config check should finish before its hard timeout");
+            assert!(output.status.success(), "config-check child should exit successfully");
+            drop(operation);
+        });
+
+        timeout(Duration::from_secs(10), async {
+            while !started_path.is_file() {
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("config-check child should start before shutdown");
+
+        assert!(supervisor.request_shutdown(), "first shutdown request must win");
+        assert!(
+            supervisor.begin_operation().is_err(),
+            "shutdown must reject new engine operations"
+        );
+        assert!(
+            timeout(Duration::from_millis(150), supervisor.wait_for_idle())
+                .await
+                .is_err(),
+            "shutdown must continue waiting while bounded config validation is running"
+        );
+
+        timeout(Duration::from_secs(5), worker)
+            .await
+            .expect("config-check worker should complete")
+            .expect("config-check worker task should not panic");
+        assert_eq!(
+            std::fs::read(&finished_path).expect("read config-check completion marker"),
+            b"finished",
+            "the child must finish its bounded validation before the operation lease is released"
+        );
+        assert!(
+            timeout(Duration::from_secs(5), supervisor.wait_for_idle())
+                .await
+                .expect("supervisor should drain after config-check child exits"),
+            "normal config-check completion must leave cleanup healthy"
+        );
+        assert!(
+            supervisor.shutdown_complete(),
+            "shutdown is complete only after the config-check operation releases its lease"
+        );
+
+        std::fs::remove_dir_all(root).expect("remove config-check test directory");
+    }
+
+
     #[cfg(windows)]
     const SLEEPING_CHILD_PID_ENV: &str = "BLACKLIST_INEVITABLE_PREFLIGHT_CHILD_PID_PATH";
 

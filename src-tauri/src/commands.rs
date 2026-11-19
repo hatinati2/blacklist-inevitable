@@ -135,10 +135,12 @@ pub async fn test_all_profile_endpoints(
 }
 
 async fn test_one_endpoint(profile: ProfileSummary) -> EndpointTestResult {
+    let naive_quic = profile.protocol == "naive"
+        && profile.options.get("quic").is_some_and(|value| value == "true");
     let tcp_supported = matches!(
         profile.protocol.as_str(),
         "vless" | "vmess" | "trojan" | "shadowsocks" | "naive"
-    );
+    ) && !naive_quic;
 
     if !tcp_supported {
         return EndpointTestResult {

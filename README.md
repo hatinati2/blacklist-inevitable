@@ -21,6 +21,7 @@ On Windows, during Tauri setup the application joins its own Job Object configur
 
 - Normal Connect / Disconnect and device traffic routing.
 - TUN, Wintun, packet capture, or Windows system-proxy integration.
+- Privileged Windows VPN agent/service and authenticated local IPC.
 - Xray-core and Mihomo adapters.
 - Mieru profiles (the upstream sing-box 1.14.4 adapter does not implement Mieru).
 - Subscription URL, Clash YAML, sing-box JSON, or plugin-based Shadowsocks import.

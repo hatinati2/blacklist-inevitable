@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::connection_state::{ConnectionSnapshot, ConnectionPhase};
+use crate::connection_state::ConnectionSnapshot;
 use crate::profiles::ProfileSummary;
 
 pub const AGENT_PROTOCOL_VERSION: u16 = 1;
@@ -119,7 +119,7 @@ impl AgentResponse {
             request_id,
             status: AgentResponseStatus::Rejected,
             connection: None,
-            detail: Some(sanitize_detail(detail.into())),
+            detail: Some(sanitize_detail(detail.into(), &BTreeMap::new())),
         }
     }
 
@@ -338,6 +338,18 @@ mod tests {
 
         let public_profile = serde_json::to_string(&ProfileSummary::from(payload.profile)).unwrap();
         assert!(!public_profile.contains("one-shot-secret"));
+    }
+
+    #[test]
+    fn validates_ipv4_ipv6_and_dns_server_hostnames() {
+        assert!(is_valid_server_host("203.0.113.10"));
+        assert!(is_valid_server_host("2001:db8::1"));
+        assert!(is_valid_server_host("proxy.example.org"));
+        assert!(is_valid_server_host("proxy.example.org."));
+        assert!(!is_valid_server_host("https://proxy.example.org"));
+        assert!(!is_valid_server_host("proxy..example.org"));
+        assert!(!is_valid_server_host("-proxy.example.org"));
+        assert!(!is_valid_server_host("proxy.example.org:443"));
     }
 
     #[test]

@@ -122,6 +122,34 @@ pub fn build_probe_config(
             );
             insert_tls(&mut outbound, profile, true)?;
         }
+        "naive" => {
+            ensure_allowed_options(profile, &["sni", "quic", "insecureConcurrency"])?;
+            let password = required(credentials, "password")?;
+            outbound.insert("password".to_string(), json!(password));
+            if let Some(username) = credentials.get("username").filter(|value| !value.is_empty()) {
+                outbound.insert("username".to_string(), json!(username));
+            }
+            let concurrency = profile.options
+                .get("insecureConcurrency")
+                .map(|value| value.parse::<u32>())
+                .transpose()
+                .map_err(|_| "Naive insecureConcurrency must be a valid non-negative integer.".to_string())?
+                .unwrap_or(0);
+            outbound.insert("insecure_concurrency".to_string(), json!(concurrency));
+            outbound.insert(
+                "quic".to_string(),
+                json!(profile.options.get("quic").is_some_and(|value| value == "true")),
+            );
+            let server_name = profile.options
+                .get("sni")
+                .filter(|value| !value.is_empty())
+                .map(String::as_str)
+                .unwrap_or(&profile.server);
+            outbound.insert(
+                "tls".to_string(),
+                json!({"enabled": true, "server_name": server_name}),
+            );
+        }
         _ => return Err("This protocol is not supported by the sing-box adapter.".to_string()),
     }
 
@@ -227,10 +255,22 @@ fn validate_profile_options(
             }
         }
         "shadowsocks" => {}
+        "naive" => {
+            if options.get("quic").is_some_and(|value| value != "true") {
+                return Err("Naive quic must be enabled only for naive+quic links.".to_string());
+            }
+            if let Some(value) = options.get("insecureConcurrency") {
+                let concurrency = value.parse::<u32>()
+                    .map_err(|_| "Naive insecureConcurrency must be a valid non-negative integer.".to_string())?;
+                if concurrency > 32 {
+                    return Err("Naive insecureConcurrency must not exceed 32.".to_string());
+                }
+            }
+        }
         _ => return Err("This protocol is not supported by the sing-box adapter.".to_string()),
     }
 
-    let tls_enabled = matches!(profile.protocol.as_str(), "trojan" | "hysteria2" | "tuic")
+    let tls_enabled = matches!(profile.protocol.as_str(), "trojan" | "hysteria2" | "tuic" | "naive")
         || options.get("security").is_some_and(|value| {
             ["tls", "reality"].contains(&value.to_ascii_lowercase().as_str())
         })

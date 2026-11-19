@@ -30,7 +30,7 @@ Lessons adopted:
 - Keep core/process ownership, system proxy handling, DNS, and routing as independent concerns.
 - Use a Windows-native release gate rather than assuming a successful portable build proves the installed app works.
 
-v2rayN's repository is GPL-3.0. This project uses its public format behavior as an interoperability reference; no v2rayN source code is copied.
+v2rayN's repository is GPL-3.0. Its [Naive formatter](https://github.com/2dust/v2rayN/blob/master/v2rayN/ServiceLib/Handler/Fmt/NaiveFmt.cs) and [format tests](https://github.com/2dust/v2rayN/tree/master/v2rayN/ServiceLib.Tests/Fmt) informed the Naive share-link edge cases covered by this project. This project uses public format behavior as an interoperability reference; no v2rayN source code is copied.
 
 ## v2rayNG
 
@@ -50,7 +50,7 @@ v2rayNG's repository is GPL-3.0. No source code is copied.
 Application: https://github.com/hiddify/hiddify-app  
 Core: https://github.com/hiddify/hiddify-core
 
-Hiddify is useful as a product reference for multi-format subscription import, user-facing profile metadata, automatic server selection, DNS settings, and a desktop privileged-service boundary. Its Windows desktop TUN interface explicitly separates the Flutter UI process from an elevated background service that owns the full VPN core. That is a useful architectural pattern to evaluate for Windows, rather than elevating the UI process itself.
+Hiddify is useful as a product reference for multi-format subscription import, user-facing profile metadata, automatic server selection, DNS settings, and a desktop privileged-service boundary. Its [Windows/Linux desktop TUN interface](https://github.com/hiddify/hiddify-app/blob/main/lib/hiddifycore/core_interface/core_interface_desktop_tun.dart) separates the Flutter UI process from an elevated background service that owns the full VPN core. Its [Windows signing/elevation notes](https://github.com/hiddify/hiddify-app/blob/main/docs/windows-code-signing.md) and [core service implementation](https://github.com/hiddify/hiddify-core/tree/main/v2/hcore/adminbgservice) further illustrate the service lifecycle, UAC, and restricted control-secret pattern. These are architectural references, not code copied into this project.
 
 Compatibility boundary:
 - Hiddify documents that its app uses `hiddify-sing-box`, a fork with additional contributions including Mieru and other protocols.
@@ -61,6 +61,7 @@ Useful lessons adopted:
 - Profile import should be separated from subscription download, parsing, and node normalization.
 - Display subscription update metadata and actionable import failures rather than treating all invalid input as one error.
 - A privileged Windows service can own TUN and routes while the unprivileged UI remains a controller.
+- Authenticate local service IPC and restrict its control secret and endpoints to the intended user/service identities.
 - DNS configuration and route state are part of the connection lifecycle, not independent toggles.
 
 ## Project decisions

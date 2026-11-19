@@ -540,6 +540,63 @@ mod tests {
     }
 
     #[test]
+    fn maps_vmess_tls_and_websocket_transport_fields() {
+        let mut profile = sample_profile("vmess");
+        profile.options = BTreeMap::from([
+            ("tls".to_string(), "tls".to_string()),
+            ("sni".to_string(), "vmess.example.com".to_string()),
+            ("transport".to_string(), "ws".to_string()),
+            ("host".to_string(), "cdn.example.com".to_string()),
+            ("path".to_string(), "/vmess".to_string()),
+            ("alterId".to_string(), "0".to_string()),
+            ("security".to_string(), "auto".to_string()),
+        ]);
+        let credentials = BTreeMap::from([("uuid".to_string(), "vmess-user-id".to_string())]);
+
+        let config = build_probe_config(&profile, &credentials, 10080).unwrap();
+        let outbound = &config["outbounds"][0];
+
+        assert_eq!(outbound["type"], "vmess");
+        assert_eq!(outbound["uuid"], "vmess-user-id");
+        assert_eq!(outbound["security"], "auto");
+        assert_eq!(outbound["alter_id"], 0);
+        assert_eq!(outbound["tls"]["enabled"], true);
+        assert_eq!(outbound["tls"]["server_name"], "vmess.example.com");
+        assert_eq!(outbound["transport"]["type"], "ws");
+        assert_eq!(outbound["transport"]["path"], "/vmess");
+        assert_eq!(outbound["transport"]["headers"]["Host"], "cdn.example.com");
+    }
+
+    #[test]
+    fn maps_shadowsocks_method_and_secret_without_exposing_it_elsewhere() {
+        let mut profile = sample_profile("shadowsocks");
+        profile.options.insert("method".to_string(), "aes-256-gcm".to_string());
+        let credentials = BTreeMap::from([("password".to_string(), "ss-test-secret".to_string())]);
+
+        let config = build_probe_config(&profile, &credentials, 10080).unwrap();
+        let outbound = &config["outbounds"][0];
+
+        assert_eq!(outbound["type"], "shadowsocks");
+        assert_eq!(outbound["method"], "aes-256-gcm");
+        assert_eq!(outbound["password"], "ss-test-secret");
+        assert_eq!(config["inbounds"][0]["listen"], "127.0.0.1");
+    }
+
+    #[test]
+    fn refuses_vmess_and_shadowsocks_when_required_secrets_are_missing() {
+        let vmess = sample_profile("vmess");
+        assert!(build_probe_config(&vmess, &BTreeMap::new(), 10080)
+            .unwrap_err()
+            .contains("uuid"));
+
+        let mut shadowsocks = sample_profile("shadowsocks");
+        shadowsocks.options.insert("method".to_string(), "aes-128-gcm".to_string());
+        assert!(build_probe_config(&shadowsocks, &BTreeMap::new(), 10080)
+            .unwrap_err()
+            .contains("password"));
+    }
+
+    #[test]
     fn maps_hysteria2_password_obfuscation_and_tls() {
         let mut profile = sample_profile("hysteria2");
         profile.options = BTreeMap::from([

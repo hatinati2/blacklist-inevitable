@@ -1706,6 +1706,63 @@ mod socks_probe_cancellation_tests {
     }
 
     #[tokio::test]
+    async fn graceful_shutdown_cancels_http_probe_and_waits_for_socks_release() {
+        let (port, connected, disconnected, server) = start_stalled_socks_proxy();
+        let supervisor = ProcessSupervisor::default();
+        let mut operation = supervisor
+            .begin_operation()
+            .expect("register active Real Delay operation");
+        let client = build_probe_http_client(port, Duration::from_secs(30))
+            .expect("build test HTTP client");
+        let request_client = client.clone();
+        let worker = tokio::spawn(async move {
+            let cancelled = tokio::select! {
+                _ = operation.cancelled() => true,
+                result = measure_request_with_client(
+                    &request_client,
+                    &["http://probe.invalid/generate_204"],
+                ) => {
+                    panic!("stalled HTTP request completed before shutdown: {result:?}");
+                }
+            };
+
+            // The select branch drops the in-flight request future before the
+            // operation lease is released. Keep the test's other client clone
+            // alive so tunnel release cannot be attributed to Client::drop.
+            drop(request_client);
+            drop(operation);
+            cancelled
+        });
+
+        receive_signal(connected).await;
+        assert!(supervisor.request_shutdown(), "first shutdown request must win");
+        assert!(
+            supervisor.begin_operation().is_err(),
+            "shutdown must reject new engine operations"
+        );
+
+        let cleanup_healthy = tokio::time::timeout(
+            Duration::from_secs(4),
+            supervisor.wait_for_idle(),
+        )
+        .await
+        .expect("supervisor did not drain the cancelled HTTP operation");
+        assert!(cleanup_healthy, "HTTP cancellation must leave runtime cleanup healthy");
+        assert!(supervisor.shutdown_complete(), "shutdown must finish after cleanup");
+        assert!(
+            worker.await.expect("HTTP probe worker panicked"),
+            "the operation must observe graceful shutdown cancellation"
+        );
+        assert!(
+            receive_signal(disconnected).await,
+            "graceful shutdown must release the SOCKS tunnel before the operation lease ends"
+        );
+
+        drop(client);
+        server.join().expect("join SOCKS5 test proxy");
+    }
+
+    #[tokio::test]
     async fn cancelling_http_probe_future_releases_controlled_socks_proxy() {
         let (port, connected, disconnected, server) = start_stalled_socks_proxy();
         let client = build_probe_http_client(port, Duration::from_secs(30))

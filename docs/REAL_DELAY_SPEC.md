@@ -16,7 +16,7 @@ Current measurement endpoints:
 
 Redirects are disabled. Only HTTP 204 is accepted as success. The elapsed time covers the request through the local proxy, the selected outbound, remote connection, TLS / transport, and response headers. The endpoint used and elapsed milliseconds are returned to the UI.
 
-The request timeout is currently nine seconds per endpoint attempt, and the batch runner limits concurrent sing-box processes to four. The endpoints and timeout are constants in the Rust code; they are not configurable in the UI yet.
+The request timeout defaults to nine seconds per endpoint attempt, and the batch runner limits concurrent sing-box processes to four. Users can configure the primary and fallback HTTPS URLs and a request timeout of 2–30 seconds in the UI. Settings are persisted in the application data directory. Both endpoint URLs must be valid HTTPS URLs with a host and must not contain embedded credentials or fragments. The defaults remain `https://www.gstatic.com/generate_204` and `https://cp.cloudflare.com/generate_204`. Redirects remain disabled and only HTTP 204 is accepted regardless of the configured endpoint.
 
 ## Current isolation and cleanup behavior
 
@@ -65,5 +65,5 @@ The current adapter maps a tested subset of VLESS, VMess, Trojan, Shadowsocks, H
 - Verify that success, failure, timeout, user cancellation, and app shutdown leave no child process, listener, or temporary file behind.
 - Cancel config validation while sing-box is reading the temporary JSON and verify that no credential-bearing file remains in the preflight cache.
 - Verify that TUN and system proxy settings remain unchanged before, during, and after the test batch.
-- Add configurable test endpoints and timeout controls.
+- [x] Add configurable HTTPS test endpoints and bounded timeout controls (2–30 seconds).
 

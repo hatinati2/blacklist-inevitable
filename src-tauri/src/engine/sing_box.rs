@@ -1167,8 +1167,16 @@ fn pick_loopback_port() -> Result<u16, String> {
 }
 
 async fn wait_for_local_socks(child: &mut Child, port: u16) -> Result<(), String> {
+    wait_for_local_socks_with_timeout(child, port, ENGINE_START_TIMEOUT).await
+}
+
+async fn wait_for_local_socks_with_timeout(
+    child: &mut Child,
+    port: u16,
+    startup_timeout: Duration,
+) -> Result<(), String> {
     let address = ("127.0.0.1", port);
-    let startup = timeout(ENGINE_START_TIMEOUT, async {
+    let startup = timeout(startup_timeout, async {
         loop {
             match child.try_wait() {
                 Ok(Some(status)) => {
@@ -1196,7 +1204,7 @@ async fn wait_for_local_socks(child: &mut Child, port: u16) -> Result<(), String
         Ok(result) => result,
         Err(_) => Err(format!(
             "The temporary sing-box local proxy did not become ready within {} seconds.",
-            ENGINE_START_TIMEOUT.as_secs()
+            startup_timeout.as_secs()
         )),
     }
 }
@@ -1277,6 +1285,265 @@ async fn cleanup_probe_dir(path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod runtime_guard_tests {
     use super::*;
+
+    #[cfg(windows)]
+    const SLEEPING_CHILD_PID_ENV: &str = "BLACKLIST_INEVITABLE_PREFLIGHT_CHILD_PID_PATH";
+
+    #[cfg(windows)]
+    #[test]
+    fn sleeping_preflight_child_process() {
+        let Some(path) = std::env::var_os(SLEEPING_CHILD_PID_ENV) else {
+            return;
+        };
+
+        std::fs::write(path, std::process::id().to_string())
+            .expect("write sleeping child PID");
+        std::thread::sleep(Duration::from_secs(30));
+    }
+
+    #[cfg(windows)]
+    fn sleeping_child_command(pid_path: &Path) -> Command {
+        let executable = std::env::current_exe().expect("resolve current test executable");
+        let mut command = Command::new(executable);
+        command
+            .args([
+                "--exact",
+                "engine::sing_box::runtime_guard_tests::sleeping_preflight_child_process",
+                "--nocapture",
+            ])
+            .env(SLEEPING_CHILD_PID_ENV, pid_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        command
+    }
+
+    #[cfg(windows)]
+    async fn wait_for_child_pid(path: &Path) -> u32 {
+        timeout(Duration::from_secs(10), async {
+            loop {
+                if let Ok(value) = tokio::fs::read_to_string(path).await {
+                    if let Ok(pid) = value.trim().parse::<u32>() {
+                        return pid;
+                    }
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("sleeping child should publish its PID")
+    }
+
+    #[cfg(windows)]
+    fn windows_process_is_active(pid: u32) -> Result<bool, String> {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+
+        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if process.is_null() {
+            return Ok(false);
+        }
+
+        let mut exit_code = 0;
+        let queried = unsafe { GetExitCodeProcess(process, &mut exit_code) };
+        let error = if queried == 0 {
+            Some(std::io::Error::last_os_error())
+        } else {
+            None
+        };
+        unsafe { CloseHandle(process) };
+
+        match error {
+            Some(error) => Err(format!("GetExitCodeProcess({pid}) failed: {error}")),
+            None => Ok(exit_code == 259), // STILL_ACTIVE
+        }
+    }
+
+    #[cfg(windows)]
+    async fn wait_for_child_exit(pid: u32) {
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if !windows_process_is_active(pid).expect("query child process state") {
+                    return;
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("preflight child should have exited after cleanup");
+    }
+
+    #[test]
+    fn probe_config_drop_guard_removes_credential_bearing_file() {
+        let supervisor = ProcessSupervisor::default();
+        let root = std::env::temp_dir().join(format!(
+            "blacklist-inevitable-config-cleanup-{}",
+            Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).expect("create test cache");
+        let path = root.join("config.json");
+        std::fs::write(&path, br#"{"password":"test-secret"}"#)
+            .expect("write test config");
+
+        drop(ProbeConfigFile {
+            path: path.clone(),
+            supervisor: supervisor.clone(),
+        });
+
+        assert!(!path.exists(), "credential-bearing config must be deleted on Drop");
+        assert!(supervisor.cleanup_healthy());
+        std::fs::remove_dir_all(root).expect("remove test cache");
+    }
+
+    #[test]
+    fn probe_config_drop_guard_marks_cleanup_unhealthy_on_removal_failure() {
+        let supervisor = ProcessSupervisor::default();
+        let path = std::env::temp_dir().join(format!(
+            "blacklist-inevitable-config-not-a-file-{}",
+            Uuid::new_v4()
+        ));
+        std::fs::create_dir(&path).expect("create directory at config path");
+
+        drop(ProbeConfigFile {
+            path: path.clone(),
+            supervisor: supervisor.clone(),
+        });
+
+        assert!(!supervisor.cleanup_healthy(), "failed credential cleanup must close the safety gate");
+        std::fs::remove_dir(path).expect("remove test directory");
+    }
+
+    #[test]
+    fn probe_directory_drop_guard_removes_nested_temporary_files() {
+        let supervisor = ProcessSupervisor::default();
+        let path = std::env::temp_dir().join(format!(
+            "blacklist-inevitable-probe-cleanup-{}",
+            Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(path.join("nested")).expect("create nested probe directory");
+        std::fs::write(path.join("nested").join("config.json"), b"test").expect("write test config");
+
+        drop(ProbeDirectory {
+            path: path.clone(),
+            supervisor: supervisor.clone(),
+        });
+
+        assert!(!path.exists(), "probe Drop guard must remove its entire temporary tree");
+        assert!(supervisor.cleanup_healthy());
+    }
+
+    #[test]
+    fn probe_directory_drop_guard_marks_cleanup_unhealthy_on_removal_failure() {
+        let supervisor = ProcessSupervisor::default();
+        let path = std::env::temp_dir().join(format!(
+            "blacklist-inevitable-probe-not-a-directory-{}",
+            Uuid::new_v4()
+        ));
+        std::fs::write(&path, b"not a directory").expect("create regular file");
+
+        drop(ProbeDirectory {
+            path: path.clone(),
+            supervisor: supervisor.clone(),
+        });
+
+        assert!(!supervisor.cleanup_healthy(), "failed directory cleanup must close the safety gate");
+        std::fs::remove_file(path).expect("remove test file");
+    }
+
+    #[tokio::test]
+    async fn cleanup_probe_dir_is_idempotent_for_an_absent_directory() {
+        let path = std::env::temp_dir().join(format!(
+            "blacklist-inevitable-absent-probe-{}",
+            Uuid::new_v4()
+        ));
+
+        cleanup_probe_dir(&path)
+            .await
+            .expect("cleanup should accept an already-removed probe directory");
+        assert!(!path.exists());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn config_check_timeout_kills_child_and_marks_runtime_unhealthy() {
+        let supervisor = ProcessSupervisor::default();
+        let pid_path = std::env::temp_dir().join(format!(
+            "blacklist-inevitable-config-timeout-child-{}.txt",
+            Uuid::new_v4()
+        ));
+        let mut command = sleeping_child_command(&pid_path);
+
+        let result = run_engine_command_output(
+            &mut command,
+            &supervisor,
+            Duration::from_secs(2),
+        )
+        .await;
+
+        assert!(matches!(result, Err(EngineCommandError::TimedOut)));
+        assert!(!supervisor.cleanup_healthy(), "an unconfirmed config timeout must close the safety gate");
+        let pid = wait_for_child_pid(&pid_path).await;
+        wait_for_child_exit(pid).await;
+        std::fs::remove_file(pid_path).expect("remove child PID marker");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn proxy_startup_timeout_stops_child_and_removes_probe_directory() {
+        let supervisor = ProcessSupervisor::default();
+        let root = std::env::temp_dir().join(format!(
+            "blacklist-inevitable-startup-timeout-{}",
+            Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).expect("create probe directory");
+        let _directory_guard = ProbeDirectory {
+            path: root.clone(),
+            supervisor: supervisor.clone(),
+        };
+
+        let pid_path = root.join("child.pid");
+        let mut command = sleeping_child_command(&pid_path);
+        supervisor.prepare_child_command(&mut command);
+        let mut child = command.spawn().expect("spawn supervised preflight child");
+        supervisor
+            .assign_child(&mut child)
+            .await
+            .expect("contain preflight child before startup test");
+
+        let pid = wait_for_child_pid(&pid_path).await;
+        let unused_listener = std::net::TcpListener::bind(("127.0.0.1", 0))
+            .expect("reserve loopback port");
+        let unused_port = unused_listener.local_addr().expect("read loopback port").port();
+        drop(unused_listener);
+
+        let startup = wait_for_local_socks_with_timeout(
+            &mut child,
+            unused_port,
+            Duration::from_millis(250),
+        )
+        .await;
+        assert!(
+            startup
+                .as_ref()
+                .is_err_and(|error| error.contains("did not become ready")),
+            "a proxy that never listens must time out"
+        );
+
+        stop_probe_process(&mut child)
+            .await
+            .expect("startup timeout must stop and reap the child");
+        assert!(
+            child.try_wait().expect("inspect stopped child").is_some(),
+            "the child must be reaped after startup timeout"
+        );
+        cleanup_probe_dir(&root)
+            .await
+            .expect("remove credential-bearing probe directory");
+        assert!(!root.exists(), "probe files must be gone after timeout cleanup");
+        wait_for_child_exit(pid).await;
+    }
 
     #[test]
     fn installed_version_check_requires_an_exact_version_token() {

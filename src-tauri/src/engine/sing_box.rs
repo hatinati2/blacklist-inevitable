@@ -122,6 +122,34 @@ pub fn build_probe_config(
             );
             insert_tls(&mut outbound, profile, true)?;
         }
+        "naive" => {
+            ensure_allowed_options(profile, &["sni", "quic", "insecureConcurrency"])?;
+            let password = required(credentials, "password")?;
+            outbound.insert("password".to_string(), json!(password));
+            if let Some(username) = credentials.get("username").filter(|value| !value.is_empty()) {
+                outbound.insert("username".to_string(), json!(username));
+            }
+            let concurrency = profile.options
+                .get("insecureConcurrency")
+                .map(|value| value.parse::<u32>())
+                .transpose()
+                .map_err(|_| "Naive insecureConcurrency must be a valid non-negative integer.".to_string())?
+                .unwrap_or(0);
+            outbound.insert("insecure_concurrency".to_string(), json!(concurrency));
+            outbound.insert(
+                "quic".to_string(),
+                json!(profile.options.get("quic").is_some_and(|value| value == "true")),
+            );
+            let server_name = profile.options
+                .get("sni")
+                .filter(|value| !value.is_empty())
+                .map(String::as_str)
+                .unwrap_or(&profile.server);
+            outbound.insert(
+                "tls".to_string(),
+                json!({"enabled": true, "server_name": server_name}),
+            );
+        }
         _ => return Err("This protocol is not supported by the sing-box adapter.".to_string()),
     }
 
@@ -227,10 +255,22 @@ fn validate_profile_options(
             }
         }
         "shadowsocks" => {}
+        "naive" => {
+            if options.get("quic").is_some_and(|value| value != "true") {
+                return Err("Naive quic must be enabled only for naive+quic links.".to_string());
+            }
+            if let Some(value) = options.get("insecureConcurrency") {
+                let concurrency = value.parse::<u32>()
+                    .map_err(|_| "Naive insecureConcurrency must be a valid non-negative integer.".to_string())?;
+                if concurrency > 32 {
+                    return Err("Naive insecureConcurrency must not exceed 32.".to_string());
+                }
+            }
+        }
         _ => return Err("This protocol is not supported by the sing-box adapter.".to_string()),
     }
 
-    let tls_enabled = matches!(profile.protocol.as_str(), "trojan" | "hysteria2" | "tuic")
+    let tls_enabled = matches!(profile.protocol.as_str(), "trojan" | "hysteria2" | "tuic" | "naive")
         || options.get("security").is_some_and(|value| {
             ["tls", "reality"].contains(&value.to_ascii_lowercase().as_str())
         })
@@ -568,6 +608,61 @@ mod tests {
     }
 
     #[test]
+    fn maps_naive_https_credentials_sni_and_concurrency() {
+        let mut profile = sample_profile("naive");
+        profile.options = BTreeMap::from([
+            ("sni".to_string(), "edge.example.org".to_string()),
+            ("insecureConcurrency".to_string(), "2".to_string()),
+        ]);
+        let credentials = BTreeMap::from([
+            ("username".to_string(), "naive-user".to_string()),
+            ("password".to_string(), "naive-secret".to_string()),
+        ]);
+
+        let config = build_probe_config(&profile, &credentials, 10080).unwrap();
+        let outbound = &config["outbounds"][0];
+
+        assert_eq!(outbound["type"], "naive");
+        assert_eq!(outbound["server"], "proxy.example.com");
+        assert_eq!(outbound["server_port"], 443);
+        assert_eq!(outbound["username"], "naive-user");
+        assert_eq!(outbound["password"], "naive-secret");
+        assert_eq!(outbound["insecure_concurrency"], 2);
+        assert_eq!(outbound["quic"], false);
+        assert_eq!(outbound["tls"]["enabled"], true);
+        assert_eq!(outbound["tls"]["server_name"], "edge.example.org");
+        assert_eq!(config["inbounds"][0]["listen"], "127.0.0.1");
+    }
+
+    #[test]
+    fn maps_naive_quic_and_password_only_credentials() {
+        let mut profile = sample_profile("naive");
+        profile.options.insert("quic".to_string(), "true".to_string());
+        let credentials = BTreeMap::from([("password".to_string(), "naive-secret".to_string())]);
+
+        let config = build_probe_config(&profile, &credentials, 10080).unwrap();
+        let outbound = &config["outbounds"][0];
+
+        assert_eq!(outbound["quic"], true);
+        assert_eq!(outbound["password"], "naive-secret");
+        assert!(outbound.get("username").is_none());
+        assert_eq!(outbound["tls"]["server_name"], "proxy.example.com");
+    }
+
+    #[test]
+    fn rejects_naive_without_password_or_with_excessive_concurrency() {
+        let profile = sample_profile("naive");
+        assert!(build_probe_config(&profile, &BTreeMap::new(), 10080)
+            .unwrap_err()
+            .contains("password"));
+
+        let mut invalid = sample_profile("naive");
+        invalid.options.insert("insecureConcurrency".to_string(), "33".to_string());
+        let credentials = BTreeMap::from([("password".to_string(), "secret".to_string())]);
+        assert!(build_probe_config(&invalid, &credentials, 10080).is_err());
+    }
+
+    #[test]
     fn maps_shadowsocks_method_and_secret_without_exposing_it_elsewhere() {
         let mut profile = sample_profile("shadowsocks");
         profile.options.insert("method".to_string(), "aes-256-gcm".to_string());
@@ -729,11 +824,18 @@ pub fn installed_binary_path(app: &AppHandle) -> Result<PathBuf, String> {
         .join("sing-box.exe"))
 }
 
+fn has_naive_runtime_library(binary: &Path) -> bool {
+    binary
+        .parent()
+        .map(|directory| directory.join("libcronet.dll").is_file())
+        .unwrap_or(false)
+}
+
 pub async fn is_installed(app: &AppHandle, supervisor: &ProcessSupervisor) -> bool {
     let Ok(path) = installed_binary_path(app) else {
         return false;
     };
-    if !path.is_file() {
+    if !path.is_file() || !has_naive_runtime_library(&path) {
         return false;
     }
     read_engine_version(&path, supervisor)
@@ -752,7 +854,7 @@ pub async fn install(app: &AppHandle, supervisor: &ProcessSupervisor) -> Result<
     let binary_path = installed_binary_path(app)?;
     if binary_path.is_file() {
         match read_engine_version(&binary_path, supervisor).await {
-            Ok(version) if matches_expected_engine_version(&version) => return Ok(version),
+            Ok(version) if matches_expected_engine_version(&version) && has_naive_runtime_library(&binary_path) => return Ok(version),
             // A timeout means the previous version-check child may not have been
             // reaped. Do not download/replace an engine while cleanup is uncertain.
             Err(error) if error.contains("timed out") => return Err(error),
@@ -814,46 +916,70 @@ pub async fn install(app: &AppHandle, supervisor: &ProcessSupervisor) -> Result<
         return Err("The downloaded sing-box archive failed its SHA-256 verification.".to_string());
     }
 
-    let temporary_binary = directory.join(format!("sing-box-{}.partial", Uuid::new_v4()));
-    let extract_result = extract_verified_executable(&archive_bytes, &temporary_binary);
-    if let Err(error) = extract_result {
-        let _ = fs::remove_file(&temporary_binary);
+    let installation_parent = directory
+        .parent()
+        .ok_or_else(|| "Could not resolve the engine installation parent directory.".to_string())?;
+    let install_id = Uuid::new_v4();
+    let staging_directory = installation_parent.join(format!("sing-box-{SING_BOX_VERSION}.staging-{install_id}"));
+    let backup_directory = installation_parent.join(format!("sing-box-{SING_BOX_VERSION}.backup-{install_id}"));
+    fs::create_dir_all(&staging_directory)
+        .map_err(|_| "Could not create the temporary engine staging directory.".to_string())?;
+
+    if let Err(error) = extract_verified_engine_assets(&archive_bytes, &staging_directory) {
+        let _ = fs::remove_dir_all(&staging_directory);
         return Err(error);
     }
 
-    let version = match read_engine_version(&temporary_binary, supervisor).await {
+    let staged_binary = staging_directory.join("sing-box.exe");
+    let version = match read_engine_version(&staged_binary, supervisor).await {
         Ok(version) if matches_expected_engine_version(&version) => version,
         Ok(_) => {
-            let _ = fs::remove_file(&temporary_binary);
+            let _ = fs::remove_dir_all(&staging_directory);
             return Err("The downloaded executable reports an unexpected sing-box version.".to_string());
         }
         Err(error) => {
-            let _ = fs::remove_file(&temporary_binary);
+            let _ = fs::remove_dir_all(&staging_directory);
             return Err(error);
         }
     };
 
-    if binary_path.exists() {
-        fs::remove_file(&binary_path)
-            .map_err(|_| "Could not replace the previously installed sing-box engine.".to_string())?;
-    }
-    fs::rename(&temporary_binary, &binary_path)
-        .map_err(|_| "Could not install the verified sing-box executable.".to_string())?;
-
-    let notice_path = directory.join("THIRD_PARTY_NOTICE.txt");
+    let notice_path = staging_directory.join("THIRD_PARTY_NOTICE.txt");
     let notice = format!(
-        "sing-box {SING_BOX_VERSION}\n         Upstream: https://github.com/SagerNet/sing-box\n         Release: https://github.com/SagerNet/sing-box/releases/tag/v{SING_BOX_VERSION}\n         License: GNU GPL version 3 or later (GPL-3.0-or-later).\n         Upstream license: https://github.com/SagerNet/sing-box/blob/v{SING_BOX_VERSION}/LICENSE\n         Additional upstream condition: no derivative work may use the name or imply\n         association with the upstream application without prior consent.\n         This unmodified executable was downloaded from the upstream release and verified\n         against the pinned SHA-256 of its Windows AMD64 archive.\n"
+        "sing-box {SING_BOX_VERSION}\n         Upstream: https://github.com/SagerNet/sing-box\n         Release: https://github.com/SagerNet/sing-box/releases/tag/v{SING_BOX_VERSION}\n         License: GNU GPL version 3 or later (GPL-3.0-or-later).\n         Upstream license: https://github.com/SagerNet/sing-box/blob/v{SING_BOX_VERSION}/LICENSE\n         Additional upstream condition: no derivative work may use the name or imply\n         association with the upstream application without prior consent.\n         The official Windows release also supplies libcronet.dll, required by the\n         NaiveProxy outbound. It is retained beside sing-box.exe as documented upstream.\n         The cronet-go bindings are GPL-3.0-or-later: https://github.com/SagerNet/cronet-go/blob/main/LICENSE\n         The SagerNet NaiveProxy source carries a BSD 3-Clause license:\n         https://github.com/SagerNet/naiveproxy/blob/cronet-go/LICENSE\n         The runtime includes Chromium-derived components; their complete third-party\n         notices must be reviewed and preserved for redistribution before Windows release.\n         Both files were extracted from the unmodified official release archive, which\n         was verified against the pinned SHA-256 digest.\n"
     );
-    fs::write(notice_path, notice)
-        .map_err(|_| "The engine was installed but its third-party notice could not be saved.".to_string())?;
+    if fs::write(notice_path, notice).is_err() {
+        let _ = fs::remove_dir_all(&staging_directory);
+        return Err("Could not write the sing-box third-party notice.".to_string());
+    }
+
+    let had_previous_install = directory.exists();
+    if had_previous_install {
+        if let Err(error) = fs::rename(&directory, &backup_directory) {
+            let _ = fs::remove_dir_all(&staging_directory);
+            return Err(format!("Could not stage the previous sing-box installation for replacement: {error}"));
+        }
+    }
+
+    if let Err(error) = fs::rename(&staging_directory, &directory) {
+        if had_previous_install {
+            let _ = fs::rename(&backup_directory, &directory);
+        }
+        let _ = fs::remove_dir_all(&staging_directory);
+        return Err(format!("Could not activate the verified sing-box installation: {error}"));
+    }
+
+    if had_previous_install {
+        let _ = fs::remove_dir_all(&backup_directory);
+    }
 
     Ok(version)
 }
 
-fn extract_verified_executable(archive_bytes: &[u8], destination: &Path) -> Result<(), String> {
+fn extract_verified_engine_assets(archive_bytes: &[u8], destination: &Path) -> Result<(), String> {
     let mut archive = ZipArchive::new(Cursor::new(archive_bytes))
         .map_err(|_| "The verified sing-box release archive is not a valid ZIP file.".to_string())?;
-    let mut found = false;
+    let mut found_executable = false;
+    let mut found_naive_runtime = false;
 
     for index in 0..archive.len() {
         let mut entry = archive
@@ -865,32 +991,47 @@ fn extract_verified_executable(archive_bytes: &[u8], destination: &Path) -> Resu
         let entry_name = entry
             .name()
             .map_err(|_| "Could not read an entry name in the sing-box release archive.".to_string())?;
-        if Path::new(entry_name.as_ref())
+        let file_name = Path::new(entry_name.as_ref())
             .file_name()
             .and_then(|name| name.to_str())
-            != Some("sing-box.exe")
-        {
-            continue;
-        }
-        if found {
-            return Err("The sing-box archive contains more than one executable.".to_string());
-        }
+            .unwrap_or_default();
+
+        let output_name = match file_name {
+            "sing-box.exe" if !found_executable => {
+                found_executable = true;
+                "sing-box.exe"
+            }
+            "sing-box.exe" => {
+                return Err("The sing-box archive contains more than one executable.".to_string());
+            }
+            "libcronet.dll" if !found_naive_runtime => {
+                found_naive_runtime = true;
+                "libcronet.dll"
+            }
+            "libcronet.dll" => {
+                return Err("The sing-box archive contains more than one libcronet.dll.".to_string());
+            }
+            _ => continue,
+        };
+
         if entry.size() == 0 || entry.size() > MAX_ENGINE_EXECUTABLE_BYTES {
-            return Err("The sing-box executable has an invalid or excessive uncompressed size.".to_string());
+            return Err(format!("The {output_name} asset has an invalid or excessive uncompressed size."));
         }
 
-        let mut output = File::create(destination)
-            .map_err(|_| "Could not create the temporary sing-box executable.".to_string())?;
+        let output_path = destination.join(output_name);
+        let mut output = File::create(output_path)
+            .map_err(|_| format!("Could not create the temporary {output_name} asset."))?;
         std::io::copy(&mut entry, &mut output)
-            .map_err(|_| "Could not extract the sing-box executable.".to_string())?;
-        output
-            .flush()
-            .map_err(|_| "Could not flush the extracted sing-box executable.".to_string())?;
-        found = true;
+            .map_err(|_| format!("Could not extract the {output_name} asset."))?;
+        output.flush()
+            .map_err(|_| format!("Could not flush the extracted {output_name} asset."))?;
     }
 
-    if !found {
+    if !found_executable {
         return Err("The sing-box release archive does not contain sing-box.exe.".to_string());
+    }
+    if !found_naive_runtime {
+        return Err("The official Windows archive does not contain libcronet.dll; NaiveProxy cannot be enabled safely.".to_string());
     }
 
     Ok(())
@@ -924,8 +1065,8 @@ pub async fn validate_profile_config(
     supervisor: &ProcessSupervisor,
 ) -> Result<(), String> {
     let binary = installed_binary_path(app)?;
-    if !binary.is_file() {
-        return Err("The sing-box engine is not installed.".to_string());
+    if !binary.is_file() || !has_naive_runtime_library(&binary) {
+        return Err("The sing-box engine or its required Windows runtime libraries are missing; reinstall the engine.".to_string());
     }
 
     let config = build_probe_config(profile, credentials, 17381)?;
@@ -1080,8 +1221,8 @@ pub async fn measure_real_delay(
 ) -> Result<ProbeOutcome, String> {
     let mut operation = supervisor.begin_operation()?;
     let binary = installed_binary_path(app)?;
-    if !binary.is_file() {
-        return Err("The pinned sing-box engine is not installed.".to_string());
+    if !binary.is_file() || !has_naive_runtime_library(&binary) {
+        return Err("The pinned sing-box engine or its required Windows runtime libraries are not installed.".to_string());
     }
 
     let port = pick_loopback_port()?;
@@ -2586,5 +2727,53 @@ mod socks_probe_cancellation_tests {
         );
         drop(client);
         server.join().expect("join SOCKS5 test proxy");
+    }
+}
+
+
+#[cfg(test)]
+mod engine_archive_tests {
+    use super::*;
+    use zip::write::SimpleFileOptions;
+    use zip::ZipWriter;
+
+    fn build_test_archive(include_naive_runtime: bool) -> Vec<u8> {
+        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+        writer
+            .start_file("sing-box-1.14.4-windows-amd64/sing-box.exe", SimpleFileOptions::default())
+            .expect("start executable entry");
+        writer.write_all(b"test executable").expect("write executable");
+        if include_naive_runtime {
+            writer
+                .start_file("sing-box-1.14.4-windows-amd64/libcronet.dll", SimpleFileOptions::default())
+                .expect("start Naive runtime entry");
+            writer.write_all(b"test cronet library").expect("write runtime library");
+        }
+        writer.finish().expect("finish test archive").into_inner()
+    }
+
+    #[test]
+    fn extracts_sing_box_and_required_naive_runtime_library_together() {
+        let directory = std::env::temp_dir().join(format!("sing-box-assets-{}", Uuid::new_v4()));
+        fs::create_dir_all(&directory).expect("create temp directory");
+
+        let archive = build_test_archive(true);
+        extract_verified_engine_assets(&archive, &directory).expect("extract complete engine assets");
+
+        assert_eq!(fs::read(directory.join("sing-box.exe")).unwrap(), b"test executable");
+        assert_eq!(fs::read(directory.join("libcronet.dll")).unwrap(), b"test cronet library");
+        fs::remove_dir_all(directory).expect("remove temp directory");
+    }
+
+    #[test]
+    fn refuses_windows_engine_archive_without_naive_runtime_library() {
+        let directory = std::env::temp_dir().join(format!("sing-box-assets-{}", Uuid::new_v4()));
+        fs::create_dir_all(&directory).expect("create temp directory");
+
+        let archive = build_test_archive(false);
+        let error = extract_verified_engine_assets(&archive, &directory).unwrap_err();
+
+        assert!(error.contains("libcronet.dll"));
+        fs::remove_dir_all(directory).expect("remove temp directory");
     }
 }

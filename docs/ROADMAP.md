@@ -13,7 +13,7 @@ Windows is the first platform. Android work starts only after the Windows releas
 ## M1 — Profiles and basic endpoint checks
 
 - [x] Define a normalized profile model.
-- [x] Import VLESS, VMess, Trojan, Shadowsocks SIP002, Hysteria2, and TUIC share links.
+- [x] Import VLESS, VMess, Trojan, Shadowsocks SIP002, Hysteria2, TUIC, and Naive HTTPS / QUIC share links.
 - [x] Keep credentials in Windows Credential Manager, separate from profile metadata.
 - [x] Add local profile listing and removal.
 - [x] Add bounded TCP endpoint checks for TCP-capable profiles.
@@ -21,6 +21,8 @@ Windows is the first platform. Android work starts only after the Windows releas
 - [ ] Test persistence and credential deletion on a clean Windows machine.
 
 ## M2 — First engine integration and preflight (sing-box)
+
+- [x] Import Naive HTTPS / QUIC links, map the supported outbound fields, and install the required official Windows `libcronet.dll` beside sing-box.
 
 - [x] Pin sing-box 1.14.4 for Windows AMD64 and verify the downloaded archive with a pinned SHA-256 digest.
 - [x] Download, inspect, extract, and version-check the engine executable before installing it.
@@ -42,7 +44,7 @@ Windows is the first platform. Android work starts only after the Windows releas
 - [x] Attach the desktop application itself to its kill-on-close Job Object during Tauri setup, after initial UI helpers are initialized but before engine commands can run, so later children inherit containment at process creation; fail closed if the app cannot join.
 - [x] Add a Windows integration test for inherited child membership and per-instance Job Object isolation, closing the pre-assignment orphan window.
 - [ ] Verify file cleanup, child-process exit, and listener release under success, failure, timeout, cancellation, graceful shutdown, and app-level forced termination on Windows.
-- [ ] Run protocol-aware preflight tests against controlled VLESS, VMess, Trojan, Shadowsocks, Hysteria2, and TUIC test servers.
+- [ ] Run protocol-aware preflight tests against controlled VLESS, VMess, Trojan, Shadowsocks, Hysteria2, TUIC, and Naive test servers.
 
 ## M3 — Multi-engine adapters
 
@@ -53,12 +55,13 @@ Windows is the first platform. Android work starts only after the Windows releas
 
 ## Windows protocol compatibility backlog
 
-- [ ] Evaluate NaiveProxy (naive) profile/config import and sing-box mapping for the Windows release.
+- [x] Add a bounded Naive HTTPS / QUIC share-link importer and sing-box outbound mapping for Windows.
 - [ ] Evaluate Mieru profile/config import and sing-box mapping for the Windows release; do not assume a share-link URI format.
-- [ ] For both protocols, verify support in the pinned sing-box version, canonical source format, credential isolation, TLS/transport semantics, and controlled-server behavior before advertising support.
+- [ ] Run controlled-server Naive authentication tests, including both HTTPS and QUIC modes, before claiming end-to-end protocol compatibility.
+- [ ] For Mieru, verify upstream engine support, canonical config format, credential isolation, transport semantics, and controlled-server behavior before implementation.
 - [ ] Keep unsupported fields visible by name and reject profiles that cannot be represented without semantic loss.
 
-These are future Windows compatibility targets, not currently supported protocols. Android and other OS work remains blocked until the Windows release gate is complete.
+Naive import/config mapping is implemented for a bounded subset; remote authentication tests remain open. Mieru is a future Windows compatibility target and is not currently supported. Android and other OS work remains blocked until the Windows release gate is complete.
 
 ## M4 — Normal connection lifecycle
 

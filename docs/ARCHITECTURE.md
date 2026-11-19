@@ -26,9 +26,9 @@ Only the sing-box preflight adapter is implemented. Xray-core and Mihomo are pla
 
 Each adapter must declare capabilities explicitly. Protocols, transport settings, DNS behavior, routing features, and configuration semantics are not assumed to be interchangeable across engines. Unsupported configuration must produce a clear error; it must never be silently dropped during conversion.
 
-The current sing-box adapter maps a defined subset of VLESS, VMess, Trojan, Shadowsocks, Hysteria2, and TUIC options. Unknown source options are recorded by name during import and cause the adapter to reject the profile until those options are explicitly supported. A successful native config check proves only that sing-box accepts the generated configuration; it does not prove remote reachability or successful authentication.
+The current sing-box adapter maps a defined subset of VLESS, VMess, Trojan, Shadowsocks, Hysteria2, TUIC, and a bounded subset of Naive HTTPS / QUIC options. Unknown source options are recorded by name during import and cause the adapter to reject the profile until those options are explicitly supported. A successful native config check proves only that sing-box accepts the generated configuration; it does not prove remote reachability or successful authentication.
 
-The Windows AMD64 sing-box 1.14.4 archive is downloaded on demand and checked against a pinned SHA-256 digest before extraction. The app also checks the executable's reported version. The executable is not bundled in the application installer. License and release review remains outstanding.
+The Windows AMD64 sing-box 1.14.4 archive is downloaded on demand and checked against a pinned SHA-256 digest before extraction. The installer stages and activates `sing-box.exe` and the required Naive `libcronet.dll` together in a versioned installation directory. The app also checks the executable's reported version. The executable is not bundled in the application installer. License and release review remains outstanding.
 
 ## Preflight isolation
 

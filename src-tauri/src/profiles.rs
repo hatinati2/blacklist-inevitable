@@ -80,6 +80,10 @@ pub fn parse_import_text(input: &str) -> Result<ParsedImport, String> {
 }
 
 fn parse_share_uri(input: &str) -> Result<ParsedProfile, String> {
+    if input.starts_with("naive+https://") || input.starts_with("naive+quic://") {
+        return parse_naive(input);
+    }
+
     if input.starts_with("vmess://") {
         return parse_vmess(input);
     }
@@ -269,6 +273,97 @@ fn parse_vmess(input: &str) -> Result<ParsedProfile, String> {
             id: Uuid::new_v4().to_string(),
             name,
             protocol: "vmess".to_string(),
+            server,
+            port,
+            options,
+            unsupported_options,
+        },
+        credentials,
+    })
+}
+
+fn parse_naive(input: &str) -> Result<ParsedProfile, String> {
+    let url = Url::parse(input).map_err(|_| "Malformed Naive share link.".to_string())?;
+    let quic = match url.scheme() {
+        "naive+https" => false,
+        "naive+quic" => true,
+        _ => return Err("Unsupported Naive transport.".to_string()),
+    };
+
+    let server = url
+        .host_str()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "The Naive link has no server hostname.".to_string())?
+        .to_string();
+    let port = match url.port() {
+        Some(0) => return Err("The Naive link must not use port zero.".to_string()),
+        Some(port) => port,
+        None => 443,
+    };
+    if !url.path().is_empty() && url.path() != "/" {
+        return Err("Naive share links do not support a URL path.".to_string());
+    }
+
+    // Split userinfo before percent-decoding. A colon may be part of a password
+    // or username and must not be mistaken for the username/password separator.
+    let (username, password) = match url.password() {
+        Some(password) => (decode_component(url.username()), decode_component(password)),
+        None => (String::new(), decode_component(url.username())),
+    };
+    if password.is_empty() {
+        return Err("The Naive link has no password.".to_string());
+    }
+
+    let mut options = BTreeMap::new();
+    if quic {
+        options.insert("quic".to_string(), "true".to_string());
+    }
+    let mut unsupported_options = Vec::new();
+
+    for (key, value) in url.query_pairs() {
+        match key.as_ref() {
+            "sni" if !value.is_empty() => {
+                options.insert("sni".to_string(), value.to_string());
+            }
+            "sni" => {}
+            "insecure-concurrency" => {
+                let concurrency = value.parse::<u32>().map_err(|_| {
+                    "Naive insecure-concurrency must be a non-negative integer.".to_string()
+                })?;
+                if concurrency > 32 {
+                    return Err("Naive insecure-concurrency must not exceed 32.".to_string());
+                }
+                if concurrency > 0 {
+                    options.insert("insecureConcurrency".to_string(), concurrency.to_string());
+                }
+            }
+            // v2rayN includes these neutral transport defaults when exporting
+            // Naive links. They do not change Naive's HTTP/2 or QUIC transport.
+            "type" if value == "tcp" || value == "raw" => {}
+            "headerType" if value == "none" => {}
+            _ => unsupported_options.push(key.to_string()),
+        }
+    }
+    unsupported_options.sort();
+    unsupported_options.dedup();
+
+    let name = url
+        .fragment()
+        .map(decode_component)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| format!("naive · {server}:{port}"));
+
+    let mut credentials = BTreeMap::new();
+    if !username.is_empty() {
+        credentials.insert("username".to_string(), username);
+    }
+    credentials.insert("password".to_string(), password);
+
+    Ok(ParsedProfile {
+        profile: ProfileSummary {
+            id: Uuid::new_v4().to_string(),
+            name,
+            protocol: "naive".to_string(),
             server,
             port,
             options,
@@ -587,6 +682,48 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error, "Shadowsocks plugin links are not supported yet.");
+    }
+
+    #[test]
+    fn parses_naive_https_with_credentials_and_optional_settings() {
+        let parsed = parse_share_uri(
+            "naive+https://us%3Aer:pa%3Ass@naive.example.org:8443?sni=edge.example.org&insecure-concurrency=2&type=tcp&headerType=none#Naive%20HTTPS",
+        )
+        .expect("valid Naive HTTPS URI");
+
+        assert_eq!(parsed.profile.protocol, "naive");
+        assert_eq!(parsed.profile.name, "Naive HTTPS");
+        assert_eq!(parsed.profile.port, 8443);
+        assert_eq!(parsed.profile.options.get("sni").map(String::as_str), Some("edge.example.org"));
+        assert_eq!(parsed.profile.options.get("insecureConcurrency").map(String::as_str), Some("2"));
+        assert!(!parsed.profile.options.contains_key("quic"));
+        assert_eq!(parsed.credentials.get("username").map(String::as_str), Some("us:er"));
+        assert_eq!(parsed.credentials.get("password").map(String::as_str), Some("pa:ss"));
+
+        let metadata = serde_json::to_string(&parsed.profile).expect("serialize metadata");
+        assert!(!metadata.contains("us:er"));
+        assert!(!metadata.contains("pa:ss"));
+    }
+
+    #[test]
+    fn parses_naive_quic_with_default_port_and_password_only_userinfo() {
+        let parsed = parse_share_uri("naive+quic://pa%3Ass@quic.example.org#Naive%20QUIC")
+            .expect("valid Naive QUIC URI");
+
+        assert_eq!(parsed.profile.protocol, "naive");
+        assert_eq!(parsed.profile.port, 443);
+        assert_eq!(parsed.profile.options.get("quic").map(String::as_str), Some("true"));
+        assert!(!parsed.credentials.contains_key("username"));
+        assert_eq!(parsed.credentials.get("password").map(String::as_str), Some("pa:ss"));
+    }
+
+    #[test]
+    fn rejects_naive_zero_port_invalid_concurrency_and_unmapped_fields() {
+        assert!(parse_share_uri("naive+https://secret@naive.example.org:0").is_err());
+        assert!(parse_share_uri("naive+https://secret@naive.example.org?insecure-concurrency=-1").is_err());
+        let parsed = parse_share_uri("naive+https://secret@naive.example.org?extra_headers=x")
+            .expect("unknown fields are kept for adapter validation");
+        assert_eq!(parsed.profile.unsupported_options, vec!["extra_headers".to_string()]);
     }
 
     #[test]

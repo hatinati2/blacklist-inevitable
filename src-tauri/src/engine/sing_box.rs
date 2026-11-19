@@ -2722,3 +2722,51 @@ mod socks_probe_cancellation_tests {
         server.join().expect("join SOCKS5 test proxy");
     }
 }
+
+
+#[cfg(test)]
+mod engine_archive_tests {
+    use super::*;
+    use zip::write::SimpleFileOptions;
+    use zip::ZipWriter;
+
+    fn build_test_archive(include_naive_runtime: bool) -> Vec<u8> {
+        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+        writer
+            .start_file("sing-box-1.14.4-windows-amd64/sing-box.exe", SimpleFileOptions::default())
+            .expect("start executable entry");
+        writer.write_all(b"test executable").expect("write executable");
+        if include_naive_runtime {
+            writer
+                .start_file("sing-box-1.14.4-windows-amd64/libcronet.dll", SimpleFileOptions::default())
+                .expect("start Naive runtime entry");
+            writer.write_all(b"test cronet library").expect("write runtime library");
+        }
+        writer.finish().expect("finish test archive").into_inner()
+    }
+
+    #[test]
+    fn extracts_sing_box_and_required_naive_runtime_library_together() {
+        let directory = std::env::temp_dir().join(format!("sing-box-assets-{}", Uuid::new_v4()));
+        fs::create_dir_all(&directory).expect("create temp directory");
+
+        let archive = build_test_archive(true);
+        extract_verified_engine_assets(&archive, &directory).expect("extract complete engine assets");
+
+        assert_eq!(fs::read(directory.join("sing-box.exe")).unwrap(), b"test executable");
+        assert_eq!(fs::read(directory.join("libcronet.dll")).unwrap(), b"test cronet library");
+        fs::remove_dir_all(directory).expect("remove temp directory");
+    }
+
+    #[test]
+    fn refuses_windows_engine_archive_without_naive_runtime_library() {
+        let directory = std::env::temp_dir().join(format!("sing-box-assets-{}", Uuid::new_v4()));
+        fs::create_dir_all(&directory).expect("create temp directory");
+
+        let archive = build_test_archive(false);
+        let error = extract_verified_engine_assets(&archive, &directory).unwrap_err();
+
+        assert!(error.contains("libcronet.dll"));
+        fs::remove_dir_all(directory).expect("remove temp directory");
+    }
+}

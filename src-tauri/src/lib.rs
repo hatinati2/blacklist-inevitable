@@ -2,6 +2,7 @@ use tauri::Manager;
 
 pub mod agent_protocol;
 pub mod connection_state;
+mod split_tunneling;
 mod commands;
 mod engine;
 mod process_supervisor;

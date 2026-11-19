@@ -802,11 +802,16 @@ fn extract_verified_executable(archive_bytes: &[u8], destination: &Path) -> Resu
         let mut entry = archive
             .by_index(index)
             .map_err(|_| "Could not read an entry in the sing-box release archive.".to_string())?;
-        if !entry.is_file()
-            || Path::new(entry.name())
-                .file_name()
-                .and_then(|name| name.to_str())
-                != Some("sing-box.exe")
+        if !entry.is_file() {
+            continue;
+        }
+        let entry_name = entry
+            .name()
+            .map_err(|_| "Could not read an entry name in the sing-box release archive.".to_string())?;
+        if Path::new(entry_name.as_ref())
+            .file_name()
+            .and_then(|name| name.to_str())
+            != Some("sing-box.exe")
         {
             continue;
         }

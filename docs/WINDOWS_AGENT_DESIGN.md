@@ -86,7 +86,11 @@ The agent owns:
 - Firewall/kill-switch rules, if enabled.
 - A durable, non-secret recovery journal describing the network resources owned by the session.
 
-Use the official pinned sing-box 1.14.4 TUN inbound as the first implementation candidate; its inbound TUN documentation supports Windows. The initial config should explicitly evaluate and test:
+Use the official pinned sing-box 1.14.4 TUN inbound as the first implementation candidate; its inbound TUN documentation supports Windows. The pinned engine depends on `sing-tun`; at the exact sing-tun revision used by sing-box 1.14.4, architecture-specific Wintun DLL bytes are embedded into the Go binary with `go:embed` and loaded from memory through its memory-module loader. Do not ship a second independently downloaded `wintun.dll` beside the engine by default. However, creating a Wintun adapter still invokes the Wintun API and may install/manage its kernel driver; this is an elevated OS operation that must be tested on clean machines and through upgrade/uninstall. The implementation evidence is visible in [sing-box v1.14.4 go.mod](https://github.com/SagerNet/sing-box/blob/v1.14.4/go.mod), [sing-tun Wintun embed code](https://github.com/SagerNet/sing-tun/blob/040db71fcd33196f1d15708b91eb61e9dc6ab8dd/internal/wintun/dll_windows_amd64.go), and [sing-tun Windows adapter](https://github.com/SagerNet/sing-tun/blob/040db71fcd33196f1d15708b91eb61e9dc6ab8dd/tun_windows.go).
+
+The first Windows tests must also verify how sing-box strict routing creates and releases its dynamic Windows Filtering Platform (WFP) filters/session, and that those filters are removed after normal disconnect, engine crash, agent crash, and system restart. TUN teardown and WFP resource cleanup must be included in the agent's recovery journal and release tests.
+
+The initial config should explicitly evaluate and test:
 
 - auto_route enabled to put the default route through the TUN.
 - strict_route enabled on Windows to prevent DNS leak from ordinary multihomed DNS resolution; with dns_mode=hijack, sing-box documents that port 53 traffic leaving through non-TUN interfaces is blocked.
@@ -95,7 +99,7 @@ Use the official pinned sing-box 1.14.4 TUN inbound as the first implementation 
 - route.auto_detect_interface or a tested route.default_interface selection to prevent the engine's own outbound and VPN-server connection from looping back into the TUN.
 - A DNS module with explicit resolver servers and final resolver; any encrypted DNS server's detour and domain bootstrap must be verified so DNS resolution itself uses the intended tunnel route.
 
-Do not copy a sample TUN address pair or MTU blindly. Choose addresses/MTU for this product, check for collisions with local routes, and test IPv4 and IPv6 routing separately. Verify the exact behavior and dependencies of the pinned Windows build before deciding whether a separate Wintun driver/library package is required. Do not introduce a second engine or a second tunnel driver merely because another client bundles one.
+Do not copy a sample TUN address pair or MTU blindly. Choose addresses/MTU for this product, check for collisions with local routes, and test IPv4 and IPv6 routing separately. Use only the Wintun implementation already embedded by the pinned official sing-box build unless a documented compatibility failure demonstrates that another driver is required. Do not introduce a second engine or a second tunnel driver merely because another client bundles one.
 
 These field semantics are taken from the official sing-box 1.14.4 TUN, DNS, DNS-server, route, and dial documentation.
 

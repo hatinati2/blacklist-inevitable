@@ -68,6 +68,6 @@ Useful lessons adopted:
 1. Windows remains the only release target until the Windows VPN has passed clean-machine installation, real traffic routing, DNS leak, failure rollback, and upgrade/uninstall tests.
 2. The normal VPN session will be Rust-owned and separate from the existing short-lived Real Delay/preflight path.
 3. The first normal connection will use the official pinned sing-box engine and only protocol options explicitly supported by its configuration schema.
-4. Naive HTTPS / QUIC is being added using the official sing-box 1.14.4 outbound and the required Windows `libcronet.dll`.
+4. Naive HTTPS / QUIC import and outbound mapping are implemented for a bounded set of v2rayN-style links, using the official sing-box 1.14.4 outbound and the required Windows `libcronet.dll`. Controlled-server authentication tests remain open.
 5. Mieru remains a researched compatibility target. It needs separate upstream-core and configuration-format verification before implementation.
 6. Subscription formats, groups, routing rules, and profile metadata can be adopted as product concepts incrementally, after the core Windows Connect/Disconnect path is safe.

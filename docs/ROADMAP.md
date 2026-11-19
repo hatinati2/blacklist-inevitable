@@ -31,7 +31,7 @@ Windows is the first platform. Android work starts only after the Windows releas
 - [x] Sort successful results by measured Real Delay and keep failures / unsupported profiles visible.
 - [x] Keep TCP reachability as a separately labelled diagnostic.
 - [x] Keep the current preflight code path free of TUN and Windows system-proxy changes.
-- [ ] Add configurable probe URLs and timeout settings.
+- [x] Add configurable HTTPS probe URLs and bounded timeout settings (2–30 seconds).
 - [x] Add an application-scoped supervisor for Real Delay and config-validation operations; defer graceful app exit until registered operations finish cleanup.
 - [x] Cancel active Real Delay workers on graceful app shutdown, stop and await their sing-box child process, and reject new engine work once shutdown begins.
 - [x] Add an in-memory cleanup-health gate that blocks subsequent engine operations in the current app session when cleanup is uncertain.

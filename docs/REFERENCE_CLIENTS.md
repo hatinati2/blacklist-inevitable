@@ -64,6 +64,22 @@ Useful lessons adopted:
 - Authenticate local service IPC and restrict its control secret and endpoints to the intended user/service identities.
 - DNS configuration and route state are part of the connection lifecycle, not independent toggles.
 
+## Mieru — possible Windows integration path
+
+Upstream project: https://github.com/enfein/mieru
+
+The official Mieru client supports Windows and its documented configuration is a JSON file rather than a canonical `mieru://` share URI. The client config includes a profile with username/password, one or more server IP/domain addresses, TCP/UDP port bindings, MTU, multiplexing and handshake mode; it can expose a local SOCKS5 listener and can be started/stopped/tested through its CLI. Mieru's protocol itself is not TLS-based; its authentication and encryption semantics are distinct from TLS proxy protocols.
+
+Candidate architecture for our Windows client:
+- Treat Mieru as a separate engine adapter / supervised sidecar, not as an unsupported outbound type in upstream sing-box.
+- Generate a unique Mieru client JSON config from an imported Mieru config/profile, with credentials isolated in a temporary directory protected by a restrictive ACL.
+- Start and supervise the official Mieru client as a long-lived child process owned by the privileged Windows agent.
+- Connect the main sing-box session to the Mieru client's loopback SOCKS5 listener using a SOCKS5 outbound, but only after testing TCP and UDP ASSOCIATE semantics, crash detection, and cleanup.
+- Never use the Mieru CLI's default persistent user configuration for a VPN session unless its profile isolation and credential-at-rest behavior are proven; avoid leaving user secrets in the machine's normal Mieru config directory.
+- Check the GPL-3.0 obligations and third-party dependencies before distributing a Mieru binary.
+
+This is a researched option, not implemented support. It does not prove arbitrary Mieru URLs/config formats are interoperable; the initial importer should accept an explicit JSON config file or a documented supported format and reject unknown fields rather than invent a share-link scheme.
+
 ## Project decisions
 
 1. Windows remains the only release target until the Windows VPN has passed clean-machine installation, real traffic routing, DNS leak, failure rollback, and upgrade/uninstall tests.

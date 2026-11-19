@@ -153,3 +153,12 @@ The agent and normal VPN path are not ready for release until tests cover:
 - Credential redaction, temporary config DACLs, deterministic deletion, and no orphaned processes, listeners, routes, interfaces, or firewall rules.
 
 CI installer smoke tests cannot replace these Windows networking and privilege-boundary tests.
+
+
+## Mieru sidecar adapter (future Windows compatibility)
+
+The official Mieru client supports Windows and documents a JSON client config plus a local SOCKS5 listener. It is a separate Go client/server implementation, not an outbound in upstream sing-box 1.14.4. If Mieru is added, prefer a separately supervised client binary rather than adopting a modified sing-box fork solely for this protocol.
+
+A candidate flow is: the agent creates a unique restrictive-ACL Mieru config with the user's credential material, starts the Mieru client under its process supervisor, waits for its loopback SOCKS5 listener, and points the sing-box selected-session route at that local SOCKS5 outbound. This must be validated for UDP ASSOCIATE as well as TCP, process shutdown and orphan recovery, and configuration persistence. Avoid using the default persistent Mieru user config for per-session secrets unless isolation and at-rest protection are proven.
+
+The official Mieru client guide describes JSON config fields for username/password, server IP/domain, TCP/UDP port bindings, MTU, multiplexing, handshake mode, SOCKS5 port, and start/stop/test CLI commands: https://github.com/enfein/mieru/blob/main/docs/client-install.md. The project is GPL-3.0: https://github.com/enfein/mieru/blob/main/LICENSE. This is a candidate integration, not implemented support or a claim that any arbitrary Mieru subscription URL is accepted.

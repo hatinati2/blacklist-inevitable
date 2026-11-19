@@ -1754,9 +1754,21 @@ mod socks_probe_cancellation_tests {
             stream
                 .write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 0])
                 .expect("complete SOCKS5 handshake");
-            connected_tx.send(()).expect("notify completed handshake");
 
+            // Wait until the HTTP request has crossed the SOCKS tunnel. Tests
+            // may then trigger cancellation knowing the request is truly in flight,
+            // not merely waiting for SOCKS negotiation to complete.
             let mut buffer = [0_u8; 1024];
+            let request_bytes = stream
+                .read(&mut buffer)
+                .expect("receive HTTP probe request");
+            assert!(request_bytes > 0, "HTTP probe request must reach the proxy");
+            assert!(
+                buffer[..request_bytes].starts_with(b"GET "),
+                "the tunneled payload must be the HTTP probe request"
+            );
+            connected_tx.send(()).expect("notify received HTTP request");
+
             let disconnected_cleanly = loop {
                 match stream.read(&mut buffer) {
                     Ok(0) => break true,

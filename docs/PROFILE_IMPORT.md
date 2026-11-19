@@ -10,8 +10,9 @@ The importer accepts one link per line:
 - Shadowsocks SIP002 URI
 - Hysteria2 / hy2 URI
 - TUIC URI
+- Naive HTTPS / QUIC (`naive+https://` and `naive+quic://`)
 
-Subscription URLs, Clash YAML, sing-box JSON, plugin-based Shadowsocks links, and less common URI variants are not accepted yet. The importer maps an allowlist of recognized non-secret fields into the normalized profile model. Unknown source option names are retained separately; their values are not copied into public profile metadata.
+Subscription URLs, Clash YAML, sing-box JSON, plugin-based Shadowsocks links, Mieru, and less common URI variants are not accepted yet. The importer maps an allowlist of recognized non-secret fields into the normalized profile model. Unknown source option names are retained separately; their values are not copied into public profile metadata.
 
 Invalid lines are rejected independently so valid links in the same paste can still be saved. Unknown query keys and unrecognized VMess JSON fields are retained by key name in `unsupportedOptions`. The sing-box adapter refuses to validate or probe a profile while unmapped options remain, rather than silently dropping them.
 
@@ -44,3 +45,12 @@ The current probe URLs and timeout are fixed in the Rust implementation; there i
 Preflight does not enable TUN, Wintun, packet capture, Windows system proxy settings, or normal device traffic routing. This feature tests one profile at a time through its temporary local proxy; it does not connect the device to a VPN.
 
 See [REAL_DELAY_SPEC.md](REAL_DELAY_SPEC.md) for the measurement definition, current lifecycle limitations, and remaining acceptance tests.
+
+
+## Naive import and preflight
+
+The importer accepts the v2rayN-style `naive+https://` and `naive+quic://` share-link schemes. An omitted port defaults to 443. Password-only userinfo and separate username/password userinfo are supported; percent-decoding occurs after the userinfo separator is identified so encoded colons remain part of credentials. Credentials are stored separately in Windows Credential Manager.
+
+The adapter maps the password, optional username, SNI, QUIC mode, and bounded `insecure-concurrency` setting to the sing-box Naive outbound. The pinned official Windows sing-box archive contains `libcronet.dll`; the installer verifies the archive hash and installs that DLL beside `sing-box.exe`, as required by the upstream Naive runtime. Unknown query options remain visible by key and block preflight rather than being silently discarded.
+
+Naive config mapping and credential separation are covered by Rust tests. A successful native config check still does not prove authentication against a remote Naive server; controlled-server testing remains a separate gate.

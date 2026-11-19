@@ -732,6 +732,106 @@ mod tests {
     }
 
     #[test]
+    fn generates_include_exclude_direct_only_and_custom_process_policies() {
+        use crate::split_tunneling::{
+            AppRoutingAction, ApplicationRule, SplitTunnelingMode, SplitTunnelingSettings,
+        };
+
+        let profile = sample_profile("trojan");
+        let credentials = BTreeMap::from([("password".to_string(), "trojan-secret".to_string())]);
+        let mut options = sample_tun_options();
+        options.direct_dns_server_ip = Some("192.0.2.53".to_string());
+
+        let app = |id: &str, path: &str, action| ApplicationRule {
+            id: id.to_string(),
+            executable_path: path.to_string(),
+            action,
+        };
+
+        let include = SplitTunnelingSettings {
+            mode: SplitTunnelingMode::IncludeSelected,
+            default_action: AppRoutingAction::Direct,
+            applications: vec![app("discord", "C:\\Apps\\Discord\\Discord.exe", AppRoutingAction::Tunnel)],
+        };
+        let config = build_tun_session_config_with_split_tunneling(
+            &profile, &credentials, &options, &include
+        ).unwrap();
+        assert_eq!(config["route"]["final"], "blacklist-direct");
+        assert_eq!(config["route"]["rules"][0]["process_path"][0], "C:\\Apps\\Discord\\Discord.exe");
+        assert_eq!(config["route"]["rules"][0]["outbound"], OUTBOUND_TAG);
+        assert_eq!(config["dns"]["final"], "blacklist-direct-dns");
+        assert_eq!(config["dns"]["rules"][0]["server"], "blacklist-remote-dns");
+
+        let exclude = SplitTunnelingSettings {
+            mode: SplitTunnelingMode::ExcludeSelected,
+            default_action: AppRoutingAction::Tunnel,
+            applications: vec![app("telegram", "C:\\Apps\\Telegram\\Telegram.exe", AppRoutingAction::Tunnel)],
+        };
+        let config = build_tun_session_config_with_split_tunneling(
+            &profile, &credentials, &options, &exclude
+        ).unwrap();
+        assert_eq!(config["route"]["final"], OUTBOUND_TAG);
+        assert_eq!(config["route"]["rules"][0]["outbound"], "blacklist-direct");
+        assert_eq!(config["dns"]["final"], "blacklist-remote-dns");
+        assert_eq!(config["dns"]["rules"][0]["server"], "blacklist-direct-dns");
+
+        let direct_only = SplitTunnelingSettings {
+            mode: SplitTunnelingMode::DirectOnly,
+            default_action: AppRoutingAction::Direct,
+            applications: Vec::new(),
+        };
+        let config = build_tun_session_config_with_split_tunneling(
+            &profile, &credentials, &options, &direct_only
+        ).unwrap();
+        assert_eq!(config["route"]["final"], "blacklist-direct");
+        assert_eq!(config["dns"]["final"], "blacklist-direct-dns");
+        assert_eq!(config["route"]["rules"].as_array().unwrap().len(), 0);
+
+        let custom = SplitTunnelingSettings {
+            mode: SplitTunnelingMode::Custom,
+            default_action: AppRoutingAction::Block,
+            applications: vec![
+                app("vpn", "C:\\Apps\\Vpn.exe", AppRoutingAction::Tunnel),
+                app("direct", "C:\\Apps\\Direct.exe", AppRoutingAction::Direct),
+                app("blocked", "C:\\Apps\\Blocked.exe", AppRoutingAction::Block),
+            ],
+        };
+        let config = build_tun_session_config_with_split_tunneling(
+            &profile, &credentials, &options, &custom
+        ).unwrap();
+        assert_eq!(config["route"]["final"], "blacklist-direct");
+        assert_eq!(config["route"]["rules"][0]["outbound"], OUTBOUND_TAG);
+        assert_eq!(config["route"]["rules"][1]["outbound"], "blacklist-direct");
+        assert_eq!(config["route"]["rules"][2]["action"], "reject");
+        assert_eq!(config["route"]["rules"][3]["action"], "reject");
+        assert_eq!(config["dns"]["rules"][2]["action"], "reject");
+        assert_eq!(config["dns"]["rules"][3]["action"], "reject");
+    }
+
+    #[test]
+    fn requires_physical_dns_for_any_direct_application_route() {
+        use crate::split_tunneling::{
+            AppRoutingAction, ApplicationRule, SplitTunnelingMode, SplitTunnelingSettings,
+        };
+
+        let profile = sample_profile("trojan");
+        let credentials = BTreeMap::from([("password".to_string(), "secret".to_string())]);
+        let settings = SplitTunnelingSettings {
+            mode: SplitTunnelingMode::IncludeSelected,
+            default_action: AppRoutingAction::Direct,
+            applications: vec![ApplicationRule {
+                id: "discord".to_string(),
+                executable_path: "C:\\Apps\\Discord.exe".to_string(),
+                action: AppRoutingAction::Tunnel,
+            }],
+        };
+        let error = build_tun_session_config_with_split_tunneling(
+            &profile, &credentials, &sample_tun_options(), &settings
+        ).unwrap_err();
+        assert!(error.contains("physical-interface DNS"));
+    }
+
+    #[test]
     fn rejects_invalid_windows_tun_addresses_dns_bootstrap_and_mtu() {
         let mut options = sample_tun_options();
         options.addresses.pop();

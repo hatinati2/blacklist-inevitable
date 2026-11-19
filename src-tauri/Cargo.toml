@@ -22,7 +22,7 @@ tokio = { version = "1", features = ["fs", "macros", "net", "process", "rt", "sy
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "socks", "stream"] }
 futures-util = "0.3"
 sha2 = "0.11"
-zip = { version = "2.2", default-features = false, features = ["deflate"] }
+zip = { version = "9.6", default-features = false, features = ["deflate"] }
 url = "2.5"
 uuid = { version = "1", features = ["v4"] }
 

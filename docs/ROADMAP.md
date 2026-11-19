@@ -67,6 +67,8 @@ Naive import/config mapping is implemented for a bounded subset; remote authenti
 
 - [ ] Add an explicit Rust-owned Connect / Disconnect state machine.
 - [ ] Add Windows platform integration only for the normal connection path.
+- [ ] Implement a signed, narrowly scoped Windows VPN agent/service so the Tauri UI remains unelevated; add authenticated named-pipe IPC and secure credential handoff.
+- [ ] Test agent install/upgrade/uninstall, UAC denial, service crash/recovery, and UI-agent IPC authorization.
 - [ ] Test repeated connect / disconnect, crashes, sleep / resume, and shutdown.
 - [ ] Block normal Connect if prior runtime cleanup is uncertain.
 - [ ] Verify DNS handling and traffic routing without leaking traffic outside the selected tunnel.

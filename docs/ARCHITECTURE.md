@@ -55,3 +55,10 @@ Profile credentials are stored separately from ordinary profile metadata using W
 Normal connection must be added as a separate runtime mode, not by reusing the preflight proxy process. A future connection coordinator will own an explicit state machine for Connect, Disconnect, cancellation, crash recovery, and application shutdown. UI state is informational; Rust must remain the source of truth.
 
 The normal connection path may add Windows TUN / proxy integration only after preflight lifecycle and cleanup are independently verified. If a prior process cannot be confirmed stopped, normal connection startup must fail closed.
+
+
+## Planned Windows privileged agent
+
+The normal VPN session will not elevate the Tauri UI process. A narrowly scoped Windows background agent will own the long-lived sing-box process and privileged networking changes. The UI will remain unelevated and communicate over authenticated local IPC with a fixed operation surface. Profile credentials are scoped to the interactive user, so the service identity must not assume direct access to Windows Credential Manager; an explicit secure one-shot handoff or verified per-user elevated-token model is required.
+
+This agent is planned, not implemented. Its required authorization, recovery journal, rollback, route/DNS ownership, and test matrix are specified in [WINDOWS_AGENT_DESIGN.md](WINDOWS_AGENT_DESIGN.md).

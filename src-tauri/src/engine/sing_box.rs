@@ -743,7 +743,7 @@ mod tests {
         )
         .expect("write generated TUN config");
 
-        let output = Command::new(&binary)
+        let output = std::process::Command::new(&binary)
             .arg("check")
             .arg("-c")
             .arg(&config_path)

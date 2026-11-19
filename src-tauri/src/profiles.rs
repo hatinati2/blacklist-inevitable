@@ -718,6 +718,15 @@ mod tests {
     }
 
     #[test]
+    fn parses_naive_quic_with_custom_nonstandard_port() {
+        let parsed = parse_share_uri("naive+quic://secret@quic.example.org:9443")
+            .expect("valid Naive QUIC URI with a custom port");
+
+        assert_eq!(parsed.profile.port, 9443);
+        assert_eq!(parsed.profile.options.get("quic").map(String::as_str), Some("true"));
+    }
+
+    #[test]
     fn rejects_naive_zero_port_invalid_concurrency_and_unmapped_fields() {
         assert!(parse_share_uri("naive+https://secret@naive.example.org:0").is_err());
         assert!(parse_share_uri("naive+https://secret@naive.example.org?insecure-concurrency=-1").is_err());

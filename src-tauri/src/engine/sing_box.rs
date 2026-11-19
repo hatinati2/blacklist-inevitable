@@ -911,6 +911,26 @@ mod tests {
     }
 
     #[test]
+    fn preserves_custom_naive_https_and_quic_ports_in_engine_config() {
+        let credentials = BTreeMap::from([("password".to_string(), "naive-secret".to_string())]);
+
+        for (port, quic) in [(8443_u16, false), (9443_u16, true)] {
+            let mut profile = sample_profile("naive");
+            profile.port = port;
+            if quic {
+                profile.options.insert("quic".to_string(), "true".to_string());
+            }
+
+            let config = build_probe_config(&profile, &credentials, 10080)
+                .expect("valid Naive config with a custom port");
+            let outbound = &config["outbounds"][0];
+
+            assert_eq!(outbound["server_port"], port);
+            assert_eq!(outbound["quic"], quic);
+        }
+    }
+
+    #[test]
     fn rejects_naive_without_password_or_with_excessive_concurrency() {
         let profile = sample_profile("naive");
         assert!(build_probe_config(&profile, &BTreeMap::new(), 10080)

@@ -38,7 +38,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Install frontend dependencies
-        run: npm install --include=optional
+        run: npm ci --include=optional
 
       - name: Verify Tauri Windows CLI binding
         run: npm ls @tauri-apps/cli @tauri-apps/cli-win32-x64-msvc
@@ -50,13 +50,16 @@ jobs:
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
 
       - name: Run Rust tests
-        run: cargo test --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc
 
       - name: Check Rust
-        run: cargo check --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc
+        run: cargo check --locked --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc
 
       - name: Build frontend
         run: npm run build
+
+      - name: Verify locked release dependency graph
+        run: cargo build --locked --release --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc
 
       - name: Build Windows installer
         run: npm run tauri -- build

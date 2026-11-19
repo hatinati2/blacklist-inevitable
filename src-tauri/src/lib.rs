@@ -1,5 +1,6 @@
 use tauri::Manager;
 
+pub mod agent_protocol;
 pub mod connection_state;
 mod commands;
 mod engine;

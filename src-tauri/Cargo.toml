@@ -33,5 +33,6 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_JobObjects",
     "Win32_System_Threading",
+    "Win32_UI_Controls_Dialogs",
 ] }
 keyring = { version = "4.2", default-features = false, features = ["v1", "windows-native-keyring-store"] }

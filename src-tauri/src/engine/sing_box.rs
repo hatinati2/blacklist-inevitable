@@ -167,6 +167,150 @@ pub fn build_probe_config(
 }
 
 
+/// Runtime-selected values for a Windows normal-session TUN. The privileged
+/// agent must select collision-free interface addresses and resolve the proxy
+/// endpoint before creating this configuration.
+#[derive(Debug, Clone)]
+pub struct TunSessionOptions {
+    pub interface_name: String,
+    /// Exactly one IPv4 and one IPv6 CIDR. sing-box derives DNS interface
+    /// addresses from these values when dns_address is omitted.
+    pub addresses: Vec<String>,
+    pub mtu: u16,
+    /// Numeric address resolved before TUN starts; TLS SNI is kept separately.
+    pub resolved_server_ip: String,
+    /// Numeric DoH resolver address, so resolver bootstrap does not need DNS.
+    pub dns_server_ip: String,
+    pub dns_server_name: String,
+}
+
+fn validate_ip_prefix(value: &str) -> Result<bool, String> {
+    let (address, prefix) = value
+        .split_once('/')
+        .ok_or_else(|| "Each TUN address must include an IP prefix length.".to_string())?;
+    let ip = address
+        .parse::<std::net::IpAddr>()
+        .map_err(|_| "A TUN address contains an invalid IP address.".to_string())?;
+    let prefix = prefix
+        .parse::<u8>()
+        .map_err(|_| "A TUN address contains an invalid prefix length.".to_string())?;
+
+    match ip {
+        std::net::IpAddr::V4(_) if prefix <= 30 => Ok(false),
+        std::net::IpAddr::V6(_) if prefix <= 126 => Ok(true),
+        std::net::IpAddr::V4(_) => Err(
+            "The IPv4 TUN prefix must leave a usable next address for DNS.".to_string(),
+        ),
+        std::net::IpAddr::V6(_) => Err(
+            "The IPv6 TUN prefix must leave a usable next address for DNS.".to_string(),
+        ),
+    }
+}
+
+fn validate_tun_session_options(options: &TunSessionOptions) -> Result<(), String> {
+    if options.interface_name.is_empty()
+        || options.interface_name.len() > 64
+        || !options
+            .interface_name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+        return Err(
+            "The TUN interface name must be 1–64 ASCII letters, digits, '-' or '_'.".to_string(),
+        );
+    }
+    if !(1280..=9000).contains(&options.mtu) {
+        return Err("The TUN MTU must be between 1280 and 9000.".to_string());
+    }
+    if options.addresses.len() != 2 {
+        return Err("The TUN requires exactly one IPv4 and one IPv6 interface address.".to_string());
+    }
+
+    let mut has_v4 = false;
+    let mut has_v6 = false;
+    for address in &options.addresses {
+        match validate_ip_prefix(address)? {
+            true if !has_v6 => has_v6 = true,
+            false if !has_v4 => has_v4 = true,
+            true => return Err("Only one IPv6 TUN address is currently supported.".to_string()),
+            false => return Err("Only one IPv4 TUN address is currently supported.".to_string()),
+        }
+    }
+    if !has_v4 || !has_v6 {
+        return Err("The TUN requires both IPv4 and IPv6 interface addresses.".to_string());
+    }
+
+    options
+        .resolved_server_ip
+        .parse::<std::net::IpAddr>()
+        .map_err(|_| {
+            "The VPN server must be resolved to a numeric IP before TUN starts.".to_string()
+        })?;
+    options
+        .dns_server_ip
+        .parse::<std::net::IpAddr>()
+        .map_err(|_| {
+            "The encrypted DNS server must use a numeric IP to avoid bootstrap DNS recursion."
+                .to_string()
+        })?;
+    if options.dns_server_name.trim().is_empty()
+        || options
+            .dns_server_name
+            .chars()
+            .any(|ch| matches!(ch, '/' | ':' | ' '))
+    {
+        return Err("The encrypted DNS server requires a valid TLS server name.".to_string());
+    }
+    Ok(())
+}
+
+/// Build a normal-session TUN configuration. This function only generates
+/// configuration; it does not start sing-box, create an adapter, or change
+/// Windows routes or DNS settings.
+pub fn build_tun_session_config(
+    profile: &ProfileSummary,
+    credentials: &BTreeMap<String, String>,
+    options: &TunSessionOptions,
+) -> Result<Value, String> {
+    validate_tun_session_options(options)?;
+
+    // Reuse the strict outbound mapping, then replace the probe-only SOCKS
+    // inbound. The endpoint IP is resolved before TUN starts; TLS SNI remains
+    // based on the original profile hostname or explicit SNI option.
+    let mut config = build_probe_config(profile, credentials, 17381)?;
+    config["inbounds"] = json!([{
+        "type": "tun",
+        "tag": "tun-in",
+        "interface_name": options.interface_name,
+        "address": options.addresses,
+        "mtu": options.mtu,
+        "dns_mode": "hijack",
+        "auto_route": true,
+        "strict_route": true
+    }]);
+    config["outbounds"][0]["server"] = json!(options.resolved_server_ip);
+    config["route"]["auto_detect_interface"] = json!(true);
+    config["dns"] = json!({
+        "servers": [{
+            "type": "https",
+            "tag": "blacklist-remote-dns",
+            "server": options.dns_server_ip,
+            "server_port": 443,
+            "path": "/dns-query",
+            "tls": {
+                "enabled": true,
+                "server_name": options.dns_server_name
+            },
+            "detour": OUTBOUND_TAG
+        }],
+        "final": "blacklist-remote-dns",
+        "strategy": "prefer_ipv4"
+    });
+
+    Ok(config)
+}
+
+
 
 fn validate_profile_options(
     profile: &ProfileSummary,
@@ -506,6 +650,123 @@ mod tests {
         assert!(build_probe_config(&profile, &credentials, 10080)
             .unwrap_err()
             .contains("xhttp"));
+    }
+
+    fn sample_tun_options() -> TunSessionOptions {
+        TunSessionOptions {
+            interface_name: "blacklist-tun".to_string(),
+            addresses: vec![
+                "172.19.0.1/30".to_string(),
+                "fdfe:dcba:9876::1/126".to_string(),
+            ],
+            mtu: 1500,
+            resolved_server_ip: "203.0.113.44".to_string(),
+            dns_server_ip: "1.1.1.1".to_string(),
+            dns_server_name: "cloudflare-dns.com".to_string(),
+        }
+    }
+
+    #[test]
+    fn builds_windows_tun_config_with_dns_hijack_and_proxy_detour() {
+        let profile = sample_profile("trojan");
+        let credentials = BTreeMap::from([("password".to_string(), "trojan-secret".to_string())]);
+        let config = build_tun_session_config(&profile, &credentials, &sample_tun_options())
+            .expect("valid normal-session TUN config");
+
+        let tun = &config["inbounds"][0];
+        assert_eq!(tun["type"], "tun");
+        assert_eq!(tun["tag"], "tun-in");
+        assert_eq!(tun["interface_name"], "blacklist-tun");
+        assert_eq!(tun["address"][0], "172.19.0.1/30");
+        assert_eq!(tun["address"][1], "fdfe:dcba:9876::1/126");
+        assert_eq!(tun["mtu"], 1500);
+        assert_eq!(tun["dns_mode"], "hijack");
+        assert_eq!(tun["auto_route"], true);
+        assert_eq!(tun["strict_route"], true);
+        assert!(tun.get("listen").is_none());
+
+        let outbound = &config["outbounds"][0];
+        assert_eq!(outbound["server"], "203.0.113.44");
+        assert_eq!(outbound["tls"]["server_name"], "proxy.example.com");
+
+        assert_eq!(config["route"]["auto_detect_interface"], true);
+        assert_eq!(config["route"]["final"], OUTBOUND_TAG);
+        assert_eq!(config["dns"]["final"], "blacklist-remote-dns");
+        assert_eq!(config["dns"]["servers"][0]["type"], "https");
+        assert_eq!(config["dns"]["servers"][0]["server"], "1.1.1.1");
+        assert_eq!(config["dns"]["servers"][0]["tls"]["server_name"], "cloudflare-dns.com");
+        assert_eq!(config["dns"]["servers"][0]["detour"], OUTBOUND_TAG);
+        // With dns_address unset, sing-box derives resolver addresses from the
+        // TUN interface address list and hijacks them into its DNS module.
+        assert!(tun.get("dns_address").is_none());
+    }
+
+    #[test]
+    fn rejects_invalid_windows_tun_addresses_dns_bootstrap_and_mtu() {
+        let mut options = sample_tun_options();
+        options.addresses.pop();
+        assert!(validate_tun_session_options(&options).is_err());
+
+        let mut options = sample_tun_options();
+        options.dns_server_ip = "cloudflare-dns.com".to_string();
+        assert!(validate_tun_session_options(&options).is_err());
+
+        let mut options = sample_tun_options();
+        options.mtu = 1000;
+        assert!(validate_tun_session_options(&options).is_err());
+
+        let mut options = sample_tun_options();
+        options.interface_name = "bad interface".to_string();
+        assert!(validate_tun_session_options(&options).is_err());
+    }
+
+    #[test]
+    fn validates_generated_tun_config_with_pinned_sing_box_binary() {
+        let Ok(binary) = std::env::var("SING_BOX_VALIDATOR") else {
+            // Local unit tests can run without downloading the large Windows engine.
+            // The Windows CI workflow always sets this variable after verifying v1.14.4.
+            return;
+        };
+
+        let profile = sample_profile("trojan");
+        let credentials = BTreeMap::from([("password".to_string(), "test-only-secret".to_string())]);
+        let config = build_tun_session_config(&profile, &credentials, &sample_tun_options())
+            .expect("generate TUN config");
+
+        let directory = std::env::temp_dir()
+            .join(format!("blacklist-tun-config-{}", Uuid::new_v4()));
+        fs::create_dir_all(&directory).expect("create temporary TUN config directory");
+        let config_path = directory.join("tun-session.json");
+        fs::write(
+            &config_path,
+            serde_json::to_vec(&config).expect("serialize generated TUN config"),
+        )
+        .expect("write generated TUN config");
+
+        let output = std::process::Command::new(&binary)
+            .arg("check")
+            .arg("-c")
+            .arg(&config_path)
+            .output()
+            .expect("run the pinned sing-box config validator");
+        let _ = fs::remove_dir_all(&directory);
+
+        assert!(
+            output.status.success(),
+            "sing-box v{SING_BOX_VERSION} rejected generated TUN config: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn refuses_tun_config_when_profile_has_unmapped_protocol_options() {
+        let mut profile = sample_profile("trojan");
+        profile.unsupported_options.push("custom_transport".to_string());
+        let credentials = BTreeMap::from([("password".to_string(), "secret".to_string())]);
+
+        let error = build_tun_session_config(&profile, &credentials, &sample_tun_options())
+            .unwrap_err();
+        assert!(error.contains("custom_transport"));
     }
 
     #[test]

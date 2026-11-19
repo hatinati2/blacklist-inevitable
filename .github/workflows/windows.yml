@@ -43,6 +43,23 @@ jobs:
       - name: Verify Tauri Windows CLI binding
         run: npm ls @tauri-apps/cli @tauri-apps/cli-win32-x64-msvc
 
+      - name: Download and verify pinned sing-box config validator
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP "sing-box-1.14.4-windows-amd64.zip"
+          $extract = Join-Path $env:RUNNER_TEMP "sing-box-1.14.4-validator"
+          Invoke-WebRequest -Uri "https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-windows-amd64.zip" -OutFile $archive
+          $actual = (Get-FileHash -Path $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          $expected = "99185d75d314a07dbba4a130c8ad986cbeb629a07927975636b341ca61f991df"
+          if ($actual -ne $expected) { throw "The sing-box v1.14.4 archive failed SHA-256 verification." }
+          Expand-Archive -Path $archive -DestinationPath $extract -Force
+          $binary = Get-ChildItem -Path $extract -Filter "sing-box.exe" -Recurse | Select-Object -First 1
+          $runtime = Get-ChildItem -Path $extract -Filter "libcronet.dll" -Recurse | Select-Object -First 1
+          if (-not $binary -or -not $runtime) { throw "The official Windows archive is missing sing-box.exe or libcronet.dll." }
+          $version = (& $binary.FullName version | Out-String)
+          if ($version -notmatch "1\.14\.4") { throw "The config validator reports an unexpected sing-box version: $version" }
+          "SING_BOX_VALIDATOR=$($binary.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Format Rust sources
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --all
 

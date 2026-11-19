@@ -1215,21 +1215,34 @@ async fn wait_for_local_socks_with_timeout(
 }
 
 async fn measure_request_through_socks(port: u16) -> Result<(u64, String), String> {
+    let client = build_probe_http_client(port, REAL_DELAY_REQUEST_TIMEOUT)?;
+    measure_request_with_client(&client, &[REAL_DELAY_PRIMARY_URL, REAL_DELAY_FALLBACK_URL]).await
+}
+
+fn build_probe_http_client(
+    port: u16,
+    request_timeout: Duration,
+) -> Result<reqwest::Client, String> {
     let proxy = reqwest::Proxy::all(format!("socks5h://127.0.0.1:{port}"))
         .map_err(|_| "Could not configure the isolated SOCKS5 probe proxy.".to_string())?;
-    let client = reqwest::Client::builder()
+    reqwest::Client::builder()
         .proxy(proxy)
         .connect_timeout(Duration::from_secs(6))
-        .timeout(REAL_DELAY_REQUEST_TIMEOUT)
+        .timeout(request_timeout)
         .redirect(reqwest::redirect::Policy::none())
         .build()
-        .map_err(|_| "Could not create the isolated HTTP probe client.".to_string())?;
+        .map_err(|_| "Could not create the isolated HTTP probe client.".to_string())
+}
 
+async fn measure_request_with_client(
+    client: &reqwest::Client,
+    urls: &[&str],
+) -> Result<(u64, String), String> {
     let mut failures = Vec::new();
-    for url in [REAL_DELAY_PRIMARY_URL, REAL_DELAY_FALLBACK_URL] {
+    for url in urls {
         let started = Instant::now();
         let response = client
-            .get(url)
+            .get(*url)
             .header("Cache-Control", "no-cache")
             .send()
             .await;
@@ -1237,7 +1250,7 @@ async fn measure_request_through_socks(port: u16) -> Result<(u64, String), Strin
         match response {
             Ok(response) if response.status() == reqwest::StatusCode::NO_CONTENT => {
                 let elapsed = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
-                return Ok((elapsed, url.to_string()));
+                return Ok((elapsed, (*url).to_string()));
             }
             Ok(response) => failures.push(format!(
                 "{} returned HTTP {} instead of 204",
@@ -1568,5 +1581,144 @@ mod runtime_guard_tests {
 
         assert!(!diagnostic.contains("s3!"));
         assert!(diagnostic.contains("[redacted]"));
+    }
+}
+
+
+#[cfg(test)]
+mod socks_probe_cancellation_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::sync::mpsc::{self, Receiver};
+
+    fn start_stalled_socks_proxy() -> (
+        u16,
+        Receiver<()>,
+        Receiver<bool>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
+            .expect("bind local SOCKS5 test proxy");
+        let port = listener.local_addr().expect("read proxy address").port();
+        let (connected_tx, connected_rx) = mpsc::channel();
+        let (disconnected_tx, disconnected_rx) = mpsc::channel();
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept SOCKS5 client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set bounded proxy read timeout");
+
+            let mut greeting = [0_u8; 2];
+            stream.read_exact(&mut greeting).expect("read SOCKS5 greeting");
+            assert_eq!(greeting[0], 5, "client must negotiate SOCKS5");
+            let mut methods = vec![0_u8; greeting[1] as usize];
+            stream.read_exact(&mut methods).expect("read SOCKS5 methods");
+            assert!(methods.contains(&0), "client must offer no-auth SOCKS5");
+            stream.write_all(&[5, 0]).expect("accept no-auth SOCKS5");
+
+            let mut request = [0_u8; 4];
+            stream.read_exact(&mut request).expect("read SOCKS5 CONNECT request");
+            assert_eq!(&request[..3], &[5, 1, 0]);
+            match request[3] {
+                1 => {
+                    let mut address = [0_u8; 4];
+                    stream.read_exact(&mut address).expect("read IPv4 destination");
+                }
+                3 => {
+                    let mut length = [0_u8; 1];
+                    stream.read_exact(&mut length).expect("read domain length");
+                    let mut address = vec![0_u8; length[0] as usize];
+                    stream.read_exact(&mut address).expect("read domain destination");
+                }
+                4 => {
+                    let mut address = [0_u8; 16];
+                    stream.read_exact(&mut address).expect("read IPv6 destination");
+                }
+                atyp => panic!("unexpected SOCKS5 address type: {atyp}"),
+            }
+            let mut destination_port = [0_u8; 2];
+            stream
+                .read_exact(&mut destination_port)
+                .expect("read destination port");
+
+            // Tell reqwest that the SOCKS tunnel is established, but deliberately
+            // never send an HTTP response. This holds the request inside the
+            // controlled proxy so timeout and future cancellation are observable.
+            stream
+                .write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 0])
+                .expect("complete SOCKS5 handshake");
+            connected_tx.send(()).expect("notify completed handshake");
+
+            let mut buffer = [0_u8; 1024];
+            let disconnected_cleanly = loop {
+                match stream.read(&mut buffer) {
+                    Ok(0) => break true,
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(_) => break false,
+                }
+            };
+            let _ = disconnected_tx.send(disconnected_cleanly);
+        });
+
+        (port, connected_rx, disconnected_rx, server)
+    }
+
+    async fn receive_signal<T: Send + 'static>(receiver: Receiver<T>) -> T {
+        tokio::task::spawn_blocking(move || {
+            receiver
+                .recv_timeout(Duration::from_secs(4))
+                .expect("SOCKS5 test proxy signal timeout")
+        })
+        .await
+        .expect("SOCKS5 signal worker panicked")
+    }
+
+    #[tokio::test]
+    async fn http_probe_request_times_out_inside_controlled_socks_proxy() {
+        let (port, connected, disconnected, server) = start_stalled_socks_proxy();
+        let client = build_probe_http_client(port, Duration::from_millis(250))
+            .expect("build test HTTP client");
+
+        let result = measure_request_with_client(&client, &["http://probe.invalid/generate_204"])
+            .await;
+        assert!(
+            result.unwrap_err().contains("timed out"),
+            "a stalled upstream response must be reported as a timeout"
+        );
+        receive_signal(connected).await;
+        drop(client);
+        assert!(
+            receive_signal(disconnected).await,
+            "the HTTP timeout must release the SOCKS tunnel"
+        );
+        server.join().expect("join SOCKS5 test proxy");
+    }
+
+    #[tokio::test]
+    async fn cancelling_http_probe_future_releases_controlled_socks_proxy() {
+        let (port, connected, disconnected, server) = start_stalled_socks_proxy();
+        let client = build_probe_http_client(port, Duration::from_secs(30))
+            .expect("build test HTTP client");
+        let request_client = client.clone();
+        let request = tokio::spawn(async move {
+            measure_request_with_client(
+                &request_client,
+                &["http://probe.invalid/generate_204"],
+            )
+            .await
+        });
+
+        receive_signal(connected).await;
+        request.abort();
+        let _ = request.await;
+        drop(client);
+
+        assert!(
+            receive_signal(disconnected).await,
+            "dropping the cancelled request must release its SOCKS tunnel"
+        );
+        server.join().expect("join SOCKS5 test proxy");
     }
 }

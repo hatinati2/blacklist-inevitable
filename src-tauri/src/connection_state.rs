@@ -162,6 +162,11 @@ impl ConnectionCoordinator {
     /// token can never disconnect a newer session.
     pub fn begin_disconnect(&self, session_id: u64) -> Result<(), String> {
         let mut inner = self.lock();
+        if inner.snapshot.phase == ConnectionPhase::Disconnected
+            && inner.snapshot.session_id.is_none()
+        {
+            return Ok(());
+        }
         ensure_session(&inner.snapshot, session_id)?;
         match inner.snapshot.phase {
             ConnectionPhase::Disconnecting => Ok(()),
@@ -226,7 +231,7 @@ impl ConnectionCoordinator {
 
     /// Startup recovery is required before new sessions can be accepted when a
     /// previous process may have left network resources behind.
-    pub fn begin_recovery(&self) -> Result<(), String> {
+    pub fn begin_recovery(&self) -> Result<u64, String> {
         let mut inner = self.lock();
         if inner.snapshot.phase != ConnectionPhase::Disconnected
             && inner.snapshot.phase != ConnectionPhase::Failed
@@ -236,25 +241,30 @@ impl ConnectionCoordinator {
                 inner.snapshot.phase
             ));
         }
+
+        let recovery_id = inner.next_session_id;
+        inner.next_session_id = inner.next_session_id.wrapping_add(1).max(1);
         inner.snapshot.phase = ConnectionPhase::Recovering;
+        inner.snapshot.session_id = Some(recovery_id);
+        inner.snapshot.profile_id = None;
         inner.snapshot.cleanup_healthy = false;
         inner.snapshot.detail = Some("Reconciling previous VPN session resources.".to_string());
-        Ok(())
+        Ok(recovery_id)
     }
 
     pub fn finish_recovery(
         &self,
+        recovery_id: u64,
         cleanup_confirmed: bool,
         detail: Option<String>,
-    ) {
+    ) -> Result<(), String> {
         let mut inner = self.lock();
+        ensure_session(&inner.snapshot, recovery_id)?;
         if inner.snapshot.phase != ConnectionPhase::Recovering {
-            inner.snapshot.cleanup_healthy = false;
-            inner.snapshot.phase = ConnectionPhase::Failed;
-            inner.snapshot.detail = Some(
-                "Recovery completion was requested outside the recovery state.".to_string(),
-            );
-            return;
+            return Err(format!(
+                "Recovery completion is invalid while the connection is {:?}.",
+                inner.snapshot.phase
+            ));
         }
 
         if cleanup_confirmed {
@@ -266,6 +276,7 @@ impl ConnectionCoordinator {
                 "Previous VPN resources could not be reconciled; Connect remains blocked.".to_string()
             }));
         }
+        Ok(())
     }
 
     pub fn clear_confirmed_failure(&self) -> Result<(), String> {
@@ -346,7 +357,7 @@ mod tests {
         coordinator.begin_disconnect(session).unwrap();
         coordinator.finish_disconnect(session, true, None).unwrap();
 
-        assert!(coordinator.begin_disconnect(session).is_err());
+        assert!(coordinator.begin_disconnect(session).is_ok());
         assert_eq!(coordinator.snapshot().phase, ConnectionPhase::Disconnected);
     }
 
@@ -365,8 +376,8 @@ mod tests {
         assert!(coordinator.begin_connect("profile-2").is_err());
         assert!(coordinator.clear_confirmed_failure().is_err());
 
-        coordinator.begin_recovery().unwrap();
-        coordinator.finish_recovery(true, None);
+        let recovery = coordinator.begin_recovery().unwrap();
+        coordinator.finish_recovery(recovery, true, None).unwrap();
         assert_eq!(coordinator.snapshot().phase, ConnectionPhase::Disconnected);
         assert!(coordinator.snapshot().cleanup_healthy);
     }
@@ -385,10 +396,24 @@ mod tests {
     }
 
     #[test]
+    fn stale_recovery_completion_cannot_reset_a_new_connection() {
+        let coordinator = ConnectionCoordinator::new();
+        let recovery = coordinator.begin_recovery().unwrap();
+        coordinator.finish_recovery(recovery, true, None).unwrap();
+
+        let session = coordinator.begin_connect("profile-1").unwrap();
+        let error = coordinator.finish_recovery(recovery, true, None).unwrap_err();
+
+        assert!(error.contains("stale"));
+        assert_eq!(coordinator.snapshot().session_id, Some(session));
+        assert_eq!(coordinator.snapshot().phase, ConnectionPhase::Preparing);
+    }
+
+    #[test]
     fn recovery_failure_keeps_connect_blocked() {
         let coordinator = ConnectionCoordinator::new();
-        coordinator.begin_recovery().unwrap();
-        coordinator.finish_recovery(false, Some("stale route remains".to_string()));
+        let recovery = coordinator.begin_recovery().unwrap();
+        coordinator.finish_recovery(recovery, false, Some("stale route remains".to_string())).unwrap();
 
         assert_eq!(coordinator.snapshot().phase, ConnectionPhase::Failed);
         assert!(!coordinator.snapshot().cleanup_healthy);

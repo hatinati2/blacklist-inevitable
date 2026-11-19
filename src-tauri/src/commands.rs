@@ -10,6 +10,7 @@ use tokio::time::timeout;
 
 use crate::engine::{EngineDescriptor, ENGINE_TARGETS};
 use crate::profile_store;
+use crate::split_tunneling::SplitTunnelingSettings;
 use crate::process_supervisor::ProcessSupervisor;
 use crate::profiles::{parse_import_text, ImportIssue, ProfileSummary};
 
@@ -276,6 +277,66 @@ pub fn save_real_delay_settings(
     settings: crate::real_delay_settings::RealDelaySettings,
 ) -> Result<crate::real_delay_settings::RealDelaySettings, String> {
     crate::real_delay_settings::save(&app, settings)
+}
+
+#[tauri::command]
+pub fn get_split_tunneling_settings(app: AppHandle) -> Result<SplitTunnelingSettings, String> {
+    crate::split_tunneling::load(&app)
+}
+
+#[tauri::command]
+pub fn save_split_tunneling_settings(
+    app: AppHandle,
+    settings: SplitTunnelingSettings,
+) -> Result<SplitTunnelingSettings, String> {
+    crate::split_tunneling::save(&app, settings)
+}
+
+#[cfg(windows)]
+#[tauri::command]
+pub fn pick_windows_executable() -> Result<Option<String>, String> {
+    use windows_sys::Win32::UI::Controls::Dialogs::{GetOpenFileNameW, OPENFILENAMEW};
+
+    let mut selected_path = vec![0u16; 32768];
+    let filter = "Windows applications (*.exe)\0*.exe\0All files (*.*)\0*.*\0\0"
+        .encode_utf16()
+        .collect::<Vec<_>>();
+    let title = "Select an application executable (.exe)\0"
+        .encode_utf16()
+        .collect::<Vec<_>>();
+
+    let mut dialog: OPENFILENAMEW = unsafe { std::mem::zeroed() };
+    dialog.lStructSize = std::mem::size_of::<OPENFILENAMEW>() as u32;
+    dialog.lpstrFilter = filter.as_ptr();
+    dialog.lpstrFile = selected_path.as_mut_ptr();
+    dialog.nMaxFile = selected_path.len() as u32;
+    dialog.lpstrTitle = title.as_ptr();
+    // OFN_NOCHANGEDIR | OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_EXPLORER.
+    dialog.Flags = 0x00000008 | 0x00000800 | 0x00001000 | 0x00080000;
+
+    let accepted = unsafe { GetOpenFileNameW(&mut dialog) };
+    if accepted == 0 {
+        // Closing the dialog without selecting a file is not an error.
+        return Ok(None);
+    }
+
+    let length = selected_path
+        .iter()
+        .position(|character| *character == 0)
+        .unwrap_or(selected_path.len());
+    let path = String::from_utf16(&selected_path[..length])
+        .map_err(|_| "The selected Windows path contains invalid UTF-16.".to_string())?;
+    let path = crate::split_tunneling::normalize_windows_executable_path(&path)?;
+    if !std::path::Path::new(&path).is_file() {
+        return Err("The selected executable no longer exists.".to_string());
+    }
+    Ok(Some(path))
+}
+
+#[cfg(not(windows))]
+#[tauri::command]
+pub fn pick_windows_executable() -> Result<Option<String>, String> {
+    Err("Application file selection is available in the Windows desktop build.".to_string())
 }
 
 #[tauri::command]

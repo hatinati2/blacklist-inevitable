@@ -935,8 +935,6 @@ mod tests {
     #[tokio::test]
     async fn app_job_inheritance_contains_children_and_is_instance_scoped() {
         use std::process::{Command as StdCommand, Stdio};
-        use tokio::time::sleep;
-        use std::time::Duration;
 
         let root = std::env::temp_dir().join(format!(
             "blacklist-inevitable-job-inheritance-{}",

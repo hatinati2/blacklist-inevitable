@@ -114,3 +114,18 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 .runtime-warning { margin-top: 18px; padding: 16px 18px; border: 1px solid rgba(224, 125, 125, 0.28); border-radius: 14px; background: rgba(130, 54, 54, 0.12); }
 .runtime-warning strong { display: block; margin-bottom: 6px; color: #f0b1b1; font-size: 12px; }
 .runtime-warning p { margin: 0; color: #c6a9a9; font-size: 11px; line-height: 1.65; }
+
+
+.settings-panel { margin-top: 16px; }
+.settings-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 150px; gap: 12px; margin-top: 18px; }
+.setting-field { display: flex; min-width: 0; flex-direction: column; gap: 7px; color: #9eafc3; font-size: 10px; font-weight: 650; }
+.setting-field input { width: 100%; min-width: 0; padding: 10px 11px; border: 1px solid rgba(142, 164, 194, 0.17); border-radius: 9px; color: #e7eef8; background: rgba(12, 17, 26, 0.72); outline: none; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 10px; }
+.setting-field input:focus { border-color: rgba(119, 211, 180, 0.55); }
+.settings-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 14px; }
+@media (max-width: 850px) {
+  .settings-fields { grid-template-columns: 1fr; }
+  .timeout-field { max-width: 180px; }
+}
+@media (max-width: 560px) {
+  .settings-actions { align-items: flex-end; flex-direction: column; }
+}

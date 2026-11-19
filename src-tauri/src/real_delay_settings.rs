@@ -223,6 +223,15 @@ mod tests {
         let loaded = read_file(&path).expect("read persisted settings");
         assert_eq!(loaded, settings);
 
+        let updated_settings = RealDelaySettings {
+            primary_url: "https://updated.example.test/generate_204".to_string(),
+            fallback_url: "https://updated-backup.example.test/generate_204".to_string(),
+            timeout_seconds: 14,
+        };
+        write_file(&path, &updated_settings).expect("replace existing settings");
+        let loaded = read_file(&path).expect("read updated settings");
+        assert_eq!(loaded, updated_settings);
+
         fs::remove_dir_all(root).expect("remove isolated settings directory");
     }
 }

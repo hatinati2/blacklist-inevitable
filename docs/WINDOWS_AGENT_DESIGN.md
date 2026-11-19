@@ -86,7 +86,18 @@ The agent owns:
 - Firewall/kill-switch rules, if enabled.
 - A durable, non-secret recovery journal describing the network resources owned by the session.
 
-Use the official pinned sing-box TUN inbound as the first implementation candidate. Verify the exact behavior and dependencies of the pinned Windows build before deciding whether a separate Wintun driver/library package is required. Do not introduce a second engine or a second tunnel driver merely because another client bundles one.
+Use the official pinned sing-box 1.14.4 TUN inbound as the first implementation candidate; its inbound TUN documentation supports Windows. The initial config should explicitly evaluate and test:
+
+- auto_route enabled to put the default route through the TUN.
+- strict_route enabled on Windows to prevent DNS leak from ordinary multihomed DNS resolution; with dns_mode=hijack, sing-box documents that port 53 traffic leaving through non-TUN interfaces is blocked.
+- dns_mode set explicitly to hijack rather than relying on a default.
+- dns_address omitted initially unless a custom design is required; in 1.14.4, an unset value is derived from the TUN address list and automatically hijacked into the sing-box DNS module. If dns_address is explicitly set, the config must also add an explicit hijack-dns route action.
+- route.auto_detect_interface or a tested route.default_interface selection to prevent the engine's own outbound and VPN-server connection from looping back into the TUN.
+- A DNS module with explicit resolver servers and final resolver; any encrypted DNS server's detour and domain bootstrap must be verified so DNS resolution itself uses the intended tunnel route.
+
+Do not copy a sample TUN address pair or MTU blindly. Choose addresses/MTU for this product, check for collisions with local routes, and test IPv4 and IPv6 routing separately. Verify the exact behavior and dependencies of the pinned Windows build before deciding whether a separate Wintun driver/library package is required. Do not introduce a second engine or a second tunnel driver merely because another client bundles one.
+
+These field semantics are taken from the official sing-box 1.14.4 TUN, DNS, DNS-server, route, and dial documentation.
 
 ## Connect transaction and rollback
 

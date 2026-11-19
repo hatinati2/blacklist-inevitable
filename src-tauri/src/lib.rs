@@ -5,6 +5,7 @@ mod engine;
 mod process_supervisor;
 mod profile_store;
 mod profiles;
+mod real_delay_settings;
 
 pub fn run() {
     let app = tauri::Builder::default()
@@ -31,6 +32,8 @@ pub fn run() {
             commands::import_profiles,
             commands::delete_profile,
             commands::test_all_profile_endpoints,
+            commands::get_real_delay_settings,
+            commands::save_real_delay_settings,
             commands::install_sing_box_engine,
             commands::validate_profile_config,
             commands::test_all_profile_real_delays

@@ -721,6 +721,44 @@ mod tests {
     }
 
     #[test]
+    fn validates_generated_tun_config_with_pinned_sing_box_binary() {
+        let Ok(binary) = std::env::var("SING_BOX_VALIDATOR") else {
+            // Local unit tests can run without downloading the large Windows engine.
+            // The Windows CI workflow always sets this variable after verifying v1.14.4.
+            return;
+        };
+
+        let profile = sample_profile("trojan");
+        let credentials = BTreeMap::from([("password".to_string(), "test-only-secret".to_string())]);
+        let config = build_tun_session_config(&profile, &credentials, &sample_tun_options())
+            .expect("generate TUN config");
+
+        let directory = std::env::temp_dir()
+            .join(format!("blacklist-tun-config-{}", Uuid::new_v4()));
+        fs::create_dir_all(&directory).expect("create temporary TUN config directory");
+        let config_path = directory.join("tun-session.json");
+        fs::write(
+            &config_path,
+            serde_json::to_vec(&config).expect("serialize generated TUN config"),
+        )
+        .expect("write generated TUN config");
+
+        let output = Command::new(&binary)
+            .arg("check")
+            .arg("-c")
+            .arg(&config_path)
+            .output()
+            .expect("run the pinned sing-box config validator");
+        let _ = fs::remove_dir_all(&directory);
+
+        assert!(
+            output.status.success(),
+            "sing-box v{SING_BOX_VERSION} rejected generated TUN config: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
     fn refuses_tun_config_when_profile_has_unmapped_protocol_options() {
         let mut profile = sample_profile("trojan");
         profile.unsupported_options.push("custom_transport".to_string());

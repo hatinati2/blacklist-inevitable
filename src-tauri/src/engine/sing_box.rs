@@ -238,7 +238,7 @@ fn validate_tun_session_options(options: &TunSessionOptions) -> Result<(), Strin
         .parse::<std::net::IpAddr>()
         .map_err(|_| "The encrypted DNS server must use a numeric IP to avoid bootstrap DNS recursion.".to_string())?;
     if options.dns_server_name.trim().is_empty()
-        || options.dns_server_name.contains(['/', ':', ' '])
+        || options.dns_server_name.chars().any(|ch| matches!(ch, '/' | ':' | ' '))
     {
         return Err("The encrypted DNS server requires a valid TLS server name.".to_string());
     }

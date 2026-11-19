@@ -67,6 +67,7 @@ impl ConnectionCoordinator {
                     "The connection coordinator lock was poisoned; network cleanup must be verified before reconnecting."
                         .to_string(),
                 );
+                self.inner.clear_poison();
                 inner
             }
         }
@@ -151,7 +152,9 @@ impl ConnectionCoordinator {
             ));
         }
         if !inner.snapshot.cleanup_healthy {
-            return Err("Connection transitions are blocked by an unhealthy cleanup state.".to_string());
+            return Err(
+                "Connection transitions are blocked by an unhealthy cleanup state.".to_string(),
+            );
         }
         inner.snapshot.phase = next;
         inner.snapshot.detail = None;
@@ -273,7 +276,8 @@ impl ConnectionCoordinator {
             inner.snapshot.phase = ConnectionPhase::Failed;
             inner.snapshot.cleanup_healthy = false;
             inner.snapshot.detail = Some(detail.unwrap_or_else(|| {
-                "Previous VPN resources could not be reconciled; Connect remains blocked.".to_string()
+                "Previous VPN resources could not be reconciled; Connect remains blocked."
+                    .to_string()
             }));
         }
         Ok(())
@@ -285,7 +289,10 @@ impl ConnectionCoordinator {
             return Err("There is no failed connection to clear.".to_string());
         }
         if !inner.snapshot.cleanup_healthy {
-            return Err("The failed session still has unconfirmed cleanup; recovery is required.".to_string());
+            return Err(
+                "The failed session still has unconfirmed cleanup; recovery is required."
+                    .to_string(),
+            );
         }
         inner.snapshot = disconnected_snapshot();
         Ok(())
@@ -413,7 +420,9 @@ mod tests {
     fn recovery_failure_keeps_connect_blocked() {
         let coordinator = ConnectionCoordinator::new();
         let recovery = coordinator.begin_recovery().unwrap();
-        coordinator.finish_recovery(recovery, false, Some("stale route remains".to_string())).unwrap();
+        coordinator
+            .finish_recovery(recovery, false, Some("stale route remains".to_string()))
+            .unwrap();
 
         assert_eq!(coordinator.snapshot().phase, ConnectionPhase::Failed);
         assert!(!coordinator.snapshot().cleanup_healthy);

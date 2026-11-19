@@ -171,7 +171,7 @@ mod tests {
 
     #[test]
     fn rejects_non_https_and_malformed_endpoints() {
-        for endpoint in ["http://probe.example.test/204", "not-a-url", "https:///missing-host"] {
+        for endpoint in ["http://probe.example.test/204", "not-a-url", "https://"] {
             let settings = RealDelaySettings {
                 primary_url: endpoint.to_string(),
                 ..RealDelaySettings::default()

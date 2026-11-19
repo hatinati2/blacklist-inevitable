@@ -5,6 +5,7 @@ use serde_json::{json, Map, Value};
 
 use crate::process_supervisor::ProcessSupervisor;
 use crate::profiles::ProfileSummary;
+use crate::split_tunneling::{apply_to_tun_config, SplitTunnelingSettings};
 
 const OUTBOUND_TAG: &str = "blacklist-profile";
 
@@ -182,6 +183,8 @@ pub struct TunSessionOptions {
     /// Numeric DoH resolver address, so resolver bootstrap does not need DNS.
     pub dns_server_ip: String,
     pub dns_server_name: String,
+    /// Physical-interface resolver used only by applications routed Direct.
+    pub direct_dns_server_ip: Option<String>,
 }
 
 fn validate_ip_prefix(value: &str) -> Result<bool, String> {
@@ -253,6 +256,12 @@ fn validate_tun_session_options(options: &TunSessionOptions) -> Result<(), Strin
             "The encrypted DNS server must use a numeric IP to avoid bootstrap DNS recursion."
                 .to_string()
         })?;
+    if let Some(direct_dns_server_ip) = &options.direct_dns_server_ip {
+        direct_dns_server_ip.parse::<std::net::IpAddr>().map_err(|_| {
+            "The physical-interface DNS server for Direct applications must be a numeric IP."
+                .to_string()
+        })?;
+    }
     if options.dns_server_name.trim().is_empty()
         || options
             .dns_server_name
@@ -272,11 +281,26 @@ pub fn build_tun_session_config(
     credentials: &BTreeMap<String, String>,
     options: &TunSessionOptions,
 ) -> Result<Value, String> {
+    build_tun_session_config_with_split_tunneling(
+        profile,
+        credentials,
+        options,
+        &SplitTunnelingSettings::default(),
+    )
+}
+
+/// Generate a TUN session with the configured Windows per-application policy.
+/// Process rules use exact Win32 executable paths and are evaluated before the
+/// default route. This still only generates config; the privileged agent must
+/// discover physical DNS and apply/verify the network session.
+pub fn build_tun_session_config_with_split_tunneling(
+    profile: &ProfileSummary,
+    credentials: &BTreeMap<String, String>,
+    options: &TunSessionOptions,
+    split_tunneling: &SplitTunnelingSettings,
+) -> Result<Value, String> {
     validate_tun_session_options(options)?;
 
-    // Reuse the strict outbound mapping, then replace the probe-only SOCKS
-    // inbound. The endpoint IP is resolved before TUN starts; TLS SNI remains
-    // based on the original profile hostname or explicit SNI option.
     let mut config = build_probe_config(profile, credentials, 17381)?;
     config["inbounds"] = json!([{
         "type": "tun",
@@ -307,9 +331,14 @@ pub fn build_tun_session_config(
         "strategy": "prefer_ipv4"
     });
 
+    apply_to_tun_config(
+        &mut config,
+        split_tunneling,
+        options.direct_dns_server_ip.as_deref(),
+    )?;
+
     Ok(config)
 }
-
 
 
 fn validate_profile_options(
@@ -663,6 +692,7 @@ mod tests {
             resolved_server_ip: "203.0.113.44".to_string(),
             dns_server_ip: "1.1.1.1".to_string(),
             dns_server_name: "cloudflare-dns.com".to_string(),
+            direct_dns_server_ip: None,
         }
     }
 

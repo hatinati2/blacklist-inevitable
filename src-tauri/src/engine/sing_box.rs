@@ -909,46 +909,70 @@ pub async fn install(app: &AppHandle, supervisor: &ProcessSupervisor) -> Result<
         return Err("The downloaded sing-box archive failed its SHA-256 verification.".to_string());
     }
 
-    let temporary_binary = directory.join(format!("sing-box-{}.partial", Uuid::new_v4()));
-    let extract_result = extract_verified_executable(&archive_bytes, &temporary_binary);
-    if let Err(error) = extract_result {
-        let _ = fs::remove_file(&temporary_binary);
+    let installation_parent = directory
+        .parent()
+        .ok_or_else(|| "Could not resolve the engine installation parent directory.".to_string())?;
+    let install_id = Uuid::new_v4();
+    let staging_directory = installation_parent.join(format!("sing-box-{SING_BOX_VERSION}.staging-{install_id}"));
+    let backup_directory = installation_parent.join(format!("sing-box-{SING_BOX_VERSION}.backup-{install_id}"));
+    fs::create_dir_all(&staging_directory)
+        .map_err(|_| "Could not create the temporary engine staging directory.".to_string())?;
+
+    if let Err(error) = extract_verified_engine_assets(&archive_bytes, &staging_directory) {
+        let _ = fs::remove_dir_all(&staging_directory);
         return Err(error);
     }
 
-    let version = match read_engine_version(&temporary_binary, supervisor).await {
+    let staged_binary = staging_directory.join("sing-box.exe");
+    let version = match read_engine_version(&staged_binary, supervisor).await {
         Ok(version) if matches_expected_engine_version(&version) => version,
         Ok(_) => {
-            let _ = fs::remove_file(&temporary_binary);
+            let _ = fs::remove_dir_all(&staging_directory);
             return Err("The downloaded executable reports an unexpected sing-box version.".to_string());
         }
         Err(error) => {
-            let _ = fs::remove_file(&temporary_binary);
+            let _ = fs::remove_dir_all(&staging_directory);
             return Err(error);
         }
     };
 
-    if binary_path.exists() {
-        fs::remove_file(&binary_path)
-            .map_err(|_| "Could not replace the previously installed sing-box engine.".to_string())?;
-    }
-    fs::rename(&temporary_binary, &binary_path)
-        .map_err(|_| "Could not install the verified sing-box executable.".to_string())?;
-
-    let notice_path = directory.join("THIRD_PARTY_NOTICE.txt");
+    let notice_path = staging_directory.join("THIRD_PARTY_NOTICE.txt");
     let notice = format!(
-        "sing-box {SING_BOX_VERSION}\n         Upstream: https://github.com/SagerNet/sing-box\n         Release: https://github.com/SagerNet/sing-box/releases/tag/v{SING_BOX_VERSION}\n         License: GNU GPL version 3 or later (GPL-3.0-or-later).\n         Upstream license: https://github.com/SagerNet/sing-box/blob/v{SING_BOX_VERSION}/LICENSE\n         Additional upstream condition: no derivative work may use the name or imply\n         association with the upstream application without prior consent.\n         This unmodified executable was downloaded from the upstream release and verified\n         against the pinned SHA-256 of its Windows AMD64 archive.\n"
+        "sing-box {SING_BOX_VERSION}\n         Upstream: https://github.com/SagerNet/sing-box\n         Release: https://github.com/SagerNet/sing-box/releases/tag/v{SING_BOX_VERSION}\n         License: GNU GPL version 3 or later (GPL-3.0-or-later).\n         Upstream license: https://github.com/SagerNet/sing-box/blob/v{SING_BOX_VERSION}/LICENSE\n         Additional upstream condition: no derivative work may use the name or imply\n         association with the upstream application without prior consent.\n         The official Windows release also supplies libcronet.dll, required by the\n         NaiveProxy outbound. It is retained beside sing-box.exe as documented upstream.\n         Both files were extracted from the unmodified official release archive, which\n         was verified against the pinned SHA-256 digest.\n"
     );
-    fs::write(notice_path, notice)
-        .map_err(|_| "The engine was installed but its third-party notice could not be saved.".to_string())?;
+    if fs::write(notice_path, notice).is_err() {
+        let _ = fs::remove_dir_all(&staging_directory);
+        return Err("Could not write the sing-box third-party notice.".to_string());
+    }
+
+    let had_previous_install = directory.exists();
+    if had_previous_install {
+        if let Err(error) = fs::rename(&directory, &backup_directory) {
+            let _ = fs::remove_dir_all(&staging_directory);
+            return Err(format!("Could not stage the previous sing-box installation for replacement: {error}"));
+        }
+    }
+
+    if let Err(error) = fs::rename(&staging_directory, &directory) {
+        if had_previous_install {
+            let _ = fs::rename(&backup_directory, &directory);
+        }
+        let _ = fs::remove_dir_all(&staging_directory);
+        return Err(format!("Could not activate the verified sing-box installation: {error}"));
+    }
+
+    if had_previous_install {
+        let _ = fs::remove_dir_all(&backup_directory);
+    }
 
     Ok(version)
 }
 
-fn extract_verified_executable(archive_bytes: &[u8], destination: &Path) -> Result<(), String> {
+fn extract_verified_engine_assets(archive_bytes: &[u8], destination: &Path) -> Result<(), String> {
     let mut archive = ZipArchive::new(Cursor::new(archive_bytes))
         .map_err(|_| "The verified sing-box release archive is not a valid ZIP file.".to_string())?;
-    let mut found = false;
+    let mut found_executable = false;
+    let mut found_naive_runtime = false;
 
     for index in 0..archive.len() {
         let mut entry = archive
@@ -960,32 +984,47 @@ fn extract_verified_executable(archive_bytes: &[u8], destination: &Path) -> Resu
         let entry_name = entry
             .name()
             .map_err(|_| "Could not read an entry name in the sing-box release archive.".to_string())?;
-        if Path::new(entry_name.as_ref())
+        let file_name = Path::new(entry_name.as_ref())
             .file_name()
             .and_then(|name| name.to_str())
-            != Some("sing-box.exe")
-        {
-            continue;
-        }
-        if found {
-            return Err("The sing-box archive contains more than one executable.".to_string());
-        }
+            .unwrap_or_default();
+
+        let output_name = match file_name {
+            "sing-box.exe" if !found_executable => {
+                found_executable = true;
+                "sing-box.exe"
+            }
+            "sing-box.exe" => {
+                return Err("The sing-box archive contains more than one executable.".to_string());
+            }
+            "libcronet.dll" if !found_naive_runtime => {
+                found_naive_runtime = true;
+                "libcronet.dll"
+            }
+            "libcronet.dll" => {
+                return Err("The sing-box archive contains more than one libcronet.dll.".to_string());
+            }
+            _ => continue,
+        };
+
         if entry.size() == 0 || entry.size() > MAX_ENGINE_EXECUTABLE_BYTES {
-            return Err("The sing-box executable has an invalid or excessive uncompressed size.".to_string());
+            return Err(format!("The {output_name} asset has an invalid or excessive uncompressed size."));
         }
 
-        let mut output = File::create(destination)
-            .map_err(|_| "Could not create the temporary sing-box executable.".to_string())?;
+        let output_path = destination.join(output_name);
+        let mut output = File::create(output_path)
+            .map_err(|_| format!("Could not create the temporary {output_name} asset."))?;
         std::io::copy(&mut entry, &mut output)
-            .map_err(|_| "Could not extract the sing-box executable.".to_string())?;
-        output
-            .flush()
-            .map_err(|_| "Could not flush the extracted sing-box executable.".to_string())?;
-        found = true;
+            .map_err(|_| format!("Could not extract the {output_name} asset."))?;
+        output.flush()
+            .map_err(|_| format!("Could not flush the extracted {output_name} asset."))?;
     }
 
-    if !found {
+    if !found_executable {
         return Err("The sing-box release archive does not contain sing-box.exe.".to_string());
+    }
+    if !found_naive_runtime {
+        return Err("The official Windows archive does not contain libcronet.dll; NaiveProxy cannot be enabled safely.".to_string());
     }
 
     Ok(())

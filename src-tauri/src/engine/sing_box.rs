@@ -1563,6 +1563,112 @@ mod runtime_guard_tests {
         wait_for_child_exit(pid).await;
     }
 
+    #[cfg(windows)]
+    const LISTENER_CHILD_READY_ENV: &str = "BLACKLIST_INEVITABLE_PREFLIGHT_LISTENER_READY_PATH";
+
+    #[cfg(windows)]
+    #[test]
+    fn listening_preflight_child_process() {
+        let Some(path) = std::env::var_os(LISTENER_CHILD_READY_ENV) else {
+            return;
+        };
+
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
+            .expect("bind controlled preflight listener");
+        let port = listener
+            .local_addr()
+            .expect("read controlled listener address")
+            .port();
+        std::fs::write(path, port.to_string()).expect("publish controlled listener port");
+        std::thread::sleep(Duration::from_secs(30));
+        drop(listener);
+    }
+
+    #[cfg(windows)]
+    fn listening_child_command(ready_path: &Path) -> Command {
+        let executable = std::env::current_exe().expect("resolve current test executable");
+        let mut command = Command::new(executable);
+        command
+            .args([
+                "--exact",
+                "engine::sing_box::runtime_guard_tests::listening_preflight_child_process",
+                "--nocapture",
+            ])
+            .env(LISTENER_CHILD_READY_ENV, ready_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        command
+    }
+
+    #[cfg(windows)]
+    async fn wait_for_listener_port(path: &Path) -> u16 {
+        timeout(Duration::from_secs(10), async {
+            loop {
+                if let Ok(value) = tokio::fs::read_to_string(path).await {
+                    if let Ok(port) = value.trim().parse::<u16>() {
+                        return port;
+                    }
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("controlled child should publish its listening port")
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn stopping_preflight_child_releases_its_loopback_listener() {
+        let supervisor = ProcessSupervisor::default();
+        let root = std::env::temp_dir().join(format!(
+            "blacklist-inevitable-listener-cleanup-{}",
+            Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).expect("create listener test directory");
+        let ready_path = root.join("listener.port");
+        let mut command = listening_child_command(&ready_path);
+        supervisor.prepare_child_command(&mut command);
+        let mut child = command.spawn().expect("spawn supervised listener child");
+        supervisor
+            .assign_child(&mut child)
+            .await
+            .expect("contain listener child before it can run");
+
+        let port = wait_for_listener_port(&ready_path).await;
+        let address = ("127.0.0.1", port);
+        let connection = timeout(Duration::from_secs(2), TcpStream::connect(address))
+            .await
+            .expect("listener connection timed out")
+            .expect("controlled child should accept loopback connections");
+        drop(connection);
+
+        stop_probe_process(&mut child)
+            .await
+            .expect("stop and reap listener child");
+        assert!(
+            child.try_wait().expect("inspect listener child").is_some(),
+            "listener child must be reaped before checking the port"
+        );
+
+        assert!(
+            TcpStream::connect(address).await.is_err(),
+            "the stopped child must no longer accept connections on its former port"
+        );
+        let released_listener = timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(listener) = std::net::TcpListener::bind(address) {
+                    return listener;
+                }
+                sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("loopback port must become bindable after child exit");
+        drop(released_listener);
+        std::fs::remove_dir_all(root).expect("remove listener test directory");
+    }
+
     #[test]
     fn installed_version_check_requires_an_exact_version_token() {
         assert!(matches_expected_engine_version("sing-box version 1.14.4"));
@@ -1648,9 +1754,21 @@ mod socks_probe_cancellation_tests {
             stream
                 .write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 0])
                 .expect("complete SOCKS5 handshake");
-            connected_tx.send(()).expect("notify completed handshake");
 
+            // Wait until the HTTP request has crossed the SOCKS tunnel. Tests
+            // may then trigger cancellation knowing the request is truly in flight,
+            // not merely waiting for SOCKS negotiation to complete.
             let mut buffer = [0_u8; 1024];
+            let request_bytes = stream
+                .read(&mut buffer)
+                .expect("receive HTTP probe request");
+            assert!(request_bytes > 0, "HTTP probe request must reach the proxy");
+            assert!(
+                buffer[..request_bytes].starts_with(b"GET "),
+                "the tunneled payload must be the HTTP probe request"
+            );
+            connected_tx.send(()).expect("notify received HTTP request");
+
             let disconnected_cleanly = loop {
                 match stream.read(&mut buffer) {
                     Ok(0) => break true,
@@ -1701,6 +1819,63 @@ mod socks_probe_cancellation_tests {
             receive_signal(disconnected).await,
             "the HTTP timeout must release the SOCKS tunnel while the client remains alive"
         );
+        drop(client);
+        server.join().expect("join SOCKS5 test proxy");
+    }
+
+    #[tokio::test]
+    async fn graceful_shutdown_cancels_http_probe_and_waits_for_socks_release() {
+        let (port, connected, disconnected, server) = start_stalled_socks_proxy();
+        let supervisor = ProcessSupervisor::default();
+        let mut operation = supervisor
+            .begin_operation()
+            .expect("register active Real Delay operation");
+        let client = build_probe_http_client(port, Duration::from_secs(30))
+            .expect("build test HTTP client");
+        let request_client = client.clone();
+        let worker = tokio::spawn(async move {
+            let cancelled = tokio::select! {
+                _ = operation.cancelled() => true,
+                result = measure_request_with_client(
+                    &request_client,
+                    &["http://probe.invalid/generate_204"],
+                ) => {
+                    panic!("stalled HTTP request completed before shutdown: {result:?}");
+                }
+            };
+
+            // The select branch drops the in-flight request future before the
+            // operation lease is released. Keep the test's other client clone
+            // alive so tunnel release cannot be attributed to Client::drop.
+            drop(request_client);
+            drop(operation);
+            cancelled
+        });
+
+        receive_signal(connected).await;
+        assert!(supervisor.request_shutdown(), "first shutdown request must win");
+        assert!(
+            supervisor.begin_operation().is_err(),
+            "shutdown must reject new engine operations"
+        );
+
+        let cleanup_healthy = tokio::time::timeout(
+            Duration::from_secs(4),
+            supervisor.wait_for_idle(),
+        )
+        .await
+        .expect("supervisor did not drain the cancelled HTTP operation");
+        assert!(cleanup_healthy, "HTTP cancellation must leave runtime cleanup healthy");
+        assert!(supervisor.shutdown_complete(), "shutdown must finish after cleanup");
+        assert!(
+            worker.await.expect("HTTP probe worker panicked"),
+            "the operation must observe graceful shutdown cancellation"
+        );
+        assert!(
+            receive_signal(disconnected).await,
+            "graceful shutdown must release the SOCKS tunnel before the operation lease ends"
+        );
+
         drop(client);
         server.join().expect("join SOCKS5 test proxy");
     }

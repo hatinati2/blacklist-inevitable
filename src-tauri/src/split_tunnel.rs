@@ -165,12 +165,12 @@ pub fn apply_split_tunnel_policy(
         outbounds.push(json!({"type": "direct", "tag": DIRECT_OUTBOUND_TAG}));
     }
 
-    let (default, selected_action) = match policy.mode {
-        SplitTunnelMode::FullTunnel => (ApplicationRoute::Vpn, None),
-        SplitTunnelMode::DirectOnly => (ApplicationRoute::Direct, None),
-        SplitTunnelMode::IncludeSelected => (ApplicationRoute::Direct, Some(ApplicationRoute::Vpn)),
-        SplitTunnelMode::ExcludeSelected => (ApplicationRoute::Vpn, Some(ApplicationRoute::Direct)),
-        SplitTunnelMode::Custom => (policy.default_route, None),
+    let default = match policy.mode {
+        SplitTunnelMode::FullTunnel => ApplicationRoute::Vpn,
+        SplitTunnelMode::DirectOnly => ApplicationRoute::Direct,
+        SplitTunnelMode::IncludeSelected => ApplicationRoute::Direct,
+        SplitTunnelMode::ExcludeSelected => ApplicationRoute::Vpn,
+        SplitTunnelMode::Custom => policy.default_route,
     };
 
     let default_outbound = match default {
@@ -184,7 +184,12 @@ pub fn apply_split_tunnel_policy(
     let mut direct_paths = Vec::new();
     let mut block_paths = Vec::new();
     for (path, action) in applications {
-        let action = selected_action.unwrap_or(action);
+        let action = match policy.mode {
+            SplitTunnelMode::FullTunnel | SplitTunnelMode::DirectOnly => continue,
+            SplitTunnelMode::IncludeSelected => ApplicationRoute::Vpn,
+            SplitTunnelMode::ExcludeSelected => ApplicationRoute::Direct,
+            SplitTunnelMode::Custom => action,
+        };
         match action {
             ApplicationRoute::Vpn => vpn_paths.push(path),
             ApplicationRoute::Direct => direct_paths.push(path),
@@ -253,7 +258,11 @@ mod tests {
     #[test]
     fn full_tunnel_and_direct_only_select_the_correct_default_route() {
         let mut config = base_config();
-        apply_split_tunnel_policy(&mut config, &SplitTunnelPolicy::default()).unwrap();
+        let full_tunnel = SplitTunnelPolicy {
+            applications: vec![application(r"C:\Apps\Discord.exe", ApplicationRoute::Direct)],
+            ..SplitTunnelPolicy::default()
+        };
+        apply_split_tunnel_policy(&mut config, &full_tunnel).unwrap();
         assert_eq!(config["route"]["final"], VPN_OUTBOUND_TAG);
         assert_eq!(config["route"]["rules"].as_array().unwrap().len(), 0);
         assert_eq!(config["outbounds"][1]["type"], "direct");
@@ -261,10 +270,12 @@ mod tests {
         let mut config = base_config();
         let policy = SplitTunnelPolicy {
             mode: SplitTunnelMode::DirectOnly,
+            applications: vec![application(r"C:\Apps\Discord.exe", ApplicationRoute::Vpn)],
             ..SplitTunnelPolicy::default()
         };
         apply_split_tunnel_policy(&mut config, &policy).unwrap();
         assert_eq!(config["route"]["final"], DIRECT_OUTBOUND_TAG);
+        assert_eq!(config["route"]["rules"].as_array().unwrap().len(), 0);
         assert_eq!(config["dns"]["servers"][0]["detour"], DIRECT_OUTBOUND_TAG);
     }
 

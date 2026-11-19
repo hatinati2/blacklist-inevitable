@@ -24,7 +24,7 @@ The profile list response does not include credentials. The engine adapter retri
 
 ## TCP reachability diagnostic
 
-The basic endpoint diagnostic opens a bounded TCP connection to the configured host and port for VLESS, VMess, Trojan, and Shadowsocks profiles. It is limited to 24 concurrent probes and a five-second timeout per endpoint. Hysteria2 and TUIC are skipped by this TCP-only diagnostic.
+The basic endpoint diagnostic opens a bounded TCP connection to the configured host and port for VLESS, VMess, Trojan, Shadowsocks, and Naive HTTPS profiles. Naive QUIC, Hysteria2, and TUIC are skipped by this TCP-only diagnostic because they need UDP-aware checks. It is limited to 24 concurrent probes and a five-second timeout per endpoint.
 
 A successful TCP connection means only that the endpoint accepted a TCP connection. It does **not** validate the generated engine configuration, TLS, proxy protocol negotiation, authentication, transport settings, or the ability to carry traffic. The UI labels this result as TCP reachability; it is not Real Delay.
 
@@ -40,7 +40,7 @@ Real Delay is implemented using an isolated sing-box process for each tested pro
 
 The primary endpoint is `https://www.gstatic.com/generate_204`. If it fails, the implementation tries `https://cp.cloudflare.com/generate_204`. Redirects are disabled and only HTTP 204 counts as a successful measurement. The timer covers the request through the proxy until the response headers are received. Each HTTP attempt has a nine-second timeout and at most four engine processes run concurrently.
 
-The current probe URLs and timeout are fixed in the Rust implementation; there is not yet a UI setting for them. Successful measurements are returned in ascending delay order. The result includes the endpoint used, config outcome, measured milliseconds, or a failure detail.
+The primary and fallback HTTPS probe URLs and timeout are configurable in the application settings and persisted locally. The timeout is bounded to 2–30 seconds, with a 9-second default. Successful measurements are returned in ascending delay order. The result includes the endpoint used, config outcome, measured milliseconds, or a failure detail.
 
 Preflight does not enable TUN, Wintun, packet capture, Windows system proxy settings, or normal device traffic routing. This feature tests one profile at a time through its temporary local proxy; it does not connect the device to a VPN.
 

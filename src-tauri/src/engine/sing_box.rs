@@ -608,6 +608,61 @@ mod tests {
     }
 
     #[test]
+    fn maps_naive_https_credentials_sni_and_concurrency() {
+        let mut profile = sample_profile("naive");
+        profile.options = BTreeMap::from([
+            ("sni".to_string(), "edge.example.org".to_string()),
+            ("insecureConcurrency".to_string(), "2".to_string()),
+        ]);
+        let credentials = BTreeMap::from([
+            ("username".to_string(), "naive-user".to_string()),
+            ("password".to_string(), "naive-secret".to_string()),
+        ]);
+
+        let config = build_probe_config(&profile, &credentials, 10080).unwrap();
+        let outbound = &config["outbounds"][0];
+
+        assert_eq!(outbound["type"], "naive");
+        assert_eq!(outbound["server"], "proxy.example.com");
+        assert_eq!(outbound["server_port"], 443);
+        assert_eq!(outbound["username"], "naive-user");
+        assert_eq!(outbound["password"], "naive-secret");
+        assert_eq!(outbound["insecure_concurrency"], 2);
+        assert_eq!(outbound["quic"], false);
+        assert_eq!(outbound["tls"]["enabled"], true);
+        assert_eq!(outbound["tls"]["server_name"], "edge.example.org");
+        assert_eq!(config["inbounds"][0]["listen"], "127.0.0.1");
+    }
+
+    #[test]
+    fn maps_naive_quic_and_password_only_credentials() {
+        let mut profile = sample_profile("naive");
+        profile.options.insert("quic".to_string(), "true".to_string());
+        let credentials = BTreeMap::from([("password".to_string(), "naive-secret".to_string())]);
+
+        let config = build_probe_config(&profile, &credentials, 10080).unwrap();
+        let outbound = &config["outbounds"][0];
+
+        assert_eq!(outbound["quic"], true);
+        assert_eq!(outbound["password"], "naive-secret");
+        assert!(outbound.get("username").is_none());
+        assert_eq!(outbound["tls"]["server_name"], "proxy.example.com");
+    }
+
+    #[test]
+    fn rejects_naive_without_password_or_with_excessive_concurrency() {
+        let profile = sample_profile("naive");
+        assert!(build_probe_config(&profile, &BTreeMap::new(), 10080)
+            .unwrap_err()
+            .contains("password"));
+
+        let mut invalid = sample_profile("naive");
+        invalid.options.insert("insecureConcurrency".to_string(), "33".to_string());
+        let credentials = BTreeMap::from([("password".to_string(), "secret".to_string())]);
+        assert!(build_probe_config(&invalid, &credentials, 10080).is_err());
+    }
+
+    #[test]
     fn maps_shadowsocks_method_and_secret_without_exposing_it_elsewhere() {
         let mut profile = sample_profile("shadowsocks");
         profile.options.insert("method".to_string(), "aes-256-gcm".to_string());

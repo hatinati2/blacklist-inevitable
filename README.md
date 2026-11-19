@@ -61,4 +61,4 @@ npm run tauri -- build
 
 ## Third-party engine
 
-sing-box is downloaded from its upstream release rather than bundled in this repository. The app writes a third-party notice beside the installed executable. The upstream project is licensed under GPL-3.0-or-later and has additional naming / association language; a complete license, notice, redistribution, and release review remains a Windows release gate. The current installer does not bundle the sing-box executable.
+sing-box is downloaded from its upstream release rather than bundled in this repository. The app writes a third-party notice beside the installed executable. The sing-box executable is GPL-3.0-or-later with an additional naming/association condition. The Naive runtime also brings cronet-go (GPL-3.0-or-later), NaiveProxy (BSD 3-Clause), and Chromium-derived third-party notices. Complete license texts and Chromium component notices must be reviewed and preserved; redistribution, signing, and artifact integrity remain Windows release gates. The current installer does not bundle the sing-box executable.

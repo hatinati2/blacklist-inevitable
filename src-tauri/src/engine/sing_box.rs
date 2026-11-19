@@ -1563,6 +1563,113 @@ mod runtime_guard_tests {
         wait_for_child_exit(pid).await;
     }
 
+    #[cfg(windows)]
+    const LISTENER_CHILD_READY_ENV: &str = "BLACKLIST_INEVITABLE_PREFLIGHT_LISTENER_READY_PATH";
+
+    #[cfg(windows)]
+    #[test]
+    fn listening_preflight_child_process() {
+        let Some(path) = std::env::var_os(LISTENER_CHILD_READY_ENV) else {
+            return;
+        };
+
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
+            .expect("bind controlled preflight listener");
+        let port = listener
+            .local_addr()
+            .expect("read controlled listener address")
+            .port();
+        std::fs::write(path, port.to_string()).expect("publish controlled listener port");
+        std::thread::sleep(Duration::from_secs(30));
+        drop(listener);
+    }
+
+    #[cfg(windows)]
+    fn listening_child_command(ready_path: &Path) -> Command {
+        let executable = std::env::current_exe().expect("resolve current test executable");
+        let mut command = Command::new(executable);
+        command
+            .args([
+                "--exact",
+                "engine::sing_box::runtime_guard_tests::listening_preflight_child_process",
+                "--nocapture",
+            ])
+            .env(LISTENER_CHILD_READY_ENV, ready_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        command
+    }
+
+    #[cfg(windows)]
+    async fn wait_for_listener_port(path: &Path) -> u16 {
+        timeout(Duration::from_secs(10), async {
+            loop {
+                if let Ok(value) = tokio::fs::read_to_string(path).await {
+                    if let Ok(port) = value.trim().parse::<u16>() {
+                        return port;
+                    }
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("controlled child should publish its listening port")
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn stopping_preflight_child_releases_its_loopback_listener() {
+        let supervisor = ProcessSupervisor::default();
+        let root = std::env::temp_dir().join(format!(
+            "blacklist-inevitable-listener-cleanup-{}",
+            Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).expect("create listener test directory");
+        let ready_path = root.join("listener.port");
+        let mut command = listening_child_command(&ready_path);
+        supervisor.prepare_child_command(&mut command);
+        let mut child = command.spawn().expect("spawn supervised listener child");
+        supervisor
+            .assign_child(&mut child)
+            .await
+            .expect("contain listener child before it can run");
+
+        let port = wait_for_listener_port(&ready_path).await;
+        let address = ("127.0.0.1", port);
+        let connection = timeout(Duration::from_secs(2), TcpStream::connect(address))
+            .await
+            .expect("listener connection timed out")
+            .expect("controlled child should accept loopback connections");
+        drop(connection);
+
+        stop_probe_process(&mut child)
+            .await
+            .expect("stop and reap listener child");
+        assert!(
+            child.try_wait().expect("inspect listener child").is_some(),
+            "listener child must be reaped before checking the port"
+        );
+
+        let released_listener = timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(listener) = std::net::TcpListener::bind(address) {
+                    return listener;
+                }
+                sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("loopback port must become bindable after child exit");
+
+        assert!(
+            TcpStream::connect(address).await.is_err(),
+            "the stopped child must no longer accept connections on its former port"
+        );
+        drop(released_listener);
+        std::fs::remove_dir_all(root).expect("remove listener test directory");
+    }
+
     #[test]
     fn installed_version_check_requires_an_exact_version_token() {
         assert!(matches_expected_engine_version("sing-box version 1.14.4"));

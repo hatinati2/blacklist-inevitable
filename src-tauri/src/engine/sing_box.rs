@@ -1958,6 +1958,205 @@ mod runtime_guard_tests {
         assert!(supervisor.cleanup_healthy());
     }
 
+
+    #[cfg(windows)]
+    const FORCED_OWNER_ROOT_ENV: &str = "BLACKLIST_INEVITABLE_FORCED_OWNER_ROOT";
+    #[cfg(windows)]
+    const FORCED_OWNER_STATUS_ENV: &str = "BLACKLIST_INEVITABLE_FORCED_OWNER_STATUS";
+
+    // Runs in a separate process to model an app instance that owns its Job
+    // Object. Killing this process must close the final job handle and terminate
+    // its still-listening engine child without relying on Rust Drop.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn forced_termination_job_owner_process() {
+        let Some(root) = std::env::var_os(FORCED_OWNER_ROOT_ENV).map(PathBuf::from) else {
+            return;
+        };
+        let status_path = std::env::var_os(FORCED_OWNER_STATUS_ENV)
+            .map(PathBuf::from)
+            .expect("forced owner status path");
+        let probe_dir = root.join("preflight").join("probe-forced-termination");
+        std::fs::create_dir_all(&probe_dir).expect("create crash-surviving probe directory");
+        std::fs::write(
+            probe_dir.join("config.json"),
+            br#"{"password":"forced-termination-test-secret"}"#,
+        )
+        .expect("write simulated credential-bearing config");
+
+        let supervisor = ProcessSupervisor::default();
+        supervisor
+            .attach_current_process_to_job()
+            .expect("attach forced-termination helper to its Job Object");
+
+        let ready_path = probe_dir.join("listener.port");
+        let mut command = listening_child_command(&ready_path);
+        supervisor.prepare_child_command(&mut command);
+        let mut child = command.spawn().expect("spawn Job Object-owned listener child");
+        supervisor
+            .assign_child(&mut child)
+            .await
+            .expect("assign listener child before it runs");
+        let child_pid = child.id().expect("read listener child PID");
+        let port = wait_for_listener_port(&ready_path).await;
+
+        std::fs::write(&status_path, format!("{child_pid}:{port}"))
+            .expect("publish listener child PID and port to parent test");
+
+        // The parent test uses TerminateProcess on this owner. That bypasses all
+        // Rust destructors, leaving only Windows KILL_ON_JOB_CLOSE as the guard.
+        std::thread::sleep(Duration::from_secs(30));
+        drop(child);
+        drop(supervisor);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn forced_app_termination_kills_listener_child_and_restart_removes_stale_credentials() {
+        use std::process::{Command as StdCommand, Stdio};
+
+        let root = std::env::temp_dir().join(format!(
+            "blacklist-inevitable-forced-recovery-{}",
+            Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).expect("create forced-recovery test root");
+        let status_path = root.join("owner.status");
+        let probe_dir = root.join("preflight");
+        let config_path = probe_dir
+            .join("probe-forced-termination")
+            .join("config.json");
+
+        let executable = std::env::current_exe().expect("resolve current test executable");
+        let mut owner = StdCommand::new(executable);
+        owner
+            .args([
+                "--exact",
+                "engine::sing_box::runtime_guard_tests::forced_termination_job_owner_process",
+                "--nocapture",
+            ])
+            .env(FORCED_OWNER_ROOT_ENV, &root)
+            .env(FORCED_OWNER_STATUS_ENV, &status_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut owner = owner.spawn().expect("spawn isolated app/job owner process");
+
+        let status = timeout(Duration::from_secs(15), async {
+            loop {
+                if let Ok(value) = tokio::fs::read_to_string(&status_path).await {
+                    if let Some((pid, port)) = value.trim().split_once(':') {
+                        if let (Ok(pid), Ok(port)) = (pid.parse::<u32>(), port.parse::<u16>()) {
+                            return (pid, port);
+                        }
+                    }
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        let (child_pid, port) = match status {
+            Ok(value) => value,
+            Err(_) => {
+                let _ = owner.kill();
+                let _ = owner.wait();
+                let _ = std::fs::remove_dir_all(&root);
+                panic!("forced-termination helper did not publish its listener");
+            }
+        };
+
+        let address = ("127.0.0.1", port);
+        let connection = timeout(Duration::from_secs(2), TcpStream::connect(address))
+            .await
+            .expect("listener connection timed out before forced termination");
+        if connection.is_err() {
+            let _ = owner.kill();
+            let _ = owner.wait();
+            let _ = std::fs::remove_dir_all(&root);
+            panic!("Job Object-owned child must listen before the app is terminated");
+        }
+        drop(connection);
+
+        assert!(
+            config_path.is_file(),
+            "credential-bearing config must exist before forced app termination"
+        );
+        owner
+            .kill()
+            .expect("forcibly terminate the isolated app/job owner");
+        owner.wait().expect("reap forcibly terminated app/job owner");
+
+        wait_for_child_exit(child_pid).await;
+        assert!(
+            TcpStream::connect(address).await.is_err(),
+            "closing the app's final Job Object handle must stop its listener child"
+        );
+        let rebound = timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(listener) = std::net::TcpListener::bind(address) {
+                    return listener;
+                }
+                sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("listener port must be reusable after forced app termination");
+        drop(rebound);
+
+        // A process kill bypasses Drop guards: prove the credential file remains,
+        // then exercise exactly the startup recovery routine before allowing work.
+        assert!(
+            config_path.is_file(),
+            "forced termination should leave stale test data for restart recovery"
+        );
+        let restarted_supervisor = ProcessSupervisor::default();
+        recover_preflight_directory(&probe_dir, &restarted_supervisor)
+            .expect("restart must remove stale credential-bearing preflight data");
+        assert!(
+            !probe_dir.exists(),
+            "restart recovery must remove the entire stale preflight tree"
+        );
+        let operation = restarted_supervisor
+            .begin_operation()
+            .expect("new app instance may accept work after successful recovery");
+        drop(operation);
+
+        std::fs::remove_dir_all(root).expect("remove forced-recovery test root");
+    }
+
+    #[test]
+    fn stale_preflight_recovery_is_idempotent_for_an_absent_directory() {
+        let supervisor = ProcessSupervisor::default();
+        let path = std::env::temp_dir().join(format!(
+            "blacklist-inevitable-absent-preflight-{}",
+            Uuid::new_v4()
+        ));
+
+        recover_preflight_directory(&path, &supervisor)
+            .expect("recovery should accept an already absent preflight directory");
+        assert!(supervisor.cleanup_healthy());
+        assert!(supervisor.begin_operation().is_ok());
+    }
+
+    #[test]
+    fn stale_preflight_recovery_failure_blocks_engine_startup() {
+        let supervisor = ProcessSupervisor::default();
+        let path = std::env::temp_dir().join(format!(
+            "blacklist-inevitable-unremovable-preflight-{}",
+            Uuid::new_v4()
+        ));
+        std::fs::write(&path, b"not a directory").expect("create invalid preflight path");
+
+        let error = recover_preflight_directory(&path, &supervisor)
+            .expect_err("recovery must fail closed when stale data cannot be removed");
+        assert!(
+            error.contains("startup is blocked"),
+            "recovery failure should explain why engine startup is blocked"
+        );
+        assert!(!supervisor.cleanup_healthy());
+        assert!(supervisor.begin_operation().is_err());
+        std::fs::remove_file(path).expect("remove invalid preflight test path");
+    }
+
     #[test]
     fn installed_version_check_requires_an_exact_version_token() {
         assert!(matches_expected_engine_version("sing-box version 1.14.4"));

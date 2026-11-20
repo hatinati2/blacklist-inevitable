@@ -1,7 +1,9 @@
 $ErrorActionPreference = "Stop"
 
 $agentServiceLog = Join-Path $env:TEMP "BlacklistInevitableAgent-service.log"
+$installerLog = Join-Path $env:TEMP "blacklist-inevitable-nsis-install.log"
 Remove-Item -LiteralPath $agentServiceLog -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $installerLog -Force -ErrorAction SilentlyContinue
 
 $installerDirectory = Join-Path $PSScriptRoot "..\src-tauri\target\release\bundle\nsis"
 $installer = Get-ChildItem -Path $installerDirectory -Filter "*.exe" -File |
@@ -21,7 +23,7 @@ if (-not $isElevated) {
 }
 
 Write-Host "Installing $($installer.Name) silently..."
-$installProcess = Start-Process -FilePath $installer.FullName -ArgumentList @("/S") -PassThru
+$installProcess = Start-Process -FilePath $installer.FullName -ArgumentList @("/S", "/LOG=$installerLog") -PassThru
 if (-not $installProcess.WaitForExit(180000)) {
     $installProcess.Refresh()
     $installerPid = $installProcess.Id
@@ -55,9 +57,17 @@ if (-not $installProcess.WaitForExit(180000)) {
 }
 $installProcess.Refresh()
 if ($installProcess.ExitCode -ne 0) {
+    if (Test-Path -LiteralPath $installerLog) {
+        Write-Host "NSIS installer diagnostic log:"
+        Get-Content -LiteralPath $installerLog -Tail 250 | ForEach-Object { Write-Host $_ }
+    } else {
+        Write-Host "NSIS installer log was not created: $installerLog"
+    }
     if (Test-Path -LiteralPath $agentServiceLog) {
         Write-Host "Agent helper diagnostic log:"
         Get-Content -LiteralPath $agentServiceLog -Tail 200 | ForEach-Object { Write-Host $_ }
+    } else {
+        Write-Host "Agent helper diagnostic log was not created; the failure occurred before the helper wrote its first entry."
     }
     throw "The NSIS installer exited with code $($installProcess.ExitCode)."
 }

@@ -324,7 +324,22 @@ pub fn apply_destination_routing_policy(
     }
 
     route.insert("rules".to_string(), Value::Array(rules));
-    route.insert("final".to_string(), json!(VPN_OUTBOUND_TAG));
+
+    if policy.bypass_iran {
+        let mut clients = config
+            .get("http_clients")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if clients.iter().any(|client| client["tag"] == RULESET_HTTP_CLIENT_TAG) {
+            return Err("The rule-set HTTP client tag is already in use.".to_string());
+        }
+        clients.push(json!({
+            "tag": RULESET_HTTP_CLIENT_TAG,
+            "detour": DIRECT_OUTBOUND_TAG
+        }));
+        config["http_clients"] = Value::Array(clients);
+    }
 
     config["dns"]["reverse_mapping"] = json!(true);
     config["experimental"]["cache_file"] = json!({

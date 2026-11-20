@@ -75,6 +75,9 @@ jobs:
       - name: Verify locked release dependency graph
         run: cargo build --locked --release --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc
 
+      - name: Build dedicated Windows Agent service host
+        run: cargo build --locked --release --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc --bin blacklist-inevitable-agent
+
       - name: Build Windows installer
         run: npm run tauri -- build
 

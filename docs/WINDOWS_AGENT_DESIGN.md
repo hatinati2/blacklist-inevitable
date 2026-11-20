@@ -29,6 +29,8 @@ Official pinned sing-box engine:
 
 The service boundary is a security boundary, not a second UI. The agent exposes a small fixed RPC surface; it must not accept arbitrary command lines, executable paths, arbitrary filesystem paths, or unrestricted engine JSON from the desktop process.
 
+**Current implementation boundary:** a separate `blacklist-inevitable-agent.exe` now has a Windows Service Control Manager entry point and start/stop/shutdown status handling. This is only the service process shell: it does not create a named pipe, authenticate an interactive user, install itself as a service, launch sing-box, or mutate network state. The Tauri app and NSIS installer do not install or start it. See [WINDOWS_AGENT_SERVICE_HOST.md](WINDOWS_AGENT_SERVICE_HOST.md).
+
 ## Installation and elevation
 
 - The main desktop UI must not require an Administrator manifest.

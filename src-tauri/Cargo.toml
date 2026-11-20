@@ -1,5 +1,6 @@
 [package]
 name = "blacklist-inevitable"
+default-run = "blacklist-inevitable"
 version = "0.1.0"
 description = "Windows-first multi-engine desktop client"
 authors = ["blacklist-inevitable contributors"]
@@ -8,6 +9,10 @@ edition = "2021"
 [lib]
 name = "blacklist_inevitable_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "blacklist-inevitable-agent"
+path = "src/bin/agent.rs"
 
 [build-dependencies]
 tauri-build = { version = "2" }
@@ -38,5 +43,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_NetworkManagement_IpHelper",
     "Win32_NetworkManagement_Ndis",
     "Win32_System_Rpc",
+    "Win32_System_Services",
+    "Win32_System_Threading",
 ] }
 keyring = { version = "4.2", default-features = false, features = ["v1", "windows-native-keyring-store"] }

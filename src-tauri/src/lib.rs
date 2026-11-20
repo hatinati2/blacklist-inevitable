@@ -1,6 +1,7 @@
 use tauri::Manager;
 
 pub mod agent_protocol;
+pub mod agent_service;
 pub mod connection_state;
 pub mod destination_routing;
 pub mod recovery_journal;

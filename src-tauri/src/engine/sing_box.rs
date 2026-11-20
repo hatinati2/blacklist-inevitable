@@ -281,6 +281,24 @@ pub fn build_tun_session_config_with_policy(
     Ok(config)
 }
 
+/// Build a normal-session TUN config with destination-based Global/Rule policy.
+/// The cache file must live in the privileged Agent's protected data directory.
+pub fn build_tun_session_config_with_routing_policy(
+    profile: &ProfileSummary,
+    credentials: &BTreeMap<String, String>,
+    options: &TunSessionOptions,
+    policy: &crate::destination_routing::DestinationRoutingPolicy,
+    cache_file_path: &str,
+) -> Result<Value, String> {
+    let mut config = build_tun_session_config(profile, credentials, options)?;
+    crate::destination_routing::apply_destination_routing_policy(
+        &mut config,
+        policy,
+        cache_file_path,
+    )?;
+    Ok(config)
+}
+
 pub fn build_tun_session_config(
     profile: &ProfileSummary,
     credentials: &BTreeMap<String, String>,
@@ -841,6 +859,53 @@ mod tests {
             );
         }
         let _ = fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn validates_iran_rule_mode_tun_config_with_pinned_sing_box_binary() {
+        use crate::destination_routing::{
+            DestinationRoutingPolicy, TrafficRoutingMode,
+        };
+
+        let Ok(binary) = std::env::var("SING_BOX_VALIDATOR") else {
+            return;
+        };
+        let profile = sample_profile("trojan");
+        let credentials = BTreeMap::from([("password".to_string(), "test-only-secret".to_string())]);
+        let policy = DestinationRoutingPolicy {
+            mode: TrafficRoutingMode::Rule,
+            ..DestinationRoutingPolicy::default()
+        };
+        let config = build_tun_session_config_with_routing_policy(
+            &profile,
+            &credentials,
+            &sample_tun_options(),
+            &policy,
+            r"C:\ProgramData\blacklist-inevitable\cache\sing-box.db",
+        ).expect("generate Iran rule-based TUN config");
+
+        let directory = std::env::temp_dir()
+            .join(format!("blacklist-rule-routing-config-{}", Uuid::new_v4()));
+        fs::create_dir_all(&directory).expect("create temporary rule-routing config directory");
+        let config_path = directory.join("rule-routing.json");
+        fs::write(
+            &config_path,
+            serde_json::to_vec(&config).expect("serialize rule-routing config"),
+        ).expect("write rule-routing config");
+
+        let output = std::process::Command::new(&binary)
+            .arg("check")
+            .arg("-c")
+            .arg(&config_path)
+            .output()
+            .expect("run pinned sing-box config validator");
+        let _ = fs::remove_dir_all(&directory);
+
+        assert!(
+            output.status.success(),
+            "sing-box v{SING_BOX_VERSION} rejected the Iran rule-based TUN config: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]

@@ -134,6 +134,14 @@ Every successful mutation is journaled with its exact resource identity and its 
 
 Do not restore a guessed default DNS server or route. Restore only settings and resources created or changed by this session, using the recorded previous values and verifying restoration.
 
+## Fail-closed DNS and traffic leak protection
+
+Leak prevention is a release-blocking security requirement. The detailed threat model, routing-mode semantics, Agent-owned WFP kill-switch requirements, DNS bootstrap rules, and Windows packet-capture matrix are maintained in [WINDOWS_LEAK_PREVENTION.md](WINDOWS_LEAK_PREVENTION.md).
+
+Important distinction: sing-box's Windows `strict_route` with `dns_mode: hijack` protects ordinary port-53 DNS from leaving non-TUN interfaces. It is not a complete all-protocol, Agent-owned kill switch. The pinned sing-tun Windows implementation uses a dynamic WFP session for its strict-route filters; the session is closed with the TUN. The Agent therefore needs an independent egress policy whose protection survives engine failure and whose service-crash/reboot behavior is explicitly tested.
+
+Do not report Connected until the Agent-owned egress policy, IPv4/IPv6 routes, TUN DNS configuration, encrypted resolver and leak probes have all been verified. If rollback is uncertain, retain the physical-egress block and fail closed.
+
 ## DNS and traffic safety
 
 - Treat DNS as part of the tunnel, not as an optional later feature.

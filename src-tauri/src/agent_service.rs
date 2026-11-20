@@ -1,10 +1,8 @@
 //! Dedicated Windows Service Control Manager host for the privileged Agent.
 //!
-//! This first slice establishes a separately-built service process and correct
-//! SCM lifecycle reporting. It intentionally does not create a named pipe, start
-//! an engine, mutate routes/DNS/WFP, or advertise the Agent as operational VPN
-//! functionality. Those capabilities remain disabled until the authenticated
-//! IPC and recovery runtime have passed their Windows integration gates.
+//! The service owns the local authenticated status-only named pipe. VPN engine,
+//! WFP, TUN, route and DNS operations remain disabled until the recovery runtime
+//! and packet-capture release gates are implemented.
 
 #[cfg(windows)]
 mod windows_service {
@@ -12,7 +10,7 @@ mod windows_service {
     use std::sync::Mutex;
 
     use windows_sys::Win32::Foundation::{
-        GetLastError, CloseHandle, ERROR_CALL_NOT_IMPLEMENTED, HANDLE, WAIT_OBJECT_0,
+        CloseHandle, GetLastError, ERROR_CALL_NOT_IMPLEMENTED, ERROR_GEN_FAILURE, HANDLE,
     };
     use windows_sys::Win32::System::Services::{
         RegisterServiceCtrlHandlerExW, SERVICE_ACCEPT_SHUTDOWN, SERVICE_ACCEPT_STOP,
@@ -21,9 +19,7 @@ mod windows_service {
         SERVICE_STOP_PENDING, SERVICE_TABLE_ENTRYW, SERVICE_WIN32_OWN_PROCESS,
         SetServiceStatus, StartServiceCtrlDispatcherW,
     };
-    use windows_sys::Win32::System::Threading::{
-        CreateEventW, SetEvent, WaitForSingleObject, INFINITE,
-    };
+    use windows_sys::Win32::System::Threading::{CreateEventW, SetEvent};
 
     const SERVICE_NAME: [u16; 25] = [
         66, 108, 97, 99, 107, 108, 105, 115, 116, 73, 110, 101, 118, 105, 116, 97, 98, 108, 101,
@@ -35,24 +31,37 @@ mod windows_service {
     static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
     static EVENT_LOCK: Mutex<()> = Mutex::new(());
 
-    fn status(state: u32, accepted: u32, win32_exit: u32, wait_hint_ms: u32) -> SERVICE_STATUS {
+    fn status(state: u32, accepted: u32, win32_exit: u32, service_exit: u32, wait_hint_ms: u32) -> SERVICE_STATUS {
         SERVICE_STATUS {
             dwServiceType: SERVICE_WIN32_OWN_PROCESS,
             dwCurrentState: state,
             dwControlsAccepted: accepted,
             dwWin32ExitCode: win32_exit,
-            dwServiceSpecificExitCode: 0,
+            dwServiceSpecificExitCode: service_exit,
             dwCheckPoint: 0,
             dwWaitHint: wait_hint_ms,
         }
     }
 
     fn report_status(value: &SERVICE_STATUS) -> bool {
-        let handle = STATUS_HANDLE.load(Ordering::Acquire) as windows_sys::Win32::System::Services::SERVICE_STATUS_HANDLE;
+        let handle = STATUS_HANDLE.load(Ordering::Acquire)
+            as windows_sys::Win32::System::Services::SERVICE_STATUS_HANDLE;
         if handle.is_null() {
             return false;
         }
         unsafe { SetServiceStatus(handle, value) != 0 }
+    }
+
+    fn signal_stop() {
+        STOP_REQUESTED.store(true, Ordering::Release);
+        let _guard = EVENT_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let event = STOP_EVENT.load(Ordering::Acquire) as HANDLE;
+        if !event.is_null() {
+            // The overlapped pipe listener waits on this event alongside each
+            // connection/read/write completion event. Stop therefore cancels
+            // that exact I/O operation and drains its OVERLAPPED before exit.
+            unsafe { SetEvent(event) };
+        }
     }
 
     unsafe extern "system" fn control_handler(
@@ -63,18 +72,22 @@ mod windows_service {
     ) -> u32 {
         match control {
             SERVICE_CONTROL_STOP | SERVICE_CONTROL_SHUTDOWN => {
-                STOP_REQUESTED.store(true, Ordering::Release);
-                let _guard = EVENT_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                let event = STOP_EVENT.load(Ordering::Acquire) as HANDLE;
-                if !event.is_null() {
-                    // The event is owned by ServiceMain and closed under the same
-                    // lock, so the handler cannot signal a recycled handle.
-                    unsafe { SetEvent(event) };
-                }
+                signal_stop();
                 0
             }
             SERVICE_CONTROL_INTERROGATE => 0,
             _ => ERROR_CALL_NOT_IMPLEMENTED,
+        }
+    }
+
+    fn close_owned_handles(pipe: HANDLE, event: HANDLE) {
+        if !pipe.is_null() && pipe != windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+            unsafe { CloseHandle(pipe) };
+        }
+        let _guard = EVENT_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        STOP_EVENT.store(0, Ordering::Release);
+        if !event.is_null() {
+            unsafe { CloseHandle(event) };
         }
     }
 
@@ -96,19 +109,16 @@ mod windows_service {
         }
         STATUS_HANDLE.store(service_status_handle as isize, Ordering::Release);
 
-        let start_pending = status(SERVICE_START_PENDING, 0, 0, 10_000);
+        let start_pending = status(SERVICE_START_PENDING, 0, 0, 0, 10_000);
         if !report_status(&start_pending) {
             STATUS_HANDLE.store(0, Ordering::Release);
             return;
         }
 
-        let stop_event = unsafe {
-            CreateEventW(std::ptr::null(), 1, 0, std::ptr::null())
-        };
+        let stop_event = unsafe { CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) };
         if stop_event.is_null() {
             let error = unsafe { GetLastError() };
-            let stopped = status(SERVICE_STOPPED, 0, error, 0);
-            report_status(&stopped);
+            report_status(&status(SERVICE_STOPPED, 0, error, 0, 0));
             STATUS_HANDLE.store(0, Ordering::Release);
             return;
         }
@@ -116,46 +126,52 @@ mod windows_service {
         {
             let _guard = EVENT_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             STOP_EVENT.store(stop_event as isize, Ordering::Release);
-            if STOP_REQUESTED.load(Ordering::Acquire) {
-                unsafe { SetEvent(stop_event) };
-            }
         }
+        // The service is not reported as RUNNING until its protected, local-only
+        // pipe endpoint exists. A missing/invalid ACL therefore fails startup.
+        let pipe = match crate::agent_pipe::create_listener() {
+            Ok(pipe) => pipe,
+            Err(error) => {
+                eprintln!("Agent named-pipe initialization failed: {error}");
+                close_owned_handles(std::ptr::null_mut(), stop_event);
+                report_status(&status(SERVICE_STOPPED, 0, ERROR_GEN_FAILURE, 1, 0));
+                STATUS_HANDLE.store(0, Ordering::Release);
+                return;
+            }
+        };
 
+        let mut exit_code = 0u32;
         if STOP_REQUESTED.load(Ordering::Acquire) {
-            let pending = status(SERVICE_STOP_PENDING, 0, 0, 10_000);
-            report_status(&pending);
+            exit_code = 0;
         } else {
             let running = status(
                 SERVICE_RUNNING,
                 SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN,
                 0,
                 0,
+                0,
             );
             if !report_status(&running) {
-                STOP_REQUESTED.store(true, Ordering::Release);
-                let _guard = EVENT_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                unsafe { SetEvent(stop_event) };
+                signal_stop_and_cancel_io();
+                exit_code = ERROR_GEN_FAILURE;
+            } else if !STOP_REQUESTED.load(Ordering::Acquire) {
+                if let Err(error) = crate::agent_pipe::serve(pipe, stop_event) {
+                    if error.starts_with(crate::agent_pipe::FATAL_REVERT_ERROR_PREFIX) {
+                        // The service thread may still carry a client impersonation
+                        // token. Do not run any further cleanup/status code under it.
+                        std::process::exit(ERROR_GEN_FAILURE as i32);
+                    }
+                    if !STOP_REQUESTED.load(Ordering::Acquire) {
+                        eprintln!("Agent named-pipe listener stopped unexpectedly: {error}");
+                        exit_code = ERROR_GEN_FAILURE;
+                    }
+                }
             }
         }
 
-        let wait_result = unsafe { WaitForSingleObject(stop_event, INFINITE) };
-        let win32_exit = if wait_result == WAIT_OBJECT_0 {
-            0
-        } else {
-            unsafe { GetLastError() }
-        };
-
-        let pending = status(SERVICE_STOP_PENDING, 0, 0, 10_000);
-        report_status(&pending);
-
-        {
-            let _guard = EVENT_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            STOP_EVENT.store(0, Ordering::Release);
-            unsafe { CloseHandle(stop_event) };
-        }
-
-        let stopped = status(SERVICE_STOPPED, 0, win32_exit, 0);
-        report_status(&stopped);
+        report_status(&status(SERVICE_STOP_PENDING, 0, 0, 0, 10_000));
+        close_owned_handles(pipe, stop_event);
+        report_status(&status(SERVICE_STOPPED, 0, exit_code, 0, 0));
         STATUS_HANDLE.store(0, Ordering::Release);
     }
 
@@ -188,16 +204,21 @@ mod windows_service {
         #[test]
         fn service_has_a_stable_non_empty_name() {
             assert_eq!(SERVICE_NAME.last(), Some(&0));
-            assert_eq!(&SERVICE_NAME[..SERVICE_NAME.len() - 1], &[
-                66, 108, 97, 99, 107, 108, 105, 115, 116, 73, 110, 101, 118, 105, 116, 97, 98, 108,
-                101, 65, 103, 101, 110, 116,
-            ]);
+            assert_eq!(
+                &SERVICE_NAME[..SERVICE_NAME.len() - 1],
+                &[
+                    66, 108, 97, 99, 107, 108, 105, 115, 116, 73, 110, 101, 118, 105, 116, 97, 98,
+                    108, 101, 65, 103, 101, 110, 116,
+                ]
+            );
         }
 
         #[test]
-        fn service_never_accepts_network_operations_in_this_host_slice() {
-            assert_eq!(STOP_REQUESTED.load(Ordering::Relaxed), false);
-            assert_eq!(STOP_EVENT.load(Ordering::Relaxed), 0);
+        fn stop_state_starts_disabled_until_server_is_ready() {
+            let starting = status(SERVICE_START_PENDING, 0, 0, 0, 10_000);
+            assert_eq!(starting.dwControlsAccepted, 0);
+            let running = status(SERVICE_RUNNING, SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN, 0, 0, 0);
+            assert_eq!(running.dwControlsAccepted, SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN);
         }
     }
 }

@@ -65,6 +65,7 @@ Naive import/config mapping is implemented for a bounded subset; remote authenti
 
 ## M4 — Normal connection lifecycle
 
+- [x] Add bounded length-prefixed Agent IPC stream helpers and a per-authenticated-connection duplicate-request guard; the Windows named-pipe listener, DACL, and caller-token checks remain open.
 - [x] Add a versioned, bounded, non-secret Windows Agent recovery journal with monotonic checkpoints and fail-closed loading; service wiring and OS reconciliation remain open.
 - [ ] Add an explicit Rust-owned Connect / Disconnect state machine.
 - [ ] Add Windows platform integration only for the normal connection path.

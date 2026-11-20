@@ -54,6 +54,17 @@ Required controls:
 
 The agent must re-check authorization for each RPC, not just when a channel is first opened. It must not trust caller-supplied profile data or a profile ID without resolving and validating it against the current user's profile store/credential access policy.
 
+## IPC framing and duplicate-request handling
+
+The shared Rust Agent protocol defines a bounded byte-stream frame for the future named-pipe transport:
+
+- Four-byte unsigned little-endian payload length followed by one UTF-8 JSON request.
+- Payload length is checked before allocation and is limited to 128 KiB.
+- The reader consumes exactly one header and one payload; malformed, truncated, oversized, or otherwise invalid messages fail closed.
+- A per-authenticated-connection replay guard rejects request IDs already accepted on that connection. It retains at most 4,096 IDs and requires the listener to close the connection when the budget is exhausted rather than evicting old IDs.
+
+The named-pipe listener must authenticate the peer before creating the guard and retain it until the connection closes. This guard is not a substitute for the pipe DACL, local-only pipe configuration, or Windows caller-token/session verification, and it does not persist across service restarts or separate connections. The actual named-pipe server/client, ACL provisioning, token checks, timeouts, and credential handoff are not implemented by the framing module.
+
 ## Credential handoff
 
 Windows Credential Manager is scoped to a user. A privileged service running under another security identity cannot be assumed to read the desktop user's credentials directly.

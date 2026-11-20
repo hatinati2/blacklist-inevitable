@@ -99,7 +99,12 @@ pub struct DnsMutationRecord {
 pub struct FirewallFilterRecord {
     /// GUID identifying the WFP provider created/owned by this agent.
     pub provider_key: String,
+    /// Stable key assigned to the exact WFP filter; preferred for read-back and deletion.
+    /// None is accepted only for legacy journals created before this field existed.
+    #[serde(default)]
+    pub filter_key: Option<String>,
     pub layer_key: String,
+    /// Runtime ID returned by BFE. Useful for diagnostics, but not a durable identity.
     pub filter_id: u64,
 }
 
@@ -196,9 +201,16 @@ impl RecoveryJournal {
             return Err("The recovery journal contains too many firewall filter identities.".to_string());
         }
         let mut filters = BTreeSet::new();
+        let mut filter_keys = BTreeSet::new();
         for filter in &self.firewall_filters {
             validate_guid(&filter.provider_key)?;
             validate_guid(&filter.layer_key)?;
+            if let Some(filter_key) = &filter.filter_key {
+                validate_guid(filter_key)?;
+                if !filter_keys.insert((filter.provider_key.as_str(), filter_key.as_str())) {
+                    return Err("The recovery journal contains a duplicate stable firewall filter key.".to_string());
+                }
+            }
             if filter.filter_id == 0 || !filters.insert((filter.provider_key.as_str(), filter.filter_id)) {
                 return Err("The recovery journal contains an invalid or duplicate firewall filter.".to_string());
             }
@@ -553,6 +565,7 @@ mod tests {
         });
         journal.firewall_filters.push(FirewallFilterRecord {
             provider_key: "4d36e972-e325-11ce-bfc1-08002be10318".to_string(),
+            filter_key: Some("ac9af5e4-5e27-4dce-8b6a-19c175e233d1".to_string()),
             layer_key: "6d6f8e80-62d4-4b90-a1b8-10ac74e55e20".to_string(),
             filter_id: 77,
         });
@@ -609,6 +622,39 @@ mod tests {
         let mut journal = example_journal(1, 1);
         journal.firewall_filters[0].filter_id = 0;
         assert!(journal.validate().is_err());
+    }
+
+    #[test]
+    fn persists_stable_filter_guid_and_reads_legacy_records_without_it() {
+        let mut journal = example_journal(71, 1);
+        journal.firewall_filters[0].filter_key =
+            Some("ac9af5e4-5e27-4dce-8b6a-19c175e233d1".to_string());
+        journal.validate().unwrap();
+
+        let encoded = serde_json::to_vec(&journal).unwrap();
+        let decoded: RecoveryJournal = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded.firewall_filters[0].filter_key, journal.firewall_filters[0].filter_key);
+
+        let mut legacy = serde_json::to_value(example_journal(72, 1)).unwrap();
+        legacy["firewallFilters"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("filterKey");
+        let decoded: RecoveryJournal = serde_json::from_value(legacy).unwrap();
+        assert_eq!(decoded.firewall_filters[0].filter_key, None);
+        decoded.validate().unwrap();
+    }
+
+    #[test]
+    fn rejects_invalid_or_duplicate_stable_filter_guids() {
+        let mut invalid = example_journal(73, 1);
+        invalid.firewall_filters[0].filter_key = Some("not-a-guid".to_string());
+        assert!(invalid.validate().is_err());
+
+        let mut duplicate = example_journal(74, 1);
+        duplicate.firewall_filters.push(duplicate.firewall_filters[0].clone());
+        duplicate.firewall_filters[1].filter_id = 78;
+        assert!(duplicate.validate().is_err());
     }
 
     #[test]

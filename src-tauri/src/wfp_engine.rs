@@ -13,6 +13,14 @@ const PROVIDER_KEY: GUID = GUID::from_u128(0x9d45d56a_6b31_48aa_9c45_72c8b25e2f1
 const SUBLAYER_KEY: GUID = GUID::from_u128(0x4aabbc48_c0a2_4f76_9f2a_0a90da1caa37);
 
 #[cfg(windows)]
+fn guid_eq(left: &GUID, right: &GUID) -> bool {
+    left.data1 == right.data1
+        && left.data2 == right.data2
+        && left.data3 == right.data3
+        && left.data4 == right.data4
+}
+
+#[cfg(windows)]
 const FWP_E_PROVIDER_NOT_FOUND: u32 = 0x8032_0005;
 #[cfg(windows)]
 const FWP_E_SUBLAYER_NOT_FOUND: u32 = 0x8032_0007;
@@ -82,7 +90,7 @@ impl WfpEngine {
                     return Err("WFP provider lookup returned a null object.".into());
                 }
                 let provider = unsafe { &*provider_ptr };
-                let valid = provider.providerKey == PROVIDER_KEY
+                let valid = guid_eq(&provider.providerKey, &PROVIDER_KEY)
                     && provider.flags & FWPM_PROVIDER_FLAG_PERSISTENT != 0;
                 let mut allocation = provider_ptr.cast();
                 unsafe { FwpmFreeMemory0(&mut allocation) };
@@ -119,8 +127,8 @@ impl WfpEngine {
                 }
                 let sublayer = unsafe { &*sublayer_ptr };
                 let provider_matches = !sublayer.providerKey.is_null()
-                    && unsafe { *sublayer.providerKey } == PROVIDER_KEY;
-                let valid = sublayer.subLayerKey == SUBLAYER_KEY
+                    && guid_eq(unsafe { &*sublayer.providerKey }, &PROVIDER_KEY);
+                let valid = guid_eq(&sublayer.subLayerKey, &SUBLAYER_KEY)
                     && sublayer.flags & FWPM_SUBLAYER_FLAG_PERSISTENT != 0
                     && provider_matches;
                 let mut allocation = sublayer_ptr.cast();

@@ -78,6 +78,9 @@ jobs:
       - name: Build dedicated Windows Agent service host
         run: cargo build --locked --release --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc --bin blacklist-inevitable-agent
 
+      - name: Build desktop executable for NSIS
+        run: cargo build --locked --release --manifest-path src-tauri/Cargo.toml --bin blacklist-inevitable
+
       - name: Stage Agent sidecar for NSIS
         shell: pwsh
         run: |
@@ -99,7 +102,7 @@ jobs:
           $root = Import-Certificate -CertStoreLocation "Cert:\LocalMachine\Root" -FilePath $certificateFile
           if (-not $root) { throw "Could not trust the ephemeral CI code-signing certificate." }
           $agent = "src-tauri/binaries/blacklist-inevitable-agent-x86_64-pc-windows-msvc.exe"
-          $desktop = "src-tauri/target/x86_64-pc-windows-msvc/release/blacklist-inevitable.exe"
+          $desktop = "src-tauri/target/release/blacklist-inevitable.exe"
           foreach ($binary in @($agent, $desktop)) {
             if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) { throw "Missing binary to sign: $binary" }
             $signature = Set-AuthenticodeSignature -FilePath $binary -Certificate $certificate -HashAlgorithm SHA256

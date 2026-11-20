@@ -13,6 +13,14 @@ const PROVIDER_KEY: GUID = GUID::from_u128(0x9d45d56a_6b31_48aa_9c45_72c8b25e2f1
 const SUBLAYER_KEY: GUID = GUID::from_u128(0x4aabbc48_c0a2_4f76_9f2a_0a90da1caa37);
 
 #[cfg(windows)]
+fn guid_to_u128(value: &GUID) -> u128 {
+    ((value.data1 as u128) << 96)
+        | ((value.data2 as u128) << 80)
+        | ((value.data3 as u128) << 64)
+        | (u64::from_be_bytes(value.data4) as u128)
+}
+
+#[cfg(windows)]
 fn guid_eq(left: &GUID, right: &GUID) -> bool {
     left.data1 == right.data1
         && left.data2 == right.data2
@@ -280,7 +288,7 @@ impl WfpEngine {
         }
 
         Ok(DisabledFilterReceipt {
-            filter_key: filter_key.to_u128(),
+            filter_key: guid_to_u128(&filter_key),
             filter_id,
             layer,
         })

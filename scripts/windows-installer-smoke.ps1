@@ -113,8 +113,9 @@ if ($agentSignature.Status -eq "Valid" -and $desktopSignature.Status -eq "Valid"
     if ($serviceRecord.StartMode -ne "Auto") {
         throw "The Agent service is not configured for automatic startup."
     }
-    if ($serviceRecord.PathName -notmatch [Regex]::Escape($agentPath)) {
-        throw "The Agent service image path does not point to the installed sidecar."
+    $expectedServiceImagePath = '"' + [IO.Path]::GetFullPath($agentPath) + '"'
+    if (-not [string]::Equals(([string]$serviceRecord.PathName).Trim(), $expectedServiceImagePath, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "The Agent service image path is not exactly the quoted installed sidecar path: [$($serviceRecord.PathName)]"
     }
     $sidOutput = (& "$env:SystemRoot\System32\sc.exe" showsid "BlacklistInevitableAgent" 2>&1 | Out-String)
     if ($LASTEXITCODE -ne 0) { throw "Could not query the Agent service SID." }

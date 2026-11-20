@@ -302,7 +302,7 @@ pub fn apply_destination_routing_policy(
             "outbound": DIRECT_OUTBOUND_TAG
         }));
 
-        config["route"]["rule_set"] = json!([
+        route.insert("rule_set".to_string(), json!([
             {
                 "type": "remote",
                 "tag": GEOSITE_IR_TAG,
@@ -319,14 +319,8 @@ pub fn apply_destination_routing_policy(
                 "http_client": RULESET_HTTP_CLIENT_TAG,
                 "update_interval": "24h"
             }
-        ]);
-        config["http_clients"] = json!([
-            {
-                "tag": RULESET_HTTP_CLIENT_TAG,
-                "detour": DIRECT_OUTBOUND_TAG
-            }
-        ]);
-        config["route"]["default_http_client"] = json!(RULESET_HTTP_CLIENT_TAG);
+        ]));
+        route.insert("default_http_client".to_string(), json!(RULESET_HTTP_CLIENT_TAG));
     }
 
     route.insert("rules".to_string(), Value::Array(rules));

@@ -306,7 +306,7 @@ function Set-ProtectedDirectoryAcl([string] $Path, [string[]] $AllowedSids) {
         throw "Refusing to use a reparse point for protected Agent data: $Path"
     }
 
-    $acl = Get-Acl -LiteralPath $Path
+    $acl = [System.IO.Directory]::GetAccessControl($Path)
     $acl.SetAccessRuleProtection($true, $false)
     foreach ($existingRule in @($acl.Access)) {
         [void]$acl.RemoveAccessRuleSpecific($existingRule)
@@ -326,10 +326,10 @@ function Set-ProtectedDirectoryAcl([string] $Path, [string[]] $AllowedSids) {
         )
         $acl.AddAccessRule($rule)
     }
-    Set-Acl -LiteralPath $Path -AclObject $acl
+    [System.IO.Directory]::SetAccessControl($Path, $acl)
     Write-AgentServiceLog "ACL written: $Path"
 
-    $verified = Get-Acl -LiteralPath $Path
+    $verified = [System.IO.Directory]::GetAccessControl($Path)
     if (-not $verified.AreAccessRulesProtected) {
         throw "The protected Agent directory is still inheriting permissions: $Path"
     }

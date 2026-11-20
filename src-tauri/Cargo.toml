@@ -1,5 +1,6 @@
 [package]
 name = "blacklist-inevitable"
+default-run = "blacklist-inevitable"
 version = "0.1.0"
 description = "Windows-first multi-engine desktop client"
 authors = ["blacklist-inevitable contributors"]

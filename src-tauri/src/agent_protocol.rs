@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Mutex;
 
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+
 use serde::{Deserialize, Serialize};
 
 use crate::connection_state::ConnectionSnapshot;
@@ -192,6 +194,47 @@ pub fn decode_agent_frame(frame: &[u8]) -> Result<AgentRequest, String> {
         return Err("The agent frame is truncated or contains trailing data.".to_string());
     }
     decode_agent_request(&frame[AGENT_FRAME_HEADER_BYTES..])
+}
+
+/// Read exactly one framed request from a byte stream. The announced payload
+/// length is checked before allocating memory; the next frame remains unread.
+pub async fn read_agent_message<R>(reader: &mut R) -> Result<AgentRequest, String>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut header = [0u8; AGENT_FRAME_HEADER_BYTES];
+    reader
+        .read_exact(&mut header)
+        .await
+        .map_err(|_| "The agent IPC connection closed before a complete frame header arrived.".to_string())?;
+
+    let announced = u32::from_le_bytes(header) as usize;
+    if announced == 0 || announced > MAX_AGENT_REQUEST_BYTES {
+        return Err("The agent frame length is empty or exceeds the maximum message size.".to_string());
+    }
+
+    let mut payload = vec![0u8; announced];
+    reader
+        .read_exact(&mut payload)
+        .await
+        .map_err(|_| "The agent IPC connection closed before the complete frame arrived.".to_string())?;
+    decode_agent_request(&payload)
+}
+
+/// Write one complete framed request and flush it before returning.
+pub async fn write_agent_message<W>(writer: &mut W, request: &AgentRequest) -> Result<(), String>
+where
+    W: AsyncWrite + Unpin,
+{
+    let frame = encode_agent_frame(request)?;
+    writer
+        .write_all(&frame)
+        .await
+        .map_err(|_| "The agent IPC request could not be written.".to_string())?;
+    writer
+        .flush()
+        .await
+        .map_err(|_| "The agent IPC request could not be flushed.".to_string())
 }
 
 /// Tracks request IDs for one authenticated IPC connection. The listener must
@@ -517,6 +560,33 @@ mod tests {
 
         zero_length.copy_from_slice(&((MAX_AGENT_REQUEST_BYTES as u32) + 1).to_le_bytes());
         assert!(decode_agent_frame(&zero_length).is_err());
+    }
+
+    #[tokio::test]
+    async fn async_stream_helpers_read_and_write_one_complete_message() {
+        let request = connect_request();
+        let (mut writer, mut reader) = tokio::io::duplex(4096);
+
+        let expected_id = request.request_id.clone();
+        let write = tokio::spawn(async move {
+            write_agent_message(&mut writer, &request).await.unwrap();
+        });
+        let decoded = read_agent_message(&mut reader).await.unwrap();
+        write.await.unwrap();
+
+        assert_eq!(decoded.request_id, expected_id);
+    }
+
+    #[tokio::test]
+    async fn async_reader_rejects_oversized_length_before_allocating_payload() {
+        let (mut writer, mut reader) = tokio::io::duplex(64);
+        writer
+            .write_all(&((MAX_AGENT_REQUEST_BYTES as u32) + 1).to_le_bytes())
+            .await
+            .unwrap();
+
+        let error = read_agent_message(&mut reader).await.unwrap_err();
+        assert!(error.contains("maximum message size"));
     }
 
     #[test]

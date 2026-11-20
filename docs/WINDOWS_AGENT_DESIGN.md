@@ -29,7 +29,7 @@ Official pinned sing-box engine:
 
 The service boundary is a security boundary, not a second UI. The agent exposes a small fixed RPC surface; it must not accept arbitrary command lines, executable paths, arbitrary filesystem paths, or unrestricted engine JSON from the desktop process.
 
-**Current implementation boundary:** a separate `blacklist-inevitable-agent.exe` now has a Windows Service Control Manager entry point and start/stop/shutdown status handling. This is only the service process shell: it does not create a named pipe, authenticate an interactive user, install itself as a service, launch sing-box, or mutate network state. The Tauri app and NSIS installer do not install or start it. See [WINDOWS_AGENT_SERVICE_HOST.md](WINDOWS_AGENT_SERVICE_HOST.md).
+**Current implementation boundary:** a separate `blacklist-inevitable-agent.exe` has a Windows Service Control Manager host and a protected, local-only named-pipe server. It rejects remote clients, verifies the peer's SID and session against the active physical-console user, and only answers `GetStatus`/`GetDiagnostics`; `Connect`, `Disconnect`, and `Recover` are rejected. The identity check uses `WTSQueryUserToken`, so the eventual service deployment must run under LocalSystem with `SE_TCB_NAME`; RDP and other non-console sessions are not supported by this first slice. There is still no desktop-side pipe client, service installer/account provisioning, credential handoff, sing-box runtime, WFP activation, route/DNS mutation, or actual VPN connection. The Tauri app and NSIS installer do not install or start the Agent. See [WINDOWS_AGENT_SERVICE_HOST.md](WINDOWS_AGENT_SERVICE_HOST.md).
 
 ## Installation and elevation
 
@@ -45,7 +45,7 @@ The service boundary is a security boundary, not a second UI. The agent exposes 
 Prefer a Windows named pipe over an unauthenticated localhost TCP/gRPC port.
 
 Required controls:
-- A restrictive pipe DACL: the active interactive user SID, SYSTEM, and Administrators only, with no broad Users/Everyone access.
+- A restrictive pipe DACL: SYSTEM and Administrators receive full access; Interactive Users receive only generic read/write. The server then verifies that the connected peer is the active console user's exact SID and session. No Everyone or broad Users ACE is granted.
 - Reject remote clients; bind the pipe to the local machine.
 - Verify the connected client's token and user/session identity on every new connection.
 - Use a per-install or per-user protected secret only as an additional authentication factor, not as a substitute for the pipe ACL and caller-token check.
@@ -65,7 +65,7 @@ The shared Rust Agent protocol defines a bounded byte-stream frame for the futur
 - The reader consumes exactly one header and one payload; malformed, truncated, oversized, or otherwise invalid messages fail closed.
 - A per-authenticated-connection replay guard rejects request IDs already accepted on that connection. It retains at most 4,096 IDs and requires the listener to close the connection when the budget is exhausted rather than evicting old IDs.
 
-The named-pipe listener must authenticate the peer before creating the guard and retain it until the connection closes. This guard is not a substitute for the pipe DACL, local-only pipe configuration, or Windows caller-token/session verification, and it does not persist across service restarts or separate connections. The actual named-pipe server/client, ACL provisioning, token checks, timeouts, and credential handoff are not implemented by the framing module.
+The named-pipe listener authenticates the peer before creating the guard and retains it until that connection closes. The first service-host implementation has a Windows named-pipe server with a protected DACL, `PIPE_REJECT_REMOTE_CLIENTS`, an active-console session check, client-token SID verification under impersonation, and a mandatory `RevertToSelf` before request dispatch. It accepts one request per connection and currently dispatches status-only operations; all network-mutating RPCs are rejected. The shared framing module itself remains transport-independent and does not implement the desktop-side pipe client, service installation, or credential handoff. The replay guard does not persist across service restarts or separate connections.
 
 ## Credential handoff
 

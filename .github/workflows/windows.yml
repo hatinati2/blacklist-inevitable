@@ -96,7 +96,7 @@ jobs:
           if (-not $certificate) { throw "Could not create the CI code-signing certificate." }
           $certificateFile = Join-Path $env:RUNNER_TEMP "agent-ci-code-signing.cer"
           Export-Certificate -Cert $certificate -FilePath $certificateFile -Force | Out-Null
-          $root = Import-Certificate -CertStoreLocation "Cert:\CurrentUser\Root" -FilePath $certificateFile
+          $root = Import-Certificate -CertStoreLocation "Cert:\LocalMachine\Root" -FilePath $certificateFile
           if (-not $root) { throw "Could not trust the ephemeral CI code-signing certificate." }
           $agent = "src-tauri/binaries/blacklist-inevitable-agent-x86_64-pc-windows-msvc.exe"
           $desktop = "src-tauri/target/x86_64-pc-windows-msvc/release/blacklist-inevitable.exe"

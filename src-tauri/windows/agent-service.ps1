@@ -268,7 +268,7 @@ try {
         "Uninstall" { Remove-AgentService; Write-AgentServiceLog "EXIT mode=$Mode code=0"; exit 0 }
     }
 } catch {
-    Write-AgentServiceLog "ERROR mode=$Mode: $($_.Exception.Message)"
+    Write-AgentServiceLog "ERROR mode=${Mode}: $($_.Exception.Message)"
     Write-AgentServiceLog "ERROR SCRIPT: $($_.ScriptStackTrace)"
     if ($Mode -eq "Install") {
         Disable-AgentServiceAfterFailure

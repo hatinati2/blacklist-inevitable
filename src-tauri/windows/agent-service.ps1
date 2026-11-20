@@ -231,7 +231,20 @@ function Get-ServiceRecord {
 }
 function Get-RegisteredBinaryPath($Service) {
     $rawPath = ([string]$Service.PathName).Trim()
-    if ($rawPath -match '^"([^"]+)"
+    if ($rawPath.StartsWith([string][char]34, [StringComparison]::Ordinal)) {
+        $closingQuote = $rawPath.IndexOf([char]34, 1)
+        if ($closingQuote -le 1 -or $rawPath.Substring($closingQuote + 1).Trim().Length -ne 0) {
+            throw "The registered Agent service image path is malformed or contains unexpected arguments: [$rawPath]"
+        }
+        $binaryPath = $rawPath.Substring(1, $closingQuote - 1)
+    } else {
+        if ($rawPath.IndexOfAny([char[]]@([char]32, [char]9, [char]34)) -ge 0) {
+            throw "The registered Agent service image path is not quoted despite containing whitespace: [$rawPath]"
+        }
+        $binaryPath = $rawPath
+    }
+    return Get-NormalizedPath $binaryPath
+}
 function Assert-OwnedService($Service) {
     if (-not [string]::Equals((Get-RegisteredBinaryPath $Service), (Get-NormalizedPath $AgentPath), [StringComparison]::OrdinalIgnoreCase)) {
         throw "A service named $ServiceName already exists but points to a different executable. Refusing to modify or remove it."

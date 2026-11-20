@@ -178,8 +178,8 @@ impl WfpEngine {
     pub fn ensure_persistent_namespace(&mut self) -> Result<(), String> {
         use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::{
             FwpmProviderAdd0, FwpmProviderGetByKey0, FwpmSubLayerAdd0,
-            FwpmSubLayerGetByKey0, FwpmTransactionAbort0, FwpmTransactionBegin0,
-            FwpmTransactionCommit0, FwpmFreeMemory0, FWPM_DISPLAY_DATA0, FWPM_PROVIDER0,
+            FwpmSubLayerGetByKey0, FwpmTransactionBegin0, FwpmTransactionCommit0,
+            FwpmFreeMemory0, FWPM_DISPLAY_DATA0, FWPM_PROVIDER0,
             FWPM_PROVIDER_FLAG_PERSISTENT, FWPM_SUBLAYER0, FWPM_SUBLAYER_FLAG_PERSISTENT,
         };
 
@@ -294,7 +294,7 @@ impl WfpEngine {
     /// cannot be supplied when adding a new filter. A rollback-only transaction is
     /// used instead to validate filter structures without changing packet handling.
     pub fn validate_egress_policy_transaction(
-        &self,
+        &mut self,
         spec: &crate::wfp_policy::EgressPolicySpec,
     ) -> Result<FilterValidationReport, String> {
         use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FwpmTransactionBegin0;

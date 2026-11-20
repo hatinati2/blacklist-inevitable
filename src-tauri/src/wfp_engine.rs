@@ -103,6 +103,7 @@ fn wfp_layer_guid(layer: crate::wfp_policy::WfpLayer) -> GUID {
 #[cfg(windows)]
 pub struct WfpEngine {
     handle: windows_sys::Win32::Foundation::HANDLE,
+    poisoned: bool,
 }
 
 #[cfg(windows)]
@@ -132,7 +133,41 @@ impl WfpEngine {
         if handle.is_null() {
             return Err("FwpmEngineOpen0 succeeded without returning an engine handle.".into());
         }
-        Ok(Self { handle })
+        Ok(Self { handle, poisoned: false })
+    }
+
+    fn ensure_open(&self) -> Result<(), String> {
+        if self.handle.is_null() || self.poisoned {
+            return Err("The WFP engine session is closed or poisoned after an unconfirmed transaction; open a new session.".into());
+        }
+        Ok(())
+    }
+
+    /// Abort the current WFP transaction. If BFE cannot confirm the abort,
+    /// poison and close this session: Microsoft documents that destroying the
+    /// session makes BFE abort any remaining transaction automatically.
+    fn abort_transaction_or_poison(&mut self) -> Result<(), String> {
+        use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::{
+            FwpmEngineClose0, FwpmTransactionAbort0,
+        };
+
+        let abort = unsafe { FwpmTransactionAbort0(self.handle) };
+        if abort == 0 {
+            return Ok(());
+        }
+
+        self.poisoned = true;
+        let close = unsafe { FwpmEngineClose0(self.handle) };
+        if close == 0 {
+            self.handle = std::ptr::null_mut();
+            return Err(format!(
+                "FwpmTransactionAbort0 failed (0x{abort:08X}); the WFP engine session was closed to force BFE rollback."
+            ));
+        }
+
+        Err(format!(
+            "FwpmTransactionAbort0 failed (0x{abort:08X}) and FwpmEngineClose0 also failed (0x{close:08X}); this session is poisoned and must not be reused. Drop will retry closing it."
+        ))
     }
 
     /// Ensure this product's persistent WFP provider and sublayer exist.
@@ -140,7 +175,7 @@ impl WfpEngine {
     /// Existing objects are accepted only when their stable keys, persistence
     /// flags, and provider ownership match this binary's namespace. This is a
     /// metadata operation only: no filters are created and no traffic is changed.
-    pub fn ensure_persistent_namespace(&self) -> Result<(), String> {
+    pub fn ensure_persistent_namespace(&mut self) -> Result<(), String> {
         use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::{
             FwpmProviderAdd0, FwpmProviderGetByKey0, FwpmSubLayerAdd0,
             FwpmSubLayerGetByKey0, FwpmTransactionAbort0, FwpmTransactionBegin0,
@@ -148,6 +183,7 @@ impl WfpEngine {
             FWPM_PROVIDER_FLAG_PERSISTENT, FWPM_SUBLAYER0, FWPM_SUBLAYER_FLAG_PERSISTENT,
         };
 
+        self.ensure_open()?;
         let begin = unsafe { FwpmTransactionBegin0(self.handle, 0) };
         if begin != 0 {
             return Err(format!("FwpmTransactionBegin0 failed with Windows status 0x{begin:08X}."));
@@ -233,14 +269,19 @@ impl WfpEngine {
         })();
 
         if let Err(error) = operation {
-            unsafe { FwpmTransactionAbort0(self.handle) };
-            return Err(error);
+            return match self.abort_transaction_or_poison() {
+                Ok(()) => Err(error),
+                Err(abort_error) => Err(format!("{error} {abort_error}")),
+            };
         }
 
         let commit = unsafe { FwpmTransactionCommit0(self.handle) };
         if commit != 0 {
-            let _ = unsafe { FwpmTransactionAbort0(self.handle) };
-            return Err(format!("FwpmTransactionCommit0 failed with Windows status 0x{commit:08X}."));
+            let error = format!("FwpmTransactionCommit0 failed with Windows status 0x{commit:08X}.");
+            return match self.abort_transaction_or_poison() {
+                Ok(()) => Err(error),
+                Err(abort_error) => Err(format!("{error} {abort_error}")),
+            };
         }
         Ok(())
     }
@@ -256,10 +297,9 @@ impl WfpEngine {
         &self,
         spec: &crate::wfp_policy::EgressPolicySpec,
     ) -> Result<FilterValidationReport, String> {
-        use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::{
-            FwpmTransactionAbort0, FwpmTransactionBegin0,
-        };
+        use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FwpmTransactionBegin0;
 
+        self.ensure_open()?;
         let plan = spec.compile_plan()?;
         self.ensure_persistent_namespace()?;
 
@@ -278,11 +318,11 @@ impl WfpEngine {
             Ok(())
         })();
 
-        let abort = unsafe { FwpmTransactionAbort0(self.handle) };
-        if abort != 0 {
-            return Err(format!(
-                "FwpmTransactionAbort0 failed with Windows status 0x{abort:08X}; staged WFP state is unconfirmed. Do not continue with network policy."
-            ));
+        if let Err(abort_error) = self.abort_transaction_or_poison() {
+            return match operation {
+                Ok(()) => Err(format!("{abort_error} Do not continue with network policy.")),
+                Err(operation_error) => Err(format!("{operation_error} {abort_error} Do not continue with network policy.")),
+            };
         }
 
         for key in &generated_keys {
@@ -461,30 +501,40 @@ impl WfpEngine {
     /// Remove only this product's WFP provider and sublayer after a separate
     /// reconciliation step has proved no owned filters remain. Never call this
     /// during ordinary disconnect before filters have been enumerated and removed.
-    pub fn remove_empty_persistent_namespace(&self) -> Result<(), String> {
+    pub fn remove_empty_persistent_namespace(&mut self) -> Result<(), String> {
         use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::{
-            FwpmProviderDeleteByKey0, FwpmSubLayerDeleteByKey0, FwpmTransactionAbort0,
+            FwpmProviderDeleteByKey0, FwpmSubLayerDeleteByKey0,
             FwpmTransactionBegin0, FwpmTransactionCommit0,
         };
 
+        self.ensure_open()?;
         let begin = unsafe { FwpmTransactionBegin0(self.handle, 0) };
         if begin != 0 {
             return Err(format!("FwpmTransactionBegin0 failed with Windows status 0x{begin:08X}."));
         }
         let sublayer = unsafe { FwpmSubLayerDeleteByKey0(self.handle, &SUBLAYER_KEY) };
         if sublayer != 0 {
-            unsafe { FwpmTransactionAbort0(self.handle) };
-            return Err(format!("FwpmSubLayerDeleteByKey0 failed with Windows status 0x{sublayer:08X}."));
+            let error = format!("FwpmSubLayerDeleteByKey0 failed with Windows status 0x{sublayer:08X}.");
+            return match self.abort_transaction_or_poison() {
+                Ok(()) => Err(error),
+                Err(abort_error) => Err(format!("{error} {abort_error}")),
+            };
         }
         let provider = unsafe { FwpmProviderDeleteByKey0(self.handle, &PROVIDER_KEY) };
         if provider != 0 {
-            unsafe { FwpmTransactionAbort0(self.handle) };
-            return Err(format!("FwpmProviderDeleteByKey0 failed with Windows status 0x{provider:08X}."));
+            let error = format!("FwpmProviderDeleteByKey0 failed with Windows status 0x{provider:08X}.");
+            return match self.abort_transaction_or_poison() {
+                Ok(()) => Err(error),
+                Err(abort_error) => Err(format!("{error} {abort_error}")),
+            };
         }
         let commit = unsafe { FwpmTransactionCommit0(self.handle) };
         if commit != 0 {
-            let _ = unsafe { FwpmTransactionAbort0(self.handle) };
-            return Err(format!("FwpmTransactionCommit0 failed with Windows status 0x{commit:08X}."));
+            let error = format!("FwpmTransactionCommit0 failed with Windows status 0x{commit:08X}.");
+            return match self.abort_transaction_or_poison() {
+                Ok(()) => Err(error),
+                Err(abort_error) => Err(format!("{error} {abort_error}")),
+            };
         }
         Ok(())
     }

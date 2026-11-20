@@ -3,6 +3,7 @@ use tauri::Manager;
 pub mod agent_protocol;
 pub mod connection_state;
 pub mod destination_routing;
+pub mod recovery_journal;
 pub mod split_tunnel;
 mod commands;
 mod engine;

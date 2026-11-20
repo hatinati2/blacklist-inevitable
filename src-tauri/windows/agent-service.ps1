@@ -86,6 +86,7 @@ namespace BlacklistInevitable
             IntPtr fileInfoPointer = IntPtr.Zero;
             IntPtr trustDataPointer = IntPtr.Zero;
             bool verificationStarted = false;
+            Guid actionId = GenericVerifyV2;
             WinTrustData trustData = new WinTrustData();
 
             try
@@ -119,7 +120,7 @@ namespace BlacklistInevitable
                 Marshal.StructureToPtr(trustData, trustDataPointer, false);
 
                 verificationStarted = true;
-                int status = WinVerifyTrust(IntPtr.Zero, ref GenericVerifyV2, trustDataPointer);
+                int status = WinVerifyTrust(IntPtr.Zero, ref actionId, trustDataPointer);
 
                 AuthenticodeVerificationResult result = new AuthenticodeVerificationResult();
                 result.Status = status;
@@ -145,7 +146,7 @@ namespace BlacklistInevitable
                 {
                     trustData.dwStateAction = WtdStateActionClose;
                     Marshal.StructureToPtr(trustData, trustDataPointer, false);
-                    WinVerifyTrust(IntPtr.Zero, ref GenericVerifyV2, trustDataPointer);
+                    WinVerifyTrust(IntPtr.Zero, ref actionId, trustDataPointer);
                 }
 
                 if (trustDataPointer != IntPtr.Zero) Marshal.FreeHGlobal(trustDataPointer);

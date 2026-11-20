@@ -10,6 +10,7 @@ use std::net::IpAddr;
 
 const MAX_PHYSICAL_INTERFACES: usize = 32;
 const MAX_ENDPOINTS: usize = 64;
+const MAX_PLANNED_FILTERS: usize = 2048;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TransportProtocol {
@@ -96,6 +97,14 @@ impl EgressPolicySpec {
             || self.vpn_endpoints.iter().any(|endpoint| endpoint.port == 0)
         {
             return Err("The VPN endpoint allowlist contains a duplicate or invalid transport tuple.".into());
+        }
+        let planned_filter_count = self
+            .physical_interfaces
+            .len()
+            .checked_mul(self.vpn_endpoints.len() + 2)
+            .ok_or_else(|| "The WFP filter plan size overflowed.".to_string())?;
+        if planned_filter_count > MAX_PLANNED_FILTERS {
+            return Err("The WFP policy exceeds the bounded maximum filter count.".into());
         }
         Ok(())
     }
@@ -204,6 +213,37 @@ mod tests {
             PhysicalInterface { interface_luid: 7, interface_index: 1 },
             PhysicalInterface { interface_luid: 7, interface_index: 2 },
         ];
+        assert!(value.validate().is_err());
+
+        let mut value = spec();
+        value.physical_interfaces = vec![
+            PhysicalInterface { interface_luid: 7, interface_index: 1 },
+            PhysicalInterface { interface_luid: 8, interface_index: 1 },
+        ];
+        assert!(value.validate().is_err());
+
+        let mut value = spec();
+        value.physical_interfaces[0].interface_luid = 0;
+        assert!(value.validate().is_err());
+
+        let mut value = spec();
+        value.physical_interfaces[0].interface_index = 0;
+        assert!(value.validate().is_err());
+
+        let mut value = spec();
+        value.physical_interfaces = (1..=32)
+            .map(|index| PhysicalInterface {
+                interface_luid: index as u64,
+                interface_index: index,
+            })
+            .collect();
+        value.vpn_endpoints = (1..=64)
+            .map(|port| VpnEndpoint {
+                address: "203.0.113.8".parse().unwrap(),
+                port,
+                protocol: TransportProtocol::Udp,
+            })
+            .collect();
         assert!(value.validate().is_err());
 
         let mut value = spec();

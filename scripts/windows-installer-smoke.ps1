@@ -132,9 +132,10 @@ if ($agentSignature.Status -eq "Valid" -and $desktopSignature.Status -eq "Valid"
     if (-not (Test-Path -LiteralPath $journalDirectory -PathType Container)) {
         throw "The protected Agent journal directory was not provisioned."
     }
-    $journalAcl = Get-Acl -LiteralPath $journalDirectory
+    $journalAcl = [System.IO.Directory]::GetAccessControl($journalDirectory)
     if (-not $journalAcl.AreAccessRulesProtected) { throw "The Agent journal directory inherits permissions." }
-    $journalSids = @($journalAcl.Access | ForEach-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value } | Sort-Object -Unique)
+    $journalRules = $journalAcl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])
+    $journalSids = @($journalRules | ForEach-Object { $_.IdentityReference.Value } | Sort-Object -Unique)
     $expectedJournalSids = @("S-1-5-18", "S-1-5-32-544", $sidMatch.Value) | Sort-Object -Unique
     if (Compare-Object -ReferenceObject $expectedJournalSids -DifferenceObject $journalSids) {
         throw "The Agent journal directory ACL is not restricted to SYSTEM, Administrators, and the Agent service SID."

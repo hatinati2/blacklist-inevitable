@@ -127,8 +127,8 @@ jobs:
           $agentSignature = Get-AuthenticodeSignature -LiteralPath $agent
           $stagedAgentSignature = Get-AuthenticodeSignature -LiteralPath $stagedAgent
           $desktopSignature = Get-AuthenticodeSignature -LiteralPath $desktop
-          $thumbprints = @($agentSignature.SignerCertificate.Thumbprint, $stagedAgentSignature.SignerCertificate.Thumbprint, $desktopSignature.SignerCertificate.Thumbprint | Sort-Object -Unique)
-          if ($agentSignature.Status -ne "Valid" -or $stagedAgentSignature.Status -ne "Valid" -or $desktopSignature.Status -ne "Valid" -or $thumbprints.Count -ne 1) {
+          $sameSigner = $agentSignature.SignerCertificate.Thumbprint -eq $stagedAgentSignature.SignerCertificate.Thumbprint -and $agentSignature.SignerCertificate.Thumbprint -eq $desktopSignature.SignerCertificate.Thumbprint
+          if ($agentSignature.Status -ne "Valid" -or $stagedAgentSignature.Status -ne "Valid" -or $desktopSignature.Status -ne "Valid" -or -not $sameSigner) {
             throw "The source Agent, Tauri-staged Agent, and desktop executables must all have valid signatures from the same trusted signer."
           }
 

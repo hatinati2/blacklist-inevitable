@@ -1,4 +1,5 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
@@ -7,6 +8,8 @@ use crate::profiles::ProfileSummary;
 
 pub const AGENT_PROTOCOL_VERSION: u16 = 1;
 pub const MAX_AGENT_REQUEST_BYTES: usize = 128 * 1024;
+pub const AGENT_FRAME_HEADER_BYTES: usize = 4;
+pub const MAX_AGENT_REQUESTS_PER_CONNECTION: usize = 4096;
 const MAX_REQUEST_ID_BYTES: usize = 64;
 const MAX_PROFILE_ID_BYTES: usize = 128;
 const MAX_PROFILE_NAME_BYTES: usize = 256;
@@ -148,6 +151,83 @@ pub fn decode_agent_request(bytes: &[u8]) -> Result<AgentRequest, String> {
         .map_err(|_| "The agent request is not valid protocol JSON.".to_string())?;
     validate_agent_request(&request)?;
     Ok(request)
+}
+
+/// Encode exactly one message for a byte-stream transport such as a Windows
+/// named pipe. The four-byte little-endian prefix is the JSON payload length.
+pub fn encode_agent_frame(request: &AgentRequest) -> Result<Vec<u8>, String> {
+    validate_agent_request(request)?;
+    let payload = serde_json::to_vec(request)
+        .map_err(|_| "The agent request could not be serialized.".to_string())?;
+    if payload.is_empty() || payload.len() > MAX_AGENT_REQUEST_BYTES {
+        return Err("The agent request is empty or exceeds the maximum message size.".to_string());
+    }
+    let length = u32::try_from(payload.len())
+        .map_err(|_| "The agent request exceeds the framing limit.".to_string())?;
+    let mut frame = Vec::with_capacity(AGENT_FRAME_HEADER_BYTES + payload.len());
+    frame.extend_from_slice(&length.to_le_bytes());
+    frame.extend_from_slice(&payload);
+    Ok(frame)
+}
+
+/// Decode one complete frame. A transport must first read exactly the four-byte
+/// header, validate the announced length, then read exactly that payload. This
+/// helper rejects truncated frames, concatenated frames, and trailing bytes.
+pub fn decode_agent_frame(frame: &[u8]) -> Result<AgentRequest, String> {
+    if frame.len() < AGENT_FRAME_HEADER_BYTES {
+        return Err("The agent frame header is incomplete.".to_string());
+    }
+    let announced = u32::from_le_bytes(
+        frame[..AGENT_FRAME_HEADER_BYTES]
+            .try_into()
+            .map_err(|_| "The agent frame header is invalid.".to_string())?,
+    ) as usize;
+    if announced == 0 || announced > MAX_AGENT_REQUEST_BYTES {
+        return Err("The agent frame length is empty or exceeds the maximum message size.".to_string());
+    }
+    let expected = AGENT_FRAME_HEADER_BYTES
+        .checked_add(announced)
+        .ok_or_else(|| "The agent frame length is invalid.".to_string())?;
+    if frame.len() != expected {
+        return Err("The agent frame is truncated or contains trailing data.".to_string());
+    }
+    decode_agent_request(&frame[AGENT_FRAME_HEADER_BYTES..])
+}
+
+/// Tracks request IDs for one authenticated IPC connection. The listener must
+/// create a fresh guard only after authenticating the pipe peer and retain it
+/// until that connection closes. Once the bounded request budget is exhausted,
+/// the connection must be closed rather than evicting IDs and weakening replay
+/// detection. This is not a substitute for Windows pipe ACLs or peer-token checks.
+#[derive(Default)]
+pub struct AgentRequestReplayGuard {
+    request_ids: Mutex<HashSet<String>>,
+}
+
+impl AgentRequestReplayGuard {
+    pub fn accept(&self, request: &AgentRequest) -> Result<(), String> {
+        validate_agent_request(request)?;
+        let mut request_ids = self
+            .request_ids
+            .lock()
+            .map_err(|_| "The agent replay guard is unavailable; the connection must close.".to_string())?;
+
+        if request_ids.contains(&request.request_id) {
+            return Err("The agent request identifier was already used on this connection.".to_string());
+        }
+        if request_ids.len() >= MAX_AGENT_REQUESTS_PER_CONNECTION {
+            return Err("The agent connection reached its request limit and must be closed.".to_string());
+        }
+        request_ids.insert(request.request_id.clone());
+        Ok(())
+    }
+
+    pub fn accepted_count(&self) -> Result<usize, String> {
+        self.request_ids
+            .lock()
+            .map(|request_ids| request_ids.len())
+            .map_err(|_| "The agent replay guard is unavailable.".to_string())
+    }
 }
 
 pub fn validate_agent_request(request: &AgentRequest) -> Result<(), String> {
@@ -412,6 +492,60 @@ mod tests {
         request.request_id = "valid-id".to_string();
         request.operation = AgentOperation::Disconnect { session_id: 0 };
         assert!(validate_agent_request(&request).is_err());
+    }
+
+    #[test]
+    fn frames_round_trip_and_reject_truncation_or_trailing_bytes() {
+        let request = connect_request();
+        let frame = encode_agent_frame(&request).unwrap();
+        assert_eq!(
+            u32::from_le_bytes(frame[..AGENT_FRAME_HEADER_BYTES].try_into().unwrap()) as usize,
+            frame.len() - AGENT_FRAME_HEADER_BYTES
+        );
+        let decoded = decode_agent_frame(&frame).unwrap();
+        assert_eq!(decoded.request_id, request.request_id);
+
+        assert!(decode_agent_frame(&frame[..3]).is_err());
+        assert!(decode_agent_frame(&frame[..frame.len() - 1]).is_err());
+
+        let mut trailing = frame.clone();
+        trailing.push(0);
+        assert!(decode_agent_frame(&trailing).is_err());
+
+        let mut zero_length = vec![0; AGENT_FRAME_HEADER_BYTES];
+        assert!(decode_agent_frame(&zero_length).is_err());
+
+        zero_length.copy_from_slice(&((MAX_AGENT_REQUEST_BYTES as u32) + 1).to_le_bytes());
+        assert!(decode_agent_frame(&zero_length).is_err());
+    }
+
+    #[test]
+    fn replay_guard_rejects_duplicate_ids_and_counts_accepted_requests() {
+        let guard = AgentRequestReplayGuard::default();
+        let request = connect_request();
+        assert_eq!(guard.accepted_count().unwrap(), 0);
+        guard.accept(&request).unwrap();
+        assert_eq!(guard.accepted_count().unwrap(), 1);
+        assert!(guard.accept(&request).unwrap_err().contains("already used"));
+
+        let mut another = connect_request();
+        another.request_id = "request-02".to_string();
+        guard.accept(&another).unwrap();
+        assert_eq!(guard.accepted_count().unwrap(), 2);
+    }
+
+    #[test]
+    fn replay_guard_fails_closed_after_connection_budget() {
+        let guard = AgentRequestReplayGuard::default();
+        for index in 0..MAX_AGENT_REQUESTS_PER_CONNECTION {
+            let mut request = connect_request();
+            request.request_id = format!("req-{index}");
+            guard.accept(&request).unwrap();
+        }
+        let mut over_budget = connect_request();
+        over_budget.request_id = "final-request".to_string();
+        assert!(guard.accept(&over_budget).unwrap_err().contains("request limit"));
+        assert_eq!(guard.accepted_count().unwrap(), MAX_AGENT_REQUESTS_PER_CONNECTION);
     }
 
     #[test]

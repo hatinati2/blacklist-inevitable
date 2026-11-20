@@ -208,9 +208,13 @@ impl RecoveryJournal {
 }
 
 fn validate_guid(value: &str) -> Result<(), String> {
-    uuid::Uuid::parse_str(value)
-        .map(|_| ())
-        .map_err(|_| "The recovery journal contains an invalid Windows GUID.".to_string())
+    let parsed = uuid::Uuid::parse_str(value)
+        .map_err(|_| "The recovery journal contains an invalid Windows GUID.".to_string())?;
+    if parsed.to_string().eq_ignore_ascii_case(value) {
+        Ok(())
+    } else {
+        Err("The recovery journal contains a non-canonical Windows GUID.".to_string())
+    }
 }
 
 fn parse_prefix(value: &str) -> Result<(IpAddr, u8), String> {
@@ -311,8 +315,7 @@ impl RecoveryJournalStore {
             file.sync_all()
                 .map_err(|_| "The recovery journal checkpoint could not be flushed.".to_string())?;
             drop(file);
-            fs::rename(&pending, &destination)
-                .map_err(|_| "The recovery journal checkpoint could not be committed.".to_string())?;
+            commit_pending_file(&pending, &destination)?;
             sync_directory(&self.root)?;
             Ok(())
         })();
@@ -361,7 +364,7 @@ impl RecoveryJournalStore {
             }
             let metadata = fs::symlink_metadata(&path)
                 .map_err(|_| "A recovery journal file could not be inspected.".to_string())?;
-            if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+            if is_reparse_point(&metadata) || !metadata.file_type().is_file() {
                 return Err("A recovery journal entry is not a regular file.".to_string());
             }
             fs::remove_file(&path)
@@ -383,7 +386,7 @@ impl RecoveryJournalStore {
             };
             let metadata = fs::symlink_metadata(&path)
                 .map_err(|_| "A recovery journal file could not be inspected.".to_string())?;
-            if metadata.file_type().is_symlink()
+            if is_reparse_point(&metadata)
                 || !metadata.file_type().is_file()
                 || metadata.len() > MAX_RECOVERY_JOURNAL_BYTES
             {
@@ -425,10 +428,50 @@ impl RecoveryJournalStore {
 fn validate_store_root(root: &Path) -> Result<(), String> {
     let metadata = fs::symlink_metadata(root)
         .map_err(|_| "The privileged recovery journal directory is unavailable.".to_string())?;
-    if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+    if is_reparse_point(&metadata) || !metadata.file_type().is_dir() {
         return Err("The recovery journal root must be a real directory.".to_string());
     }
     Ok(())
+}
+
+fn is_reparse_point(metadata: &fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        metadata.file_attributes()
+            & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT
+            != 0
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+#[cfg(windows)]
+fn commit_pending_file(source: &Path, destination: &Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
+
+    let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+    let destination: Vec<u16> = destination.as_os_str().encode_wide().chain(Some(0)).collect();
+    let moved = unsafe {
+        MoveFileExW(source.as_ptr(), destination.as_ptr(), MOVEFILE_WRITE_THROUGH)
+    };
+    if moved == 0 {
+        Err("The recovery journal checkpoint could not be committed.".to_string())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(windows))]
+fn commit_pending_file(source: &Path, destination: &Path) -> Result<(), String> {
+    fs::rename(source, destination)
+        .map_err(|_| "The recovery journal checkpoint could not be committed.".to_string())
 }
 
 fn journal_file_name(session_id: u64, revision: u64) -> String {
@@ -579,7 +622,7 @@ mod tests {
     }
 
     #[test]
-    fn removes_a_session_only_when_the_caller_confirms_cleanup() {
+    fn removes_a_session_idempotently_and_preserves_other_sessions() {
         let (root, store) = store();
         store.persist(&example_journal(10, 1)).unwrap();
         store.persist(&RecoveryJournal::new(11)).unwrap();

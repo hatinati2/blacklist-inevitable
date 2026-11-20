@@ -237,6 +237,11 @@ function Get-RegisteredBinaryPath($Service) {
             throw "The registered Agent service image path is malformed or contains unexpected arguments: [$rawPath]"
         }
         $binaryPath = $rawPath.Substring(1, $closingQuote - 1)
+    } elseif ([string]::Equals($rawPath, (Get-NormalizedPath $AgentPath), [StringComparison]::OrdinalIgnoreCase)) {
+        # Accept this exact legacy unquoted value only for ownership checks so
+        # an upgrade can repair an older SCM entry. New registrations below
+        # must persist the quoted form exactly.
+        $binaryPath = $rawPath
     } else {
         if ($rawPath.IndexOfAny([char[]]@([char]32, [char]9, [char]34)) -ge 0) {
             throw "The registered Agent service image path is not quoted despite containing whitespace: [$rawPath]"
@@ -437,6 +442,9 @@ function Install-AgentService {
         throw "The Agent service is not configured to run as LocalSystem."
     }
     Write-AgentServiceLog "SCM record image path=[$($current.PathName)]; expected=[$quotedAgentPath]"
+    if (-not [string]::Equals(([string]$current.PathName).Trim(), $quotedAgentPath, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "The SCM did not retain the exact quoted Agent image path. Registered=[$($current.PathName)]; expected=[$quotedAgentPath]."
+    }
     $registeredBinaryPath = Get-RegisteredBinaryPath $current
     if (-not [string]::Equals($registeredBinaryPath, (Get-NormalizedPath $AgentPath), [StringComparison]::OrdinalIgnoreCase)) {
         throw "The Agent service image path mismatch: registered=[$registeredBinaryPath], expected=[$(Get-NormalizedPath $AgentPath)]."

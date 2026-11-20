@@ -10,9 +10,11 @@ A journal records only the resource identities and exact previous settings neede
 - TUN adapter GUID, interface index, alias, MTU, and assigned addresses.
 - Each route state applied by the session and the previous route state, if one existed.
 - DNS mode and server list applied to each interface, plus the previous DHCP/static configuration.
-- WFP provider/layer GUIDs and filter IDs owned by the session.
+- WFP provider/layer GUIDs, stable filter GUIDs when available, and BFE runtime filter IDs owned by the session. The stable filter GUID is the deletion/read-back key; the runtime ID is diagnostic only.
 
 The schema does not contain profile credentials, share links, engine JSON, command lines, executable paths, or arbitrary filesystem paths. All collections and the serialized file size have explicit upper bounds. Unknown fields and unsupported schema versions are rejected.
+
+`FirewallFilterRecord.filterKey` is optional only for compatibility with older version-1 records that predate stable filter-key recording. Newly created WFP filter records must always include a canonical filter GUID. Recovery must never attempt to delete a legacy filter using only its runtime ID; it must enumerate and reconcile exact provider-owned filters or leave policy cleanup unconfirmed.
 
 ## Storage and recovery semantics
 

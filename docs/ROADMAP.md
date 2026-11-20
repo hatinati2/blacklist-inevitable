@@ -68,6 +68,8 @@ Naive import/config mapping is implemented for a bounded subset; remote authenti
 - [ ] Add an explicit Rust-owned Connect / Disconnect state machine.
 - [ ] Add Windows platform integration only for the normal connection path.
 - [ ] Implement a signed, narrowly scoped Windows VPN agent/service so the Tauri UI remains unelevated; add authenticated named-pipe IPC and secure credential handoff.
+- [x] Define destination-based Global and Rule routing; generate Iran-aware Direct rules from geosite-ir/geoip-ir, with foreign traffic using the VPN outbound by default.
+- [ ] Add a Rule/Global mode selector, rule-list management, protected rule-set cache/download, and user-editable domain/IP exceptions to the Windows UI and Agent.
 - [x] Define Windows split-tunnel policy modes (Full Tunnel, Direct Only, Include Selected, Exclude Selected, and per-app Custom VPN/Direct/Block) and map them to sing-box process-path route rules.
 - [ ] Add the split-tunnel policy editor and persistent settings in the Windows UI; enforce process-path matching and DNS behavior in the privileged agent.
 - [ ] Test agent install/upgrade/uninstall, UAC denial, service crash/recovery, and UI-agent IPC authorization.

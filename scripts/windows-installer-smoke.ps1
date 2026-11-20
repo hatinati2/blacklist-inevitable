@@ -1,6 +1,6 @@
 $ErrorActionPreference = "Stop"
 
-$installerDirectory = Join-Path $PSScriptRoot "..\\src-tauri\\target\\release\\bundle\\nsis"
+$installerDirectory = Join-Path $PSScriptRoot "..\src-tauri\target\release\bundle\nsis"
 $installer = Get-ChildItem -Path $installerDirectory -Filter "*.exe" -File |
     Sort-Object LastWriteTime -Descending |
     Select-Object -First 1
@@ -16,14 +16,16 @@ if ($install.ExitCode -ne 0) {
 }
 
 $uninstallRoots = @(
-    "HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
-    "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall"
+    "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall",
+    "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall"
 )
-$entry = foreach ($root in $uninstallRoots) {
-    Get-ChildItem -Path $root -ErrorAction SilentlyContinue |
+$entries = @()
+foreach ($root in $uninstallRoots) {
+    $entries += Get-ChildItem -Path $root -ErrorAction SilentlyContinue |
         ForEach-Object { Get-ItemProperty -Path $_.PSPath -ErrorAction SilentlyContinue } |
         Where-Object { $_.DisplayName -eq "blacklist-inevitable" }
-} | Select-Object -First 1
+}
+$entry = $entries | Select-Object -First 1
 
 if (-not $entry -or -not $entry.UninstallString) {
     throw "The installer did not register an uninstall entry for blacklist-inevitable."
@@ -32,7 +34,7 @@ if (-not $entry -or -not $entry.UninstallString) {
 if ($entry.UninstallString -match '^"([^"]+)"') {
     $uninstallerPath = $Matches[1]
 } else {
-    $uninstallerPath = ($entry.UninstallString -split '\\s+', 2)[0]
+    $uninstallerPath = ($entry.UninstallString -split '\s+', 2)[0]
 }
 
 if (-not (Test-Path -LiteralPath $uninstallerPath -PathType Leaf)) {
@@ -58,7 +60,7 @@ if ($agentSignature.Status -eq "Valid" -and $desktopSignature.Status -eq "Valid"
         throw "The trusted signed package did not install and start the LocalSystem Agent service."
     }
     $serviceRecord = Get-CimInstance -ClassName Win32_Service -Filter "Name='BlacklistInevitableAgent'"
-    if ($serviceRecord.StartName -notin @("LocalSystem", "NT AUTHORITY\\SYSTEM")) {
+    if ($serviceRecord.StartName -notin @("LocalSystem", "NT AUTHORITY\SYSTEM")) {
         throw "The Agent service is not running as LocalSystem."
     }
     if ($serviceRecord.StartMode -ne "Auto") {

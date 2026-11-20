@@ -101,8 +101,9 @@ jobs:
           $destinationHash = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash
           if ($sourceHash -ne $destinationHash) { throw "The packaged sidecar is not byte-identical to the freshly built Agent executable." }
 
-      - name: Build desktop executable for NSIS
-        run: cargo build --locked --release --manifest-path src-tauri/Cargo.toml --bin blacklist-inevitable
+      - name: Build desktop executable for NSIS without bundling
+        # Build once; sign the resulting PE before the separate bundle command.
+        run: npm run tauri -- build --no-bundle
 
       - name: Create trusted CI code-signing certificate
         shell: pwsh
@@ -126,9 +127,9 @@ jobs:
             throw "The CI Agent and desktop executables do not share the same trusted signer."
           }
 
-      - name: Build Windows installer
-        # Tauri otherwise rewrites the already-signed desktop PE binary during bundling.
-        run: npm run tauri -- build --no-binary-patching
+      - name: Bundle Windows installer
+        # Bundle the already-built and signed PE files without recompiling or patching them.
+        run: npm run tauri -- bundle --no-binary-patching
 
       - name: Verify Authenticode signatures after Tauri bundling
         shell: pwsh

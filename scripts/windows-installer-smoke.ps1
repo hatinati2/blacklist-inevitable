@@ -9,10 +9,41 @@ if (-not $installer) {
     throw "No NSIS installer was found in $installerDirectory"
 }
 
+$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$principal = [Security.Principal.WindowsPrincipal]::new($identity)
+$isElevated = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+Write-Host "Installer smoke-test identity: $($identity.Name); elevated administrator token: $isElevated"
+if (-not $isElevated) {
+    throw "The Windows installer smoke test is not running with an elevated administrator token. A per-machine NSIS installer would wait for an unavailable UAC prompt."
+}
+
 Write-Host "Installing $($installer.Name) silently..."
-$install = Start-Process -FilePath $installer.FullName -ArgumentList @("/S") -Wait -PassThru
-if ($install.ExitCode -ne 0) {
-    throw "The NSIS installer exited with code $($install.ExitCode)."
+$installProcess = Start-Process -FilePath $installer.FullName -ArgumentList @("/S") -PassThru
+if (-not $installProcess.WaitForExit(180000)) {
+    $installProcess.Refresh()
+    $installerPid = $installProcess.Id
+    $childProcesses = @(Get-CimInstance -ClassName Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object { $_.ProcessId -eq $installerPid -or $_.ParentProcessId -eq $installerPid } |
+        Select-Object ProcessId, ParentProcessId, Name, CommandLine)
+    $serviceSnapshot = Get-Service -Name "BlacklistInevitableAgent" -ErrorAction SilentlyContinue
+    $serviceRecordSnapshot = Get-CimInstance -ClassName Win32_Service -Filter "Name='BlacklistInevitableAgent'" -ErrorAction SilentlyContinue
+    Write-Host "Installer PID $installerPid did not exit within 180 seconds."
+    Write-Host "Agent service snapshot: $(if ($serviceSnapshot) { $serviceSnapshot.Status } else { 'not registered' })"
+    if ($serviceRecordSnapshot) {
+        Write-Host "Agent service details: State=$($serviceRecordSnapshot.State); StartName=$($serviceRecordSnapshot.StartName); PathName=$($serviceRecordSnapshot.PathName)"
+    }
+    Write-Host ("Installer process tree snapshot: " + ($childProcesses | Format-Table -AutoSize | Out-String))
+    try {
+        $installProcess.Kill($true)
+        [void]$installProcess.WaitForExit(10000)
+    } catch {
+        Write-Warning "Could not terminate the timed-out installer process tree: $_"
+    }
+    throw "The NSIS installer did not exit within 180 seconds. The process and service snapshots above identify where installation stalled."
+}
+$installProcess.Refresh()
+if ($installProcess.ExitCode -ne 0) {
+    throw "The NSIS installer exited with code $($installProcess.ExitCode)."
 }
 
 $uninstallRoots = @(
@@ -117,9 +148,19 @@ finally {
 }
 
 Write-Host "Uninstalling the application silently..."
-$uninstall = Start-Process -FilePath $uninstallerPath -ArgumentList @("/S") -Wait -PassThru
-if ($uninstall.ExitCode -ne 0) {
-    throw "The NSIS uninstaller exited with code $($uninstall.ExitCode)."
+$uninstallProcess = Start-Process -FilePath $uninstallerPath -ArgumentList @("/S") -PassThru
+if (-not $uninstallProcess.WaitForExit(120000)) {
+    try {
+        $uninstallProcess.Kill($true)
+        [void]$uninstallProcess.WaitForExit(10000)
+    } catch {
+        Write-Warning "Could not terminate the timed-out uninstaller process tree: $_"
+    }
+    throw "The NSIS uninstaller did not exit within 120 seconds."
+}
+$uninstallProcess.Refresh()
+if ($uninstallProcess.ExitCode -ne 0) {
+    throw "The NSIS uninstaller exited with code $($uninstallProcess.ExitCode)."
 }
 if (Test-Path -LiteralPath $appPath) {
     throw "The application executable remains after uninstallation: $appPath"

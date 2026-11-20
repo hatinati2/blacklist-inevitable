@@ -453,7 +453,7 @@ mod tests {
             ..DestinationRoutingPolicy::default()
         };
         apply_destination_routing_policy(&mut config, &policy, CACHE_PATH).unwrap();
-        assert_eq!(config["route"]["rules"].len(), 3);
+        assert_eq!(config["route"]["rules"].as_array().map_or(0, |rules| rules.len()), 3);
         assert!(config["route"].get("rule_set").is_none());
         assert!(config["route"]["rules"][1]["ip_is_private"].as_bool().unwrap());
     }

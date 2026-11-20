@@ -115,16 +115,21 @@ jobs:
           $root = Import-Certificate -CertStoreLocation "Cert:\LocalMachine\Root" -FilePath $certificateFile
           if (-not $root) { throw "Could not trust the ephemeral CI code-signing certificate." }
           $agent = "src-tauri/binaries/blacklist-inevitable-agent-x86_64-pc-windows-msvc.exe"
+          # Tauri stages externalBin into target/release under its runtime filename.
+          # The NSIS bundle consumes that staged copy, not the source triple-suffixed file.
+          $stagedAgent = "src-tauri/target/release/blacklist-inevitable-agent.exe"
           $desktop = "src-tauri/target/release/blacklist-inevitable.exe"
-          foreach ($binary in @($agent, $desktop)) {
+          foreach ($binary in @($agent, $stagedAgent, $desktop)) {
             if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) { throw "Missing binary to sign: $binary" }
             $signature = Set-AuthenticodeSignature -FilePath $binary -Certificate $certificate -HashAlgorithm SHA256
             if ($signature.Status -ne "Valid") { throw "Could not create a valid Authenticode signature for $binary (status: $($signature.Status))." }
           }
           $agentSignature = Get-AuthenticodeSignature -LiteralPath $agent
+          $stagedAgentSignature = Get-AuthenticodeSignature -LiteralPath $stagedAgent
           $desktopSignature = Get-AuthenticodeSignature -LiteralPath $desktop
-          if ($agentSignature.Status -ne "Valid" -or $desktopSignature.Status -ne "Valid" -or $agentSignature.SignerCertificate.Thumbprint -ne $desktopSignature.SignerCertificate.Thumbprint) {
-            throw "The CI Agent and desktop executables do not share the same trusted signer."
+          $thumbprints = @($agentSignature.SignerCertificate.Thumbprint, $stagedAgentSignature.SignerCertificate.Thumbprint, $desktopSignature.SignerCertificate.Thumbprint | Sort-Object -Unique)
+          if ($agentSignature.Status -ne "Valid" -or $stagedAgentSignature.Status -ne "Valid" -or $desktopSignature.Status -ne "Valid" -or $thumbprints.Count -ne 1) {
+            throw "The source Agent, Tauri-staged Agent, and desktop executables must all have valid signatures from the same trusted signer."
           }
 
       - name: Bundle Windows installer

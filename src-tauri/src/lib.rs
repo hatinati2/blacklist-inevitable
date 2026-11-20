@@ -2,6 +2,8 @@ use tauri::Manager;
 
 pub mod agent_protocol;
 pub mod agent_service;
+#[cfg(windows)]
+pub mod agent_pipe;
 pub mod connection_state;
 pub mod destination_routing;
 pub mod recovery_journal;

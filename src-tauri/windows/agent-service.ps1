@@ -13,6 +13,180 @@ $DisplayName = "Blacklist Inevitable Agent"
 $JournalDirectory = Join-Path $env:ProgramData "BlacklistInevitable\Agent"
 $ServiceDacl = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;LC;;;IU)"
 
+function Initialize-AuthenticodeVerifier {
+    if ("BlacklistInevitable.AuthenticodeVerifier" -as [type]) { return }
+
+    # Use the Windows Authenticode trust provider directly. This avoids a
+    # dependency on Microsoft.PowerShell.Security, which is not reliably
+    # loadable by the inbox Windows PowerShell host in all deployment contexts.
+    $source = @'
+using System;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography.X509Certificates;
+
+namespace BlacklistInevitable
+{
+    public sealed class AuthenticodeVerificationResult
+    {
+        public int Status { get; set; }
+        public string SignerThumbprint { get; set; }
+    }
+
+    public static class AuthenticodeVerifier
+    {
+        private static readonly Guid GenericVerifyV2 =
+            new Guid("00AAC56B-CD44-11D0-8CC2-00C04FC295EE");
+
+        private const uint WtdUiNone = 2;
+        private const uint WtdRevokeNone = 0;
+        private const uint WtdChoiceFile = 1;
+        private const uint WtdStateActionVerify = 1;
+        private const uint WtdStateActionClose = 2;
+        private const int TrustENoSignature = unchecked((int)0x800B0100);
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct WinTrustFileInfo
+        {
+            public uint cbStruct;
+            public IntPtr pcwszFilePath;
+            public IntPtr hFile;
+            public IntPtr pgKnownSubject;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct WinTrustData
+        {
+            public uint cbStruct;
+            public IntPtr pPolicyCallbackData;
+            public IntPtr pSIPClientData;
+            public uint dwUIChoice;
+            public uint fdwRevocationChecks;
+            public uint dwUnionChoice;
+            public IntPtr pFile;
+            public uint dwStateAction;
+            public IntPtr hWVTStateData;
+            public IntPtr pwszURLReference;
+            public uint dwProvFlags;
+            public uint dwUIContext;
+            public IntPtr pSignatureSettings;
+        }
+
+        [DllImport("wintrust.dll", ExactSpelling = true, PreserveSig = true)]
+        private static extern int WinVerifyTrust(
+            IntPtr hwnd,
+            ref Guid pgActionID,
+            IntPtr pWVTData);
+
+        public static AuthenticodeVerificationResult Verify(string filePath)
+        {
+            if (String.IsNullOrWhiteSpace(filePath))
+                throw new ArgumentException("A file path is required.", "filePath");
+
+            IntPtr nativePath = IntPtr.Zero;
+            IntPtr fileInfoPointer = IntPtr.Zero;
+            IntPtr trustDataPointer = IntPtr.Zero;
+            bool verificationStarted = false;
+            WinTrustData trustData = new WinTrustData();
+
+            try
+            {
+                nativePath = Marshal.StringToHGlobalUni(filePath);
+
+                WinTrustFileInfo fileInfo = new WinTrustFileInfo();
+                fileInfo.cbStruct = (uint)Marshal.SizeOf(typeof(WinTrustFileInfo));
+                fileInfo.pcwszFilePath = nativePath;
+                fileInfo.hFile = IntPtr.Zero;
+                fileInfo.pgKnownSubject = IntPtr.Zero;
+
+                fileInfoPointer = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(WinTrustFileInfo)));
+                Marshal.StructureToPtr(fileInfo, fileInfoPointer, false);
+
+                trustData.cbStruct = (uint)Marshal.SizeOf(typeof(WinTrustData));
+                trustData.pPolicyCallbackData = IntPtr.Zero;
+                trustData.pSIPClientData = IntPtr.Zero;
+                trustData.dwUIChoice = WtdUiNone;
+                trustData.fdwRevocationChecks = WtdRevokeNone;
+                trustData.dwUnionChoice = WtdChoiceFile;
+                trustData.pFile = fileInfoPointer;
+                trustData.dwStateAction = WtdStateActionVerify;
+                trustData.hWVTStateData = IntPtr.Zero;
+                trustData.pwszURLReference = IntPtr.Zero;
+                trustData.dwProvFlags = 0;
+                trustData.dwUIContext = 1;
+                trustData.pSignatureSettings = IntPtr.Zero;
+
+                trustDataPointer = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(WinTrustData)));
+                Marshal.StructureToPtr(trustData, trustDataPointer, false);
+
+                verificationStarted = true;
+                int status = WinVerifyTrust(IntPtr.Zero, ref GenericVerifyV2, trustDataPointer);
+
+                AuthenticodeVerificationResult result = new AuthenticodeVerificationResult();
+                result.Status = status;
+
+                if (status == 0)
+                {
+                    using (X509Certificate certificate = X509Certificate.CreateFromSignedFile(filePath))
+                    using (X509Certificate2 signer = new X509Certificate2(certificate))
+                    {
+                        result.SignerThumbprint = signer.Thumbprint;
+                    }
+                }
+                else if (status == TrustENoSignature)
+                {
+                    result.SignerThumbprint = null;
+                }
+
+                return result;
+            }
+            finally
+            {
+                if (verificationStarted && trustDataPointer != IntPtr.Zero)
+                {
+                    trustData.dwStateAction = WtdStateActionClose;
+                    Marshal.StructureToPtr(trustData, trustDataPointer, false);
+                    WinVerifyTrust(IntPtr.Zero, ref GenericVerifyV2, trustDataPointer);
+                }
+
+                if (trustDataPointer != IntPtr.Zero) Marshal.FreeHGlobal(trustDataPointer);
+                if (fileInfoPointer != IntPtr.Zero) Marshal.FreeHGlobal(fileInfoPointer);
+                if (nativePath != IntPtr.Zero) Marshal.FreeHGlobal(nativePath);
+            }
+        }
+    }
+}
+'@
+
+    Add-Type -TypeDefinition $source -Language CSharp -ErrorAction Stop
+}
+
+function Get-AuthenticodeSignatureInfo([string] $Path) {
+    Initialize-AuthenticodeVerifier
+    $verification = [BlacklistInevitable.AuthenticodeVerifier]::Verify($Path)
+
+    if ($verification.Status -eq 0) {
+        if ([string]::IsNullOrWhiteSpace($verification.SignerThumbprint)) {
+            throw "Windows validated the Authenticode signature but did not return its signer certificate: $Path"
+        }
+        return [pscustomobject]@{
+            Status = "Valid"
+            SignerCertificate = [pscustomobject]@{ Thumbprint = $verification.SignerThumbprint }
+        }
+    }
+
+    if ($verification.Status -eq -2146762496) {
+        return [pscustomobject]@{
+            Status = "NotSigned"
+            SignerCertificate = $null
+        }
+    }
+
+    $statusHex = [BitConverter]::ToUInt32(
+        [BitConverter]::GetBytes([int]$verification.Status), 0
+    ).ToString("X8")
+    throw "Windows Authenticode trust verification failed for '$Path' (WinVerifyTrust status 0x$statusHex)."
+}
+
 if ([string]::IsNullOrWhiteSpace($LogPath)) {
     $LogPath = Join-Path $env:TEMP "BlacklistInevitableAgent-service.log"
 }
@@ -92,8 +266,8 @@ function Test-TrustedPublisherPair {
     if ([string]::IsNullOrWhiteSpace($DesktopPath)) { throw "DesktopPath is required." }
     if (-not (Test-Path -LiteralPath $AgentPath -PathType Leaf)) { throw "The Agent executable is missing: $AgentPath" }
     if (-not (Test-Path -LiteralPath $DesktopPath -PathType Leaf)) { throw "The desktop executable is missing: $DesktopPath" }
-    $agentSignature = Get-AuthenticodeSignature -LiteralPath $AgentPath
-    $desktopSignature = Get-AuthenticodeSignature -LiteralPath $DesktopPath
+    $agentSignature = Get-AuthenticodeSignatureInfo -Path $AgentPath
+    $desktopSignature = Get-AuthenticodeSignatureInfo -Path $DesktopPath
     Write-AgentServiceLog "Signature status: Agent=$($agentSignature.Status); Desktop=$($desktopSignature.Status)"
     if ($agentSignature.Status -eq "NotSigned" -and $desktopSignature.Status -eq "NotSigned") { return $false }
     if ($agentSignature.Status -ne "Valid" -or $desktopSignature.Status -ne "Valid") {

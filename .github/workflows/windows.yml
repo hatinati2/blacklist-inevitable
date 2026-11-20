@@ -127,7 +127,21 @@ jobs:
           }
 
       - name: Build Windows installer
-        run: npm run tauri -- build
+        # Tauri otherwise rewrites the already-signed desktop PE binary during bundling.
+        run: npm run tauri -- build --no-binary-patching
+
+      - name: Verify Authenticode signatures after Tauri bundling
+        shell: pwsh
+        run: |
+          $agent = "src-tauri/binaries/blacklist-inevitable-agent-x86_64-pc-windows-msvc.exe"
+          $desktop = "src-tauri/target/release/blacklist-inevitable.exe"
+          $agentSignature = Get-AuthenticodeSignature -LiteralPath $agent
+          $desktopSignature = Get-AuthenticodeSignature -LiteralPath $desktop
+          if ($agentSignature.Status -ne "Valid") { throw "The Agent signature is not valid after Tauri bundling: $($agentSignature.Status)." }
+          if ($desktopSignature.Status -ne "Valid") { throw "The desktop signature is not valid after Tauri bundling: $($desktopSignature.Status)." }
+          if ($agentSignature.SignerCertificate.Thumbprint -ne $desktopSignature.SignerCertificate.Thumbprint) {
+            throw "Tauri bundling left the Agent and desktop executables with different signers."
+          }
 
       - name: Install, launch, and uninstall smoke test
         shell: pwsh

@@ -267,6 +267,20 @@ fn validate_tun_session_options(options: &TunSessionOptions) -> Result<(), Strin
 /// Build a normal-session TUN configuration. This function only generates
 /// configuration; it does not start sing-box, create an adapter, or change
 /// Windows routes or DNS settings.
+/// Build a normal-session TUN configuration with an explicit per-app routing policy.
+/// This is a pure configuration step; a privileged Windows agent must still own
+/// process detection, the engine lifecycle, and the route/DNS transaction.
+pub fn build_tun_session_config_with_policy(
+    profile: &ProfileSummary,
+    credentials: &BTreeMap<String, String>,
+    options: &TunSessionOptions,
+    policy: &crate::split_tunnel::SplitTunnelPolicy,
+) -> Result<Value, String> {
+    let mut config = build_tun_session_config(profile, credentials, options)?;
+    crate::split_tunnel::apply_split_tunnel_policy(&mut config, policy)?;
+    Ok(config)
+}
+
 pub fn build_tun_session_config(
     profile: &ProfileSummary,
     credentials: &BTreeMap<String, String>,
@@ -756,6 +770,77 @@ mod tests {
             "sing-box v{SING_BOX_VERSION} rejected generated TUN config: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    #[test]
+    fn validates_all_split_tunnel_modes_with_pinned_sing_box_binary() {
+        use crate::split_tunnel::{
+            ApplicationRoute, SplitTunnelApplication, SplitTunnelMode, SplitTunnelPolicy,
+        };
+
+        let Ok(binary) = std::env::var("SING_BOX_VALIDATOR") else {
+            return;
+        };
+        let profile = sample_profile("trojan");
+        let credentials = BTreeMap::from([("password".to_string(), "test-only-secret".to_string())]);
+        let discord = SplitTunnelApplication {
+            executable_path: r"C:\Apps\Discord\Discord.exe".to_string(),
+            action: ApplicationRoute::Vpn,
+        };
+        let telegram = SplitTunnelApplication {
+            executable_path: r"C:\Apps\Telegram\Telegram.exe".to_string(),
+            action: ApplicationRoute::Direct,
+        };
+        let restricted = SplitTunnelApplication {
+            executable_path: r"C:\Tools\Restricted.exe".to_string(),
+            action: ApplicationRoute::Block,
+        };
+        let policies = vec![
+            SplitTunnelPolicy::default(),
+            SplitTunnelPolicy { mode: SplitTunnelMode::DirectOnly, ..SplitTunnelPolicy::default() },
+            SplitTunnelPolicy {
+                mode: SplitTunnelMode::IncludeSelected,
+                applications: vec![discord.clone()],
+                ..SplitTunnelPolicy::default()
+            },
+            SplitTunnelPolicy {
+                mode: SplitTunnelMode::ExcludeSelected,
+                applications: vec![discord.clone()],
+                ..SplitTunnelPolicy::default()
+            },
+            SplitTunnelPolicy {
+                mode: SplitTunnelMode::Custom,
+                default_route: ApplicationRoute::Direct,
+                applications: vec![discord, telegram, restricted],
+            },
+        ];
+
+        let directory = std::env::temp_dir()
+            .join(format!("blacklist-split-tunnel-configs-{}", Uuid::new_v4()));
+        fs::create_dir_all(&directory).expect("create temporary split-tunnel config directory");
+        for (index, policy) in policies.iter().enumerate() {
+            let config = build_tun_session_config_with_policy(
+                &profile, &credentials, &sample_tun_options(), policy,
+            ).expect("generate split-tunnel TUN config");
+            let config_path = directory.join(format!("split-{index}.json"));
+            fs::write(
+                &config_path,
+                serde_json::to_vec(&config).expect("serialize split-tunnel config"),
+            ).expect("write split-tunnel config");
+            let output = std::process::Command::new(&binary)
+                .arg("check")
+                .arg("-c")
+                .arg(&config_path)
+                .output()
+                .expect("run pinned sing-box config validator");
+            assert!(
+                output.status.success(),
+                "sing-box v{SING_BOX_VERSION} rejected split-tunnel mode {:?}: {}",
+                policy.mode,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let _ = fs::remove_dir_all(&directory);
     }
 
     #[test]

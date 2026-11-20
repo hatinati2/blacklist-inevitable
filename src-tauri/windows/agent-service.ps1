@@ -88,14 +88,22 @@ function Test-TrustedPublisherPair {
     }
     return $true
 }
-function Set-JournalDirectoryAcl([string] $ServiceSid) {
-    [void][IO.Directory]::CreateDirectory($JournalDirectory)
-    $acl = Get-Acl -LiteralPath $JournalDirectory
-    $acl.SetAccessRuleProtection($true, $false)
-    foreach ($existingRule in @($acl.Access)) { [void]$acl.RemoveAccessRuleSpecific($existingRule) }
+function Set-ProtectedDirectoryAcl([string] $Path, [string[]] $AllowedSids) {
+    [void][IO.Directory]::CreateDirectory($Path)
+    $directory = Get-Item -LiteralPath $Path -Force
+    if (($directory.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Refusing to use a reparse point for protected Agent data: $Path"
+    }
 
-    $allowedSids = @("S-1-5-18", "S-1-5-32-544", $ServiceSid)
-    foreach ($sidText in $allowedSids) {
+    $acl = Get-Acl -LiteralPath $Path
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($existingRule in @($acl.Access)) {
+        [void]$acl.RemoveAccessRuleSpecific($existingRule)
+    }
+
+    $adminSid = [Security.Principal.SecurityIdentifier]::new("S-1-5-32-544")
+    $acl.SetOwner($adminSid)
+    foreach ($sidText in $AllowedSids) {
         $sid = [Security.Principal.SecurityIdentifier]::new($sidText)
         $inheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit
         $rule = [Security.AccessControl.FileSystemAccessRule]::new(
@@ -107,19 +115,31 @@ function Set-JournalDirectoryAcl([string] $ServiceSid) {
         )
         $acl.AddAccessRule($rule)
     }
-    Set-Acl -LiteralPath $JournalDirectory -AclObject $acl
+    Set-Acl -LiteralPath $Path -AclObject $acl
 
-    $verified = Get-Acl -LiteralPath $JournalDirectory
-    if (-not $verified.AreAccessRulesProtected) { throw "The Agent journal directory is still inheriting permissions." }
+    $verified = Get-Acl -LiteralPath $Path
+    if (-not $verified.AreAccessRulesProtected) {
+        throw "The protected Agent directory is still inheriting permissions: $Path"
+    }
     $actualSids = @($verified.Access | ForEach-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value } | Sort-Object -Unique)
-    $expectedSids = @($allowedSids | Sort-Object -Unique)
+    $expectedSids = @($AllowedSids | Sort-Object -Unique)
     if (Compare-Object -ReferenceObject $expectedSids -DifferenceObject $actualSids) {
-        throw "The Agent journal directory ACL contains an unexpected or missing principal."
+        throw "The protected Agent directory ACL contains an unexpected or missing principal: $Path"
     }
     if (@($verified.Access | Where-Object { $_.AccessControlType -ne "Allow" -or $_.FileSystemRights -ne [Security.AccessControl.FileSystemRights]::FullControl }).Count -ne 0) {
-        throw "The Agent journal directory ACL contains a non-full-control or deny entry."
+        throw "The protected Agent directory ACL contains a non-full-control or deny entry: $Path"
+    }
+    if ($verified.Owner.Translate([Security.Principal.SecurityIdentifier]).Value -ne $adminSid.Value) {
+        throw "The protected Agent directory owner is not BUILTIN\\Administrators: $Path"
     }
 }
+
+function Set-JournalDirectoryAcl([string] $ServiceSid) {
+    $parentDirectory = Split-Path -Parent $JournalDirectory
+    Set-ProtectedDirectoryAcl $parentDirectory @("S-1-5-18", "S-1-5-32-544")
+    Set-ProtectedDirectoryAcl $JournalDirectory @("S-1-5-18", "S-1-5-32-544", $ServiceSid)
+}
+
 function Install-AgentService {
     $trusted = Test-TrustedPublisherPair
     $service = Get-ServiceRecord

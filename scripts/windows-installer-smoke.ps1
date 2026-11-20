@@ -1,5 +1,8 @@
 $ErrorActionPreference = "Stop"
 
+$agentServiceLog = Join-Path $env:TEMP "BlacklistInevitableAgent-service.log"
+Remove-Item -LiteralPath $agentServiceLog -Force -ErrorAction SilentlyContinue
+
 $installerDirectory = Join-Path $PSScriptRoot "..\src-tauri\target\release\bundle\nsis"
 $installer = Get-ChildItem -Path $installerDirectory -Filter "*.exe" -File |
     Sort-Object LastWriteTime -Descending |
@@ -27,12 +30,21 @@ if (-not $installProcess.WaitForExit(180000)) {
         Select-Object ProcessId, ParentProcessId, Name, CommandLine)
     $serviceSnapshot = Get-Service -Name "BlacklistInevitableAgent" -ErrorAction SilentlyContinue
     $serviceRecordSnapshot = Get-CimInstance -ClassName Win32_Service -Filter "Name='BlacklistInevitableAgent'" -ErrorAction SilentlyContinue
+    $installerWindow = Get-Process -Id $installerPid -ErrorAction SilentlyContinue |
+        Select-Object Id, MainWindowHandle, MainWindowTitle, Responding, StartTime
     Write-Host "Installer PID $installerPid did not exit within 180 seconds."
+    Write-Host ("Installer window snapshot: " + ($installerWindow | Format-List | Out-String))
     Write-Host "Agent service snapshot: $(if ($serviceSnapshot) { $serviceSnapshot.Status } else { 'not registered' })"
     if ($serviceRecordSnapshot) {
         Write-Host "Agent service details: State=$($serviceRecordSnapshot.State); StartName=$($serviceRecordSnapshot.StartName); PathName=$($serviceRecordSnapshot.PathName)"
     }
     Write-Host ("Installer process tree snapshot: " + ($childProcesses | Format-Table -AutoSize | Out-String))
+    if (Test-Path -LiteralPath $agentServiceLog) {
+        Write-Host "Agent helper diagnostic log:"
+        Get-Content -LiteralPath $agentServiceLog -Tail 200 | ForEach-Object { Write-Host $_ }
+    } else {
+        Write-Host "Agent helper diagnostic log was not created; installer may have stalled before invoking the PowerShell helper."
+    }
     try {
         $installProcess.Kill($true)
         [void]$installProcess.WaitForExit(10000)
@@ -43,6 +55,10 @@ if (-not $installProcess.WaitForExit(180000)) {
 }
 $installProcess.Refresh()
 if ($installProcess.ExitCode -ne 0) {
+    if (Test-Path -LiteralPath $agentServiceLog) {
+        Write-Host "Agent helper diagnostic log:"
+        Get-Content -LiteralPath $agentServiceLog -Tail 200 | ForEach-Object { Write-Host $_ }
+    }
     throw "The NSIS installer exited with code $($installProcess.ExitCode)."
 }
 

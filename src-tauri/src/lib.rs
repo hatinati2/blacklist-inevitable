@@ -5,6 +5,8 @@ pub mod connection_state;
 pub mod destination_routing;
 pub mod recovery_journal;
 pub mod wfp_policy;
+#[cfg(windows)]
+pub mod wfp_engine;
 pub mod split_tunnel;
 mod commands;
 mod engine;

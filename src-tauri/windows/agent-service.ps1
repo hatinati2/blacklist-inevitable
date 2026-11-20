@@ -158,7 +158,23 @@ namespace BlacklistInevitable
 }
 '@
 
-    Add-Type -TypeDefinition $source -Language CSharp -ErrorAction Stop
+    # NSIS invokes this helper from its temporary extraction directory. Pin
+    # System.dll to the active .NET Framework runtime so a same-named NSIS
+    # plugin or temporary file cannot shadow the framework assembly.
+    $runtimeDirectory = [Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory()
+    $systemAssembly = Join-Path $runtimeDirectory "System.dll"
+    if (-not (Test-Path -LiteralPath $systemAssembly -PathType Leaf)) {
+        throw "The .NET Framework System.dll was not found: $systemAssembly"
+    }
+
+    # Use an explicit compiler reference list. Add-Type's default simple-name
+    # System.dll reference can otherwise resolve against NSIS's current folder.
+    $compilerParameters = New-Object System.CodeDom.Compiler.CompilerParameters
+    $compilerParameters.GenerateInMemory = $true
+    $compilerParameters.GenerateExecutable = $false
+    [void]$compilerParameters.ReferencedAssemblies.Add($systemAssembly)
+
+    Add-Type -TypeDefinition $source -Language CSharp -CompilerParameters $compilerParameters -ErrorAction Stop
 }
 
 function Get-AuthenticodeSignatureInfo([string] $Path) {

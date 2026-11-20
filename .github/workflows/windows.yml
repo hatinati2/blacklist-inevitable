@@ -40,6 +40,15 @@ jobs:
       - name: Verify Tauri Windows CLI binding
         run: npm ls @tauri-apps/cli @tauri-apps/cli-win32-x64-msvc
 
+      - name: Bootstrap external binary path for Rust build scripts
+        shell: pwsh
+        run: |
+          $destinationDirectory = "src-tauri/binaries"
+          $destination = Join-Path $destinationDirectory "blacklist-inevitable-agent-x86_64-pc-windows-msvc.exe"
+          New-Item -ItemType Directory -Path $destinationDirectory -Force | Out-Null
+          Copy-Item -LiteralPath "$env:SystemRoot\\System32\\where.exe" -Destination $destination -Force
+          if (-not (Test-Path -LiteralPath $destination -PathType Leaf)) { throw "Could not bootstrap the external binary path required by tauri-build." }
+
       - name: Download and verify pinned sing-box config validator
         shell: pwsh
         run: |
@@ -91,6 +100,9 @@ jobs:
           New-Item -ItemType Directory -Path $destinationDirectory -Force | Out-Null
           Copy-Item -LiteralPath $source -Destination $destination -Force
           if (-not (Test-Path -LiteralPath $destination -PathType Leaf)) { throw "The Agent sidecar could not be staged for Tauri." }
+          $sourceHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
+          $destinationHash = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash
+          if ($sourceHash -ne $destinationHash) { throw "The packaged sidecar is not byte-identical to the freshly built Agent executable." }
 
       - name: Create trusted CI code-signing certificate
         shell: pwsh

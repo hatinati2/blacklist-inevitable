@@ -56,10 +56,7 @@ uninstallation.
 
 ## Signing boundary
 
-The installer currently checks that both executable signatures are valid in
-the local Windows Authenticode trust context and that both files have the same
-signer certificate thumbprint. This prevents the installer from pairing an
-unsigned Agent with a signed desktop binary or with a different signer.
+The installer validates each executable with the Windows Authenticode trust provider (`WinVerifyTrust` / `WINTRUST_ACTION_GENERIC_VERIFY_V2`) and requires both files to have the same signer certificate thumbprint. This verifies the signed file against the local Windows trust policy without depending on the optional `Microsoft.PowerShell.Security` module. An unsigned pair is distinguished only by the explicit `TRUST_E_NOSIGNATURE` result; any other trust failure aborts privileged service installation.
 
 This is not yet a pinned publisher allow-list. Before public distribution,
 release signing must use a stable publisher certificate, the expected
@@ -98,3 +95,4 @@ Recover remain rejected, and no WFP/TUN/route/DNS operation is enabled.
 - [Tauri external binaries configuration](https://v2.tauri.app/reference/config/)
 - [Microsoft: WTSQueryUserToken](https://learn.microsoft.com/en-us/windows/win32/api/wtsapi32/nf-wtsapi32-wtsqueryusertoken)
 - [Microsoft: configuring services with SC.exe](https://learn.microsoft.com/en-us/windows/win32/services/configuring-a-service-using-sc)
+- [Microsoft: WinVerifyTrust and Authenticode verification](https://learn.microsoft.com/en-us/windows/win32/api/wintrust/nf-wintrust-winverifytrust)

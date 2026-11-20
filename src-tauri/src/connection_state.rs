@@ -25,6 +25,67 @@ pub struct ConnectionSnapshot {
     pub cleanup_healthy: bool,
 }
 
+/// Evidence the privileged Agent must gather from the operating system before
+/// it may report a VPN session as Connected. This is an internal trust-boundary
+/// contract, not data that may be accepted from the unelevated UI over IPC.
+///
+/// Every field must be set only after checking the corresponding live OS state.
+/// In particular, sing-box strict-route filters alone do not satisfy the
+/// Agent-owned WFP policy requirements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct NetworkVerification {
+    pub engine_job_contained: bool,
+    pub tunnel_interface_verified: bool,
+    pub ipv4_default_route_verified: bool,
+    /// IPv6 is routed through the TUN, or explicitly blocked on every physical NIC.
+    pub ipv6_tunneled_or_blocked: bool,
+    pub encrypted_dns_path_verified: bool,
+    /// A hostname bootstrap used authenticated encrypted DNS, or the endpoint
+    /// was supplied as a validated numeric address; no system-DNS fallback.
+    pub encrypted_endpoint_bootstrap_verified: bool,
+    /// Selected routing/split-tunnel policy has no unintended Direct exceptions.
+    pub routing_policy_compatible_with_leak_mode: bool,
+    /// Independent Agent-owned WFP egress filters are present and active.
+    pub agent_wfp_egress_policy_active: bool,
+    /// WFP provider, sublayer and filters use a tested persistent/recovery design.
+    pub agent_wfp_policy_persistence_verified: bool,
+    /// Physical-interface leak probes found no user-data egress outside the allowlist.
+    pub physical_egress_leak_probe_passed: bool,
+}
+
+impl NetworkVerification {
+    pub fn missing_requirements(&self) -> Vec<&'static str> {
+        let checks = [
+            (self.engine_job_contained, "engine Job Object containment"),
+            (self.tunnel_interface_verified, "TUN interface identity and addresses"),
+            (self.ipv4_default_route_verified, "IPv4 default route"),
+            (self.ipv6_tunneled_or_blocked, "IPv6 tunnel route or physical-egress block"),
+            (self.encrypted_dns_path_verified, "in-tunnel encrypted DNS path"),
+            (self.encrypted_endpoint_bootstrap_verified, "encrypted VPN endpoint bootstrap"),
+            (self.routing_policy_compatible_with_leak_mode, "routing policy compatible with leak-prevention mode"),
+            (self.agent_wfp_egress_policy_active, "independent Agent-owned WFP egress policy"),
+            (self.agent_wfp_policy_persistence_verified, "persistent WFP policy and recovery behavior"),
+            (self.physical_egress_leak_probe_passed, "physical-interface egress leak probes"),
+        ];
+        checks
+            .into_iter()
+            .filter_map(|(passed, name)| (!passed).then_some(name))
+            .collect()
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        let missing = self.missing_requirements();
+        if missing.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "Cannot report Connected; required security verification is missing: {}.",
+                missing.join(", ")
+            ))
+        }
+    }
+}
+
 struct Inner {
     snapshot: ConnectionSnapshot,
     next_session_id: u64,
@@ -127,9 +188,15 @@ impl ConnectionCoordinator {
         )
     }
 
-    /// This transition is only valid after the caller has independently
-    /// verified the tunnel interface, routes, DNS path, and required policy.
-    pub fn network_verified(&self, session_id: u64) -> Result<(), String> {
+    /// This transition is allowed only when the privileged Agent supplies
+    /// positive evidence for every traffic-safety requirement. Never construct
+    /// this proof from UI/IPC-provided booleans.
+    pub fn network_verified(
+        &self,
+        session_id: u64,
+        verification: NetworkVerification,
+    ) -> Result<(), String> {
+        verification.validate()?;
         self.transition(
             session_id,
             ConnectionPhase::ConfiguringNetwork,
@@ -321,13 +388,74 @@ fn ensure_session(snapshot: &ConnectionSnapshot, session_id: u64) -> Result<(), 
 mod tests {
     use super::*;
 
+    fn complete_network_verification() -> NetworkVerification {
+        NetworkVerification {
+            engine_job_contained: true,
+            tunnel_interface_verified: true,
+            ipv4_default_route_verified: true,
+            ipv6_tunneled_or_blocked: true,
+            encrypted_dns_path_verified: true,
+            encrypted_endpoint_bootstrap_verified: true,
+            routing_policy_compatible_with_leak_mode: true,
+            agent_wfp_egress_policy_active: true,
+            agent_wfp_policy_persistence_verified: true,
+            physical_egress_leak_probe_passed: true,
+        }
+    }
+
+    #[test]
+    fn refuses_connected_when_any_security_requirement_is_missing() {
+        let cases: Vec<(&str, fn(&mut NetworkVerification))> = vec![
+            ("engine Job Object containment", |v| v.engine_job_contained = false),
+            ("TUN interface identity and addresses", |v| v.tunnel_interface_verified = false),
+            ("IPv4 default route", |v| v.ipv4_default_route_verified = false),
+            ("IPv6 tunnel route or physical-egress block", |v| v.ipv6_tunneled_or_blocked = false),
+            ("in-tunnel encrypted DNS path", |v| v.encrypted_dns_path_verified = false),
+            ("encrypted VPN endpoint bootstrap", |v| v.encrypted_endpoint_bootstrap_verified = false),
+            ("routing policy compatible with leak-prevention mode", |v| v.routing_policy_compatible_with_leak_mode = false),
+            ("independent Agent-owned WFP egress policy", |v| v.agent_wfp_egress_policy_active = false),
+            ("persistent WFP policy and recovery behavior", |v| v.agent_wfp_policy_persistence_verified = false),
+            ("physical-interface egress leak probes", |v| v.physical_egress_leak_probe_passed = false),
+        ];
+
+        for (expected, disable_check) in cases {
+            let mut verification = complete_network_verification();
+            disable_check(&mut verification);
+            let error = verification.validate().unwrap_err();
+            assert!(error.contains(expected), "missing {expected}: {error}");
+        }
+    }
+
+    #[test]
+    fn invalid_security_proof_cannot_advance_connection_to_connected() {
+        let coordinator = ConnectionCoordinator::new();
+        let session = coordinator.begin_connect("profile-1").unwrap();
+        coordinator.begin_engine(session).unwrap();
+        coordinator.engine_ready(session).unwrap();
+
+        assert!(coordinator
+            .network_verified(session, NetworkVerification::default())
+            .is_err());
+        assert_eq!(
+            coordinator.snapshot().phase,
+            ConnectionPhase::ConfiguringNetwork
+        );
+
+        coordinator
+            .network_verified(session, complete_network_verification())
+            .unwrap();
+        assert_eq!(coordinator.snapshot().phase, ConnectionPhase::Connected);
+    }
+
     #[test]
     fn accepts_only_the_ordered_connect_path() {
         let coordinator = ConnectionCoordinator::new();
         let session = coordinator.begin_connect("profile-1").unwrap();
 
         assert_eq!(coordinator.snapshot().phase, ConnectionPhase::Preparing);
-        assert!(coordinator.network_verified(session).is_err());
+        assert!(coordinator
+            .network_verified(session, NetworkVerification::default())
+            .is_err());
 
         coordinator.begin_engine(session).unwrap();
         assert_eq!(
@@ -341,7 +469,9 @@ mod tests {
             ConnectionPhase::ConfiguringNetwork
         );
 
-        coordinator.network_verified(session).unwrap();
+        coordinator
+            .network_verified(session, complete_network_verification())
+            .unwrap();
         assert_eq!(coordinator.snapshot().phase, ConnectionPhase::Connected);
     }
 

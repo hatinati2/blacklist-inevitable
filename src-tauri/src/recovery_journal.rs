@@ -200,19 +200,19 @@ impl RecoveryJournal {
         if self.firewall_filters.len() > MAX_FIREWALL_FILTERS {
             return Err("The recovery journal contains too many firewall filter identities.".to_string());
         }
-        let mut filters = BTreeSet::new();
+        let mut filter_ids = BTreeSet::new();
         let mut filter_keys = BTreeSet::new();
         for filter in &self.firewall_filters {
             validate_guid(&filter.provider_key)?;
             validate_guid(&filter.layer_key)?;
             if let Some(filter_key) = &filter.filter_key {
                 validate_guid(filter_key)?;
-                if !filter_keys.insert((filter.provider_key.as_str(), filter_key.as_str())) {
+                if !filter_keys.insert(filter_key.as_str()) {
                     return Err("The recovery journal contains a duplicate stable firewall filter key.".to_string());
                 }
             }
-            if filter.filter_id == 0 || !filters.insert((filter.provider_key.as_str(), filter.filter_id)) {
-                return Err("The recovery journal contains an invalid or duplicate firewall filter.".to_string());
+            if filter.filter_id == 0 || !filter_ids.insert(filter.filter_id) {
+                return Err("The recovery journal contains an invalid or duplicate firewall filter ID.".to_string());
             }
         }
         Ok(())

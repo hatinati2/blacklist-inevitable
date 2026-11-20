@@ -90,6 +90,17 @@ fn expected_condition_key(value: ExpectedCondition) -> GUID {
 }
 
 #[cfg(windows)]
+fn wfp_layer_guid(layer: crate::wfp_policy::WfpLayer) -> GUID {
+    use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::{
+        FWPM_LAYER_ALE_AUTH_CONNECT_V4, FWPM_LAYER_ALE_AUTH_CONNECT_V6,
+    };
+    match layer {
+        crate::wfp_policy::WfpLayer::AleAuthConnectV4 => FWPM_LAYER_ALE_AUTH_CONNECT_V4,
+        crate::wfp_policy::WfpLayer::AleAuthConnectV6 => FWPM_LAYER_ALE_AUTH_CONNECT_V6,
+    }
+}
+
+#[cfg(windows)]
 pub struct WfpEngine {
     handle: windows_sys::Win32::Foundation::HANDLE,
 }

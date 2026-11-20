@@ -77,6 +77,10 @@ Naive import/config mapping is implemented for a bounded subset; remote authenti
 - [ ] Test repeated connect / disconnect, crashes, sleep / resume, and shutdown.
 - [ ] Block normal Connect if prior runtime cleanup is uncertain.
 - [ ] Verify DNS handling and traffic routing without leaking traffic outside the selected tunnel.
+- [ ] Implement Agent-owned WFP physical-egress kill switch independent of sing-box's dynamic strict-route filters; retain protection across engine failure and define Agent-crash/reboot persistence and recovery.
+- [ ] Implement encrypted VPN-endpoint DNS bootstrap with no system-DNS/plaintext fallback; keep in-session DoH on the VPN path.
+- [ ] Add a Strict Privacy mode that forbids incompatible Direct destination and per-app bypass exceptions; clearly label other modes that intentionally permit physical egress.
+- [ ] Verify IPv4/IPv6 routing, DNS/DoT/DoQ/DoH, local discovery and all non-tunnel egress with Windows 10/11 physical-adapter packet captures across connect/disconnect/crash/recovery/network-change cases.
 
 ## M5 — Windows release gate
 

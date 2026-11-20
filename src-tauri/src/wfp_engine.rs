@@ -312,7 +312,8 @@ impl WfpEngine {
                 };
                 let remote_condition = match endpoint.address {
                     std::net::IpAddr::V4(address) => {
-                        remote_v4.addr = u32::from_be_bytes(address.octets());
+                        // FWPM_CONDITION_IP_REMOTE_ADDRESS expects FWP_V4_ADDR_AND_MASK in host order.
+                        remote_v4.addr = u32::from_ne_bytes(address.octets());
                         let value = ExpectedCondition::RemoteIpv4 {
                             address: remote_v4.addr,
                             mask: remote_v4.mask,

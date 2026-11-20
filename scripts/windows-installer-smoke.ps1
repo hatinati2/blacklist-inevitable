@@ -131,4 +131,25 @@ if (Get-Service -Name "BlacklistInevitableAgent" -ErrorAction SilentlyContinue) 
     throw "The Agent Windows service remains registered after uninstallation."
 }
 
+
+$unsignedProbeDirectory = Join-Path $env:RUNNER_TEMP "blacklist-inevitable-unsigned-agent-probe"
+New-Item -ItemType Directory -Path $unsignedProbeDirectory -Force | Out-Null
+$unsignedAgent = Join-Path $unsignedProbeDirectory "agent.exe"
+$unsignedDesktop = Join-Path $unsignedProbeDirectory "desktop.exe"
+Add-Type -TypeDefinition "namespace BlacklistInevitableUnsignedAgentProbe { public static class Program { public static void Main() {} } }" -OutputAssembly $unsignedAgent -OutputType ConsoleApplication
+Add-Type -TypeDefinition "namespace BlacklistInevitableUnsignedDesktopProbe { public static class Program { public static void Main() {} } }" -OutputAssembly $unsignedDesktop -OutputType ConsoleApplication
+if ((Get-AuthenticodeSignature -LiteralPath $unsignedAgent).Status -ne "NotSigned" -or
+    (Get-AuthenticodeSignature -LiteralPath $unsignedDesktop).Status -ne "NotSigned") {
+    throw "The unsigned service-policy probe binaries unexpectedly have Authenticode signatures."
+}
+$serviceHelper = Join-Path $PSScriptRoot "..\\src-tauri\\windows\\agent-service.ps1"
+& "$env:SystemRoot\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $serviceHelper -Mode Install -AgentPath $unsignedAgent -DesktopPath $unsignedDesktop
+if ($LASTEXITCODE -ne 10) {
+    throw "The unsigned Agent installation policy returned $LASTEXITCODE instead of the explicit skip code 10."
+}
+if (Get-Service -Name "BlacklistInevitableAgent" -ErrorAction SilentlyContinue) {
+    throw "The unsigned service-policy probe registered a privileged Windows service."
+}
+Remove-Item -LiteralPath $unsignedProbeDirectory -Recurse -Force
+
 Write-Host "Windows installer smoke test passed: install, launch, service lifecycle, and uninstall."

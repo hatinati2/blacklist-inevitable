@@ -96,11 +96,12 @@ function Set-JournalDirectoryAcl([string] $ServiceSid) {
 
     $allowedSids = @("S-1-5-18", "S-1-5-32-544", $ServiceSid)
     foreach ($sidText in $allowedSids) {
-        $sid = New-Object Security.Principal.SecurityIdentifier($sidText)
-        $rule = New-Object Security.AccessControl.FileSystemAccessRule(
+        $sid = [Security.Principal.SecurityIdentifier]::new($sidText)
+        $inheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit
+        $rule = [Security.AccessControl.FileSystemAccessRule]::new(
             $sid,
             [Security.AccessControl.FileSystemRights]::FullControl,
-            ([Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit),
+            $inheritance,
             [Security.AccessControl.PropagationFlags]::None,
             [Security.AccessControl.AccessControlType]::Allow
         )
@@ -171,7 +172,12 @@ function Remove-AgentService {
 }
 function Prepare-AgentUpgrade {
     $service = Get-ServiceRecord
-    if ($service) { Stop-OwnedService }
+    if ($service) {
+        Stop-OwnedService
+        # Keep the service disabled throughout file replacement. A failed or
+        # interrupted upgrade must never auto-start a partially replaced binary.
+        Invoke-Sc @("config", $ServiceName, "start=", "disabled")
+    }
 }
 
 try {

@@ -87,9 +87,6 @@ jobs:
       - name: Build dedicated Windows Agent service host
         run: cargo build --locked --release --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc --bin blacklist-inevitable-agent
 
-      - name: Build desktop executable for NSIS
-        run: cargo build --locked --release --manifest-path src-tauri/Cargo.toml --bin blacklist-inevitable
-
       - name: Stage Agent sidecar for NSIS
         shell: pwsh
         run: |
@@ -103,6 +100,9 @@ jobs:
           $sourceHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
           $destinationHash = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash
           if ($sourceHash -ne $destinationHash) { throw "The packaged sidecar is not byte-identical to the freshly built Agent executable." }
+
+      - name: Build desktop executable for NSIS
+        run: cargo build --locked --release --manifest-path src-tauri/Cargo.toml --bin blacklist-inevitable
 
       - name: Create trusted CI code-signing certificate
         shell: pwsh

@@ -4,13 +4,26 @@ param(
     [string] $Mode,
     [Parameter(Mandatory = $true)]
     [string] $AgentPath,
-    [string] $DesktopPath
+    [string] $DesktopPath,
+    [string] $LogPath
 )
 $ErrorActionPreference = "Stop"
 $ServiceName = "BlacklistInevitableAgent"
 $DisplayName = "Blacklist Inevitable Agent"
 $JournalDirectory = Join-Path $env:ProgramData "BlacklistInevitable\Agent"
 $ServiceDacl = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;LC;;;IU)"
+
+if ([string]::IsNullOrWhiteSpace($LogPath)) {
+    $LogPath = Join-Path $env:TEMP "BlacklistInevitableAgent-service.log"
+}
+$script:AgentServiceLogPath = $LogPath
+function Write-AgentServiceLog([string] $Message) {
+    try {
+        Add-Content -LiteralPath $script:AgentServiceLogPath -Value ("{0:o} {1}" -f [DateTime]::UtcNow, $Message) -Encoding UTF8
+    } catch {
+        # Diagnostics must never change the service security decision.
+    }
+}
 
 function Assert-Elevated {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -40,9 +53,13 @@ function Assert-OwnedService($Service) {
     }
 }
 function Invoke-Sc([string[]] $Arguments) {
-    & "$env:SystemRoot\System32\sc.exe" @Arguments
-    if ($LASTEXITCODE -ne 0) {
-        throw "sc.exe $($Arguments -join ' ') failed with exit code $LASTEXITCODE."
+    Write-AgentServiceLog "SC BEGIN: $($Arguments -join ' ')"
+    $output = & "$env:SystemRoot\System32\sc.exe" @Arguments 2>&1
+    $exitCode = $LASTEXITCODE
+    foreach ($line in $output) { Write-AgentServiceLog "SC OUTPUT: $line" }
+    Write-AgentServiceLog "SC END: exit=$exitCode"
+    if ($exitCode -ne 0) {
+        throw "sc.exe $($Arguments -join ' ') failed with exit code $exitCode."
     }
 }
 function Wait-ServiceState([string] $DesiredState, [int] $TimeoutSeconds = 30) {
@@ -71,11 +88,13 @@ function Stop-OwnedService {
     }
 }
 function Test-TrustedPublisherPair {
+    Write-AgentServiceLog "Checking Agent and desktop Authenticode signatures."
     if ([string]::IsNullOrWhiteSpace($DesktopPath)) { throw "DesktopPath is required." }
     if (-not (Test-Path -LiteralPath $AgentPath -PathType Leaf)) { throw "The Agent executable is missing: $AgentPath" }
     if (-not (Test-Path -LiteralPath $DesktopPath -PathType Leaf)) { throw "The desktop executable is missing: $DesktopPath" }
     $agentSignature = Get-AuthenticodeSignature -LiteralPath $AgentPath
     $desktopSignature = Get-AuthenticodeSignature -LiteralPath $DesktopPath
+    Write-AgentServiceLog "Signature status: Agent=$($agentSignature.Status); Desktop=$($desktopSignature.Status)"
     if ($agentSignature.Status -eq "NotSigned" -and $desktopSignature.Status -eq "NotSigned") { return $false }
     if ($agentSignature.Status -ne "Valid" -or $desktopSignature.Status -ne "Valid") {
         throw "Both binaries must have valid Authenticode signatures before a privileged service can be installed."
@@ -89,6 +108,7 @@ function Test-TrustedPublisherPair {
     return $true
 }
 function Set-ProtectedDirectoryAcl([string] $Path, [string[]] $AllowedSids) {
+    Write-AgentServiceLog "Applying protected ACL to $Path; allowed SIDs=$($AllowedSids -join ',')"
     [void][IO.Directory]::CreateDirectory($Path)
     $directory = Get-Item -LiteralPath $Path -Force
     if (($directory.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
@@ -116,6 +136,7 @@ function Set-ProtectedDirectoryAcl([string] $Path, [string[]] $AllowedSids) {
         $acl.AddAccessRule($rule)
     }
     Set-Acl -LiteralPath $Path -AclObject $acl
+    Write-AgentServiceLog "ACL written: $Path"
 
     $verified = Get-Acl -LiteralPath $Path
     if (-not $verified.AreAccessRulesProtected) {
@@ -141,6 +162,7 @@ function Set-JournalDirectoryAcl([string] $ServiceSid) {
 }
 
 function Install-AgentService {
+    Write-AgentServiceLog "Install-AgentService entered."
     $trusted = Test-TrustedPublisherPair
     $service = Get-ServiceRecord
     if (-not $trusted) {
@@ -154,6 +176,7 @@ function Install-AgentService {
         return 10
     }
 
+    Write-AgentServiceLog "Trusted signer pair accepted; configuring service image path."
     $quotedAgentPath = '"' + (Get-NormalizedPath $AgentPath) + '"'
     if ($service) {
         Stop-OwnedService
@@ -168,8 +191,11 @@ function Install-AgentService {
     if ($LASTEXITCODE -ne 0) { throw "sc.exe showsid failed for $ServiceName." }
     $sidMatch = [Regex]::Match($sidOutput, "S-1-5-80-(?:\d+-){4}\d+")
     if (-not $sidMatch.Success) { throw "Windows did not return a valid service SID for $ServiceName." }
+    Write-AgentServiceLog "Service SID: $($sidMatch.Value); provisioning journal ACL."
     Set-JournalDirectoryAcl $sidMatch.Value
+    Write-AgentServiceLog "Journal ACL provisioning complete."
     Invoke-Sc @("sdset", $ServiceName, $ServiceDacl)
+    Write-AgentServiceLog "Service DACL applied; validating SCM record."
 
     $current = Get-ServiceRecord
     if (-not $current -or $current.StartName -notin @("LocalSystem", "NT AUTHORITY\SYSTEM")) {
@@ -178,8 +204,10 @@ function Install-AgentService {
     if (-not [string]::Equals((Get-RegisteredBinaryPath $current), (Get-NormalizedPath $AgentPath), [StringComparison]::OrdinalIgnoreCase)) {
         throw "The Agent service image path did not match the installed binary."
     }
+    Write-AgentServiceLog "Service configuration validated; starting service."
     Invoke-Sc @("start", $ServiceName)
     Wait-ServiceState "Running"
+    Write-AgentServiceLog "Agent service reached RUNNING."
     return 0
 }
 function Remove-AgentService {
@@ -212,6 +240,7 @@ function Disable-AgentServiceAfterFailure {
 }
 
 function Prepare-AgentUpgrade {
+    Write-AgentServiceLog "Prepare-AgentUpgrade entered."
     $service = Get-ServiceRecord
     if ($service) {
         Stop-OwnedService
@@ -219,24 +248,32 @@ function Prepare-AgentUpgrade {
         # interrupted upgrade must never auto-start a partially replaced binary.
         Invoke-Sc @("config", $ServiceName, "start=", "disabled")
     }
+    Write-AgentServiceLog "Prepare-AgentUpgrade complete."
 }
 
 try {
+    Write-AgentServiceLog "START mode=$Mode identity=$([Security.Principal.WindowsIdentity]::GetCurrent().Name) AgentPath=$AgentPath DesktopPath=$DesktopPath"
     Assert-Elevated
+    Write-AgentServiceLog "Elevated administrator token verified."
     $AgentPath = Get-NormalizedPath $AgentPath
     switch ($Mode) {
-        "PrepareUpgrade" { Prepare-AgentUpgrade; exit 0 }
+        "PrepareUpgrade" { Prepare-AgentUpgrade; Write-AgentServiceLog "EXIT mode=$Mode code=0"; exit 0 }
         "Install" {
             if ([string]::IsNullOrWhiteSpace($DesktopPath)) { throw "DesktopPath is required for Agent service installation." }
             $DesktopPath = Get-NormalizedPath $DesktopPath
-            exit (Install-AgentService)
+            $installResult = Install-AgentService
+            Write-AgentServiceLog "EXIT mode=$Mode code=$installResult"
+            exit $installResult
         }
-        "Uninstall" { Remove-AgentService; exit 0 }
+        "Uninstall" { Remove-AgentService; Write-AgentServiceLog "EXIT mode=$Mode code=0"; exit 0 }
     }
 } catch {
+    Write-AgentServiceLog "ERROR mode=$Mode: $($_.Exception.Message)"
+    Write-AgentServiceLog "ERROR SCRIPT: $($_.ScriptStackTrace)"
     if ($Mode -eq "Install") {
         Disable-AgentServiceAfterFailure
     }
     Write-Error $_
+    Write-AgentServiceLog "EXIT mode=$Mode code=1"
     exit 1
 }

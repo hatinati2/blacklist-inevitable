@@ -1,8 +1,9 @@
 //! Minimal Windows Filtering Platform engine and persistent namespace ownership.
 //!
-//! The provider/sublayer setup is durable metadata only. This module intentionally
-//! does not install traffic filters or enable a kill switch. It must only be called
-//! by a future authenticated privileged service, never by the unelevated UI.
+//! The provider/sublayer setup is durable metadata only. Filter validation uses an
+//! explicit WFP write transaction and always aborts it after read-back, leaving no
+//! traffic filters installed. This module does not enable a kill switch. It must only
+//! be called by a future authenticated privileged service, never by the unelevated UI.
 
 #[cfg(windows)]
 use windows_sys::core::GUID;
@@ -53,6 +54,23 @@ enum ExpectedCondition {
     RemoteIpv6 { address: [u8; 16], prefix_length: u8 },
     RemotePort(u16),
     IpProtocol(u8),
+}
+
+#[cfg(windows)]
+fn ipv4_addr_host_order(address: std::net::Ipv4Addr) -> u32 {
+    // FWP_V4_ADDR_AND_MASK explicitly uses host byte order.
+    u32::from_ne_bytes(address.octets())
+}
+
+#[cfg(all(test, windows))]
+mod ipv4_wfp_order_tests {
+    use super::ipv4_addr_host_order;
+
+    #[test]
+    fn address_is_encoded_in_host_order_without_reversing_network_octets() {
+        let address = std::net::Ipv4Addr::new(203, 0, 113, 8);
+        assert_eq!(ipv4_addr_host_order(address).to_ne_bytes(), [203, 0, 113, 8]);
+    }
 }
 
 #[cfg(windows)]
@@ -313,7 +331,7 @@ impl WfpEngine {
                 let remote_condition = match endpoint.address {
                     std::net::IpAddr::V4(address) => {
                         // FWPM_CONDITION_IP_REMOTE_ADDRESS expects FWP_V4_ADDR_AND_MASK in host order.
-                        remote_v4.addr = u32::from_ne_bytes(address.octets());
+                        remote_v4.addr = ipv4_addr_host_order(address);
                         let value = ExpectedCondition::RemoteIpv4 {
                             address: remote_v4.addr,
                             mask: remote_v4.mask,

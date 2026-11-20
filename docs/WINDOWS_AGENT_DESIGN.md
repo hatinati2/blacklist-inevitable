@@ -130,6 +130,8 @@ Connect is a transaction with explicit checkpoints:
 10. Apply the agreed leak-prevention policy.
 11. Run packet-level routing and DNS checks; transition to Connected only when all required checks succeed.
 
+The Rust connection coordinator enforces this boundary through `NetworkVerification`. The Agent must construct it from live OS observations, never from UI/IPC claims. All fields are mandatory: engine Job Object containment, TUN identity, IPv4 route, IPv6 route-or-block, encrypted DNS and endpoint bootstrap, routing-policy compatibility, independent Agent-owned WFP egress enforcement and persistence, and physical-interface leak probes. An incomplete proof leaves the state in ConfiguringNetwork and must trigger fail-closed rollback.
+
 Every successful mutation is journaled with its exact resource identity and its previous state. If any later step fails, roll back in reverse order. Disconnect is idempotent. A failed rollback marks the runtime unhealthy and blocks subsequent Connect attempts.
 
 Do not restore a guessed default DNS server or route. Restore only settings and resources created or changed by this session, using the recorded previous values and verifying restoration.

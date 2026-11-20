@@ -11,6 +11,8 @@
     MessageBox MB_ICONSTOP "The existing Agent service could not be stopped safely. Installation has been cancelled." /SD IDOK
     Abort
   ${EndIf}
+  ; PREINSTALL changes NSIS $OUTDIR for the helper payload. Restore it before Tauri extracts app files.
+  SetOutPath "$INSTDIR"
 !macroend
 
 !macro NSIS_HOOK_POSTINSTALL
@@ -28,6 +30,7 @@
     MessageBox MB_ICONSTOP "The Agent service could not be securely installed. Installation has been cancelled." /SD IDOK
     Abort
   ${EndIf}
+  SetOutPath "$INSTDIR"
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL
@@ -41,5 +44,6 @@
     MessageBox MB_ICONSTOP "The Agent service could not be removed safely. Uninstallation has been cancelled." /SD IDOK
     Abort
   ${EndIf}
+  SetOutPath "$INSTDIR"
 !macroend
 

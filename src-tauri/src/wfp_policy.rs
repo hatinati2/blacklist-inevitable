@@ -10,6 +10,7 @@ use std::net::IpAddr;
 
 const MAX_PHYSICAL_INTERFACES: usize = 32;
 const MAX_ENDPOINTS: usize = 64;
+const MAX_PLANNED_FILTERS: usize = 2048;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TransportProtocol {
@@ -24,11 +25,18 @@ pub struct VpnEndpoint {
     pub protocol: TransportProtocol,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PhysicalInterface {
+    /// Stable Windows NET_LUID value used by FWPM_CONDITION_IP_LOCAL_INTERFACE.
+    pub interface_luid: u64,
+    /// Current interface index for diagnostics and route-table correlation only.
+    pub interface_index: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EgressPolicySpec {
-    /// Interface indexes for physical adapters only. The caller must resolve and
-    /// verify these against adapter GUID/LUID identities before installing WFP.
-    pub physical_interface_indexes: Vec<u32>,
+    /// Physical adapters identified by stable LUID; indexes are diagnostic only.
+    pub physical_interfaces: Vec<PhysicalInterface>,
     /// Numeric endpoints only: hostname resolution belongs to the encrypted
     /// bootstrap stage and must finish before this policy is compiled.
     pub vpn_endpoints: Vec<VpnEndpoint>,
@@ -51,6 +59,7 @@ pub enum FilterIntent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlannedFilter {
     pub interface_index: u32,
+    pub interface_luid: u64,
     pub layer: WfpLayer,
     pub intent: FilterIntent,
 }
@@ -62,16 +71,23 @@ pub struct WfpPolicyPlan {
 
 impl EgressPolicySpec {
     pub fn validate(&self) -> Result<(), String> {
-        if self.physical_interface_indexes.is_empty()
-            || self.physical_interface_indexes.len() > MAX_PHYSICAL_INTERFACES
+        if self.physical_interfaces.is_empty()
+            || self.physical_interfaces.len() > MAX_PHYSICAL_INTERFACES
         {
             return Err("The WFP policy must name a bounded, non-empty physical interface set.".into());
         }
-        let interfaces: BTreeSet<_> = self.physical_interface_indexes.iter().copied().collect();
-        if interfaces.len() != self.physical_interface_indexes.len()
-            || interfaces.contains(&0)
+        let interfaces: BTreeSet<_> = self.physical_interfaces.iter().copied().collect();
+        if interfaces.len() != self.physical_interfaces.len()
+            || self.physical_interfaces.iter().any(|interface| {
+                interface.interface_luid == 0 || interface.interface_index == 0
+            })
         {
-            return Err("The WFP policy contains an invalid or duplicate interface index.".into());
+            return Err("The WFP policy contains an invalid or duplicate physical interface identity.".into());
+        }
+        let luids: BTreeSet<_> = self.physical_interfaces.iter().map(|item| item.interface_luid).collect();
+        let indexes: BTreeSet<_> = self.physical_interfaces.iter().map(|item| item.interface_index).collect();
+        if luids.len() != self.physical_interfaces.len() || indexes.len() != self.physical_interfaces.len() {
+            return Err("The WFP policy contains duplicate interface LUIDs or indexes.".into());
         }
         if self.vpn_endpoints.is_empty() || self.vpn_endpoints.len() > MAX_ENDPOINTS {
             return Err("The WFP policy requires a bounded, non-empty VPN endpoint allowlist.".into());
@@ -81,6 +97,14 @@ impl EgressPolicySpec {
             || self.vpn_endpoints.iter().any(|endpoint| endpoint.port == 0)
         {
             return Err("The VPN endpoint allowlist contains a duplicate or invalid transport tuple.".into());
+        }
+        let planned_filter_count = self
+            .physical_interfaces
+            .len()
+            .checked_mul(self.vpn_endpoints.len() + 2)
+            .ok_or_else(|| "The WFP filter plan size overflowed.".to_string())?;
+        if planned_filter_count > MAX_PLANNED_FILTERS {
+            return Err("The WFP policy exceeds the bounded maximum filter count.".into());
         }
         Ok(())
     }
@@ -92,13 +116,14 @@ impl EgressPolicySpec {
     pub fn compile_plan(&self) -> Result<WfpPolicyPlan, String> {
         self.validate()?;
         let mut filters = Vec::with_capacity(
-            self.physical_interface_indexes.len() * (self.vpn_endpoints.len() * 2 + 2),
+            self.physical_interfaces.len() * (self.vpn_endpoints.len() + 2),
         );
 
-        for interface_index in &self.physical_interface_indexes {
+        for interface in &self.physical_interfaces {
             for layer in [WfpLayer::AleAuthConnectV4, WfpLayer::AleAuthConnectV6] {
                 filters.push(PlannedFilter {
-                    interface_index: *interface_index,
+                    interface_index: interface.interface_index,
+                    interface_luid: interface.interface_luid,
                     layer,
                     intent: FilterIntent::BlockOtherPhysicalEgress,
                 });
@@ -108,7 +133,8 @@ impl EgressPolicySpec {
                         | (WfpLayer::AleAuthConnectV6, IpAddr::V6(_)))
                 }) {
                     filters.push(PlannedFilter {
-                        interface_index: *interface_index,
+                        interface_index: interface.interface_index,
+                        interface_luid: interface.interface_luid,
                         layer,
                         intent: FilterIntent::PermitVpnEndpoint(*endpoint),
                     });
@@ -126,7 +152,10 @@ mod tests {
 
     fn spec() -> EgressPolicySpec {
         EgressPolicySpec {
-            physical_interface_indexes: vec![7, 11],
+            physical_interfaces: vec![
+                PhysicalInterface { interface_luid: 0x0001_0000_0000_0007, interface_index: 7 },
+                PhysicalInterface { interface_luid: 0x0001_0000_0000_000B, interface_index: 11 },
+            ],
             vpn_endpoints: vec![
                 VpnEndpoint {
                     address: "203.0.113.8".parse().unwrap(),
@@ -146,10 +175,14 @@ mod tests {
     fn compiles_both_address_families_and_blocks_other_egress() {
         let plan = spec().compile_plan().unwrap();
         assert_eq!(plan.filters.len(), 8);
-        for interface in [7, 11] {
+        for interface in [
+            PhysicalInterface { interface_luid: 0x0001_0000_0000_0007, interface_index: 7 },
+            PhysicalInterface { interface_luid: 0x0001_0000_0000_000B, interface_index: 11 },
+        ] {
             for layer in [WfpLayer::AleAuthConnectV4, WfpLayer::AleAuthConnectV6] {
                 assert!(plan.filters.iter().any(|filter| {
-                    filter.interface_index == interface
+                    filter.interface_index == interface.interface_index
+                        && filter.interface_luid == interface.interface_luid
                         && filter.layer == layer
                         && filter.intent == FilterIntent::BlockOtherPhysicalEgress
                 }));
@@ -168,7 +201,7 @@ mod tests {
     #[test]
     fn rejects_empty_or_unbounded_interface_and_endpoint_sets() {
         let mut value = spec();
-        value.physical_interface_indexes.clear();
+        value.physical_interfaces.clear();
         assert!(value.validate().is_err());
 
         let mut value = spec();
@@ -176,7 +209,41 @@ mod tests {
         assert!(value.validate().is_err());
 
         let mut value = spec();
-        value.physical_interface_indexes = vec![1, 1];
+        value.physical_interfaces = vec![
+            PhysicalInterface { interface_luid: 7, interface_index: 1 },
+            PhysicalInterface { interface_luid: 7, interface_index: 2 },
+        ];
+        assert!(value.validate().is_err());
+
+        let mut value = spec();
+        value.physical_interfaces = vec![
+            PhysicalInterface { interface_luid: 7, interface_index: 1 },
+            PhysicalInterface { interface_luid: 8, interface_index: 1 },
+        ];
+        assert!(value.validate().is_err());
+
+        let mut value = spec();
+        value.physical_interfaces[0].interface_luid = 0;
+        assert!(value.validate().is_err());
+
+        let mut value = spec();
+        value.physical_interfaces[0].interface_index = 0;
+        assert!(value.validate().is_err());
+
+        let mut value = spec();
+        value.physical_interfaces = (1..=32)
+            .map(|index| PhysicalInterface {
+                interface_luid: index as u64,
+                interface_index: index,
+            })
+            .collect();
+        value.vpn_endpoints = (1..=64)
+            .map(|port| VpnEndpoint {
+                address: "203.0.113.8".parse().unwrap(),
+                port,
+                protocol: TransportProtocol::Udp,
+            })
+            .collect();
         assert!(value.validate().is_err());
 
         let mut value = spec();

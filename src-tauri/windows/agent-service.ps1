@@ -190,6 +190,27 @@ function Remove-AgentService {
     Wait-ServiceState "Absent"
     # Keep ProgramData so future recovery metadata is not deleted by uninstall.
 }
+function Disable-AgentServiceAfterFailure {
+    $service = Get-ServiceRecord
+    if (-not $service) { return }
+    try {
+        Assert-OwnedService $service
+    } catch {
+        Write-Warning "Refusing rollback changes because the existing service is not owned by this installation: $_"
+        return
+    }
+    try {
+        Stop-OwnedService
+    } catch {
+        Write-Warning "The Agent service did not stop cleanly during rollback: $_"
+    }
+    try {
+        Invoke-Sc @("config", $ServiceName, "start=", "disabled")
+    } catch {
+        Write-Warning "The Agent service could not be disabled during rollback: $_"
+    }
+}
+
 function Prepare-AgentUpgrade {
     $service = Get-ServiceRecord
     if ($service) {
@@ -213,6 +234,9 @@ try {
         "Uninstall" { Remove-AgentService; exit 0 }
     }
 } catch {
+    if ($Mode -eq "Install") {
+        Disable-AgentServiceAfterFailure
+    }
     Write-Error $_
     exit 1
 }

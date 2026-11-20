@@ -585,7 +585,10 @@ mod tests {
             .await
             .unwrap();
 
-        let error = read_agent_message(&mut reader).await.unwrap_err();
+        let error = match read_agent_message(&mut reader).await {
+            Err(error) => error,
+            Ok(_) => panic!("an oversized frame must be rejected"),
+        };
         assert!(error.contains("maximum message size"));
     }
 

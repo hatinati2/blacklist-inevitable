@@ -333,15 +333,23 @@ function Set-ProtectedDirectoryAcl([string] $Path, [string[]] $AllowedSids) {
     if (-not $verified.AreAccessRulesProtected) {
         throw "The protected Agent directory is still inheriting permissions: $Path"
     }
-    $actualSids = @($verified.Access | ForEach-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value } | Sort-Object -Unique)
+    # Request SID-typed rules directly. IdentityReference from the generic
+    # Access property can be surfaced as a string by Windows PowerShell/NSIS.
+    $verifiedRules = $verified.GetAccessRules(
+        $true,
+        $true,
+        [Security.Principal.SecurityIdentifier]
+    )
+    $actualSids = @($verifiedRules | ForEach-Object { $_.IdentityReference.Value } | Sort-Object -Unique)
     $expectedSids = @($AllowedSids | Sort-Object -Unique)
     if (Compare-Object -ReferenceObject $expectedSids -DifferenceObject $actualSids) {
         throw "The protected Agent directory ACL contains an unexpected or missing principal: $Path"
     }
-    if (@($verified.Access | Where-Object { $_.AccessControlType -ne "Allow" -or $_.FileSystemRights -ne [Security.AccessControl.FileSystemRights]::FullControl }).Count -ne 0) {
+    if (@($verifiedRules | Where-Object { $_.AccessControlType -ne "Allow" -or $_.FileSystemRights -ne [Security.AccessControl.FileSystemRights]::FullControl }).Count -ne 0) {
         throw "The protected Agent directory ACL contains a non-full-control or deny entry: $Path"
     }
-    if ($verified.Owner.Translate([Security.Principal.SecurityIdentifier]).Value -ne $adminSid.Value) {
+    $verifiedOwnerSid = $verified.GetOwner([Security.Principal.SecurityIdentifier])
+    if ($verifiedOwnerSid.Value -ne $adminSid.Value) {
         throw "The protected Agent directory owner is not BUILTIN\\Administrators: $Path"
     }
 }

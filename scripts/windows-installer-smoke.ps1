@@ -69,6 +69,29 @@ if ($agentSignature.Status -eq "Valid" -and $desktopSignature.Status -eq "Valid"
     if ($serviceRecord.PathName -notmatch [Regex]::Escape($agentPath)) {
         throw "The Agent service image path does not point to the installed sidecar."
     }
+    $sidOutput = (& "$env:SystemRoot\\System32\\sc.exe" showsid "BlacklistInevitableAgent" 2>&1 | Out-String)
+    if ($LASTEXITCODE -ne 0) { throw "Could not query the Agent service SID." }
+    $sidMatch = [Regex]::Match($sidOutput, "S-1-5-80-(?:\\d+-){4}\\d+")
+    if (-not $sidMatch.Success) { throw "The Agent service SID was not provisioned." }
+    $sidTypeOutput = (& "$env:SystemRoot\\System32\\sc.exe" qsidtype "BlacklistInevitableAgent" 2>&1 | Out-String)
+    if ($LASTEXITCODE -ne 0 -or $sidTypeOutput -notmatch "UNRESTRICTED") {
+        throw "The Agent service SID is not enabled."
+    }
+    $serviceSecurity = (& "$env:SystemRoot\\System32\\sc.exe" sdshow "BlacklistInevitableAgent" 2>&1 | Out-String)
+    if ($LASTEXITCODE -ne 0 -or $serviceSecurity -notmatch "\\(A;;GA;;;SY\\)" -or $serviceSecurity -notmatch "\\(A;;GA;;;BA\\)" -or $serviceSecurity -notmatch "\\(A;;LC;;;IU\\)") {
+        throw "The Agent service DACL does not match the expected SYSTEM, Administrators, and query-only Interactive Users policy."
+    }
+    $journalDirectory = Join-Path $env:ProgramData "BlacklistInevitable\\Agent"
+    if (-not (Test-Path -LiteralPath $journalDirectory -PathType Container)) {
+        throw "The protected Agent journal directory was not provisioned."
+    }
+    $journalAcl = Get-Acl -LiteralPath $journalDirectory
+    if (-not $journalAcl.AreAccessRulesProtected) { throw "The Agent journal directory inherits permissions." }
+    $journalSids = @($journalAcl.Access | ForEach-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value } | Sort-Object -Unique)
+    $expectedJournalSids = @("S-1-5-18", "S-1-5-32-544", $sidMatch.Value | Sort-Object -Unique)
+    if (Compare-Object -ReferenceObject $expectedJournalSids -DifferenceObject $journalSids) {
+        throw "The Agent journal directory ACL is not restricted to SYSTEM, Administrators, and the Agent service SID."
+    }
 } elseif ($agentSignature.Status -eq "NotSigned" -and $desktopSignature.Status -eq "NotSigned") {
     if ($service) {
         throw "An unsigned package must not register a privileged Agent service."

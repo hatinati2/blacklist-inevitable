@@ -1,6 +1,6 @@
 $ErrorActionPreference = "Stop"
 
-$installerDirectory = Join-Path $PSScriptRoot "..\src-tauri\target\release\bundle\nsis"
+$installerDirectory = Join-Path $PSScriptRoot "..\\src-tauri\\target\\release\\bundle\\nsis"
 $installer = Get-ChildItem -Path $installerDirectory -Filter "*.exe" -File |
     Sort-Object LastWriteTime -Descending |
     Select-Object -First 1
@@ -15,11 +15,15 @@ if ($install.ExitCode -ne 0) {
     throw "The NSIS installer exited with code $($install.ExitCode)."
 }
 
-$uninstallRoot = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall"
-$entry = Get-ChildItem -Path $uninstallRoot -ErrorAction SilentlyContinue |
-    ForEach-Object { Get-ItemProperty -Path $_.PSPath -ErrorAction SilentlyContinue } |
-    Where-Object { $_.DisplayName -eq "blacklist-inevitable" } |
-    Select-Object -First 1
+$uninstallRoots = @(
+    "HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
+    "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall"
+)
+$entry = foreach ($root in $uninstallRoots) {
+    Get-ChildItem -Path $root -ErrorAction SilentlyContinue |
+        ForEach-Object { Get-ItemProperty -Path $_.PSPath -ErrorAction SilentlyContinue } |
+        Where-Object { $_.DisplayName -eq "blacklist-inevitable" }
+} | Select-Object -First 1
 
 if (-not $entry -or -not $entry.UninstallString) {
     throw "The installer did not register an uninstall entry for blacklist-inevitable."
@@ -28,7 +32,7 @@ if (-not $entry -or -not $entry.UninstallString) {
 if ($entry.UninstallString -match '^"([^"]+)"') {
     $uninstallerPath = $Matches[1]
 } else {
-    $uninstallerPath = ($entry.UninstallString -split '\s+', 2)[0]
+    $uninstallerPath = ($entry.UninstallString -split '\\s+', 2)[0]
 }
 
 if (-not (Test-Path -LiteralPath $uninstallerPath -PathType Leaf)) {
@@ -37,8 +41,38 @@ if (-not (Test-Path -LiteralPath $uninstallerPath -PathType Leaf)) {
 
 $installDirectory = Split-Path -Parent $uninstallerPath
 $appPath = Join-Path $installDirectory "blacklist-inevitable.exe"
+$agentPath = Join-Path $installDirectory "blacklist-inevitable-agent.exe"
 if (-not (Test-Path -LiteralPath $appPath -PathType Leaf)) {
     throw "The installed application executable was not found: $appPath"
+}
+if (-not (Test-Path -LiteralPath $agentPath -PathType Leaf)) {
+    throw "The Agent service sidecar was not installed next to the desktop application: $agentPath"
+}
+
+$agentSignature = Get-AuthenticodeSignature -LiteralPath $agentPath
+$desktopSignature = Get-AuthenticodeSignature -LiteralPath $appPath
+$service = Get-Service -Name "BlacklistInevitableAgent" -ErrorAction SilentlyContinue
+if ($agentSignature.Status -eq "Valid" -and $desktopSignature.Status -eq "Valid" -and
+    $agentSignature.SignerCertificate.Thumbprint -eq $desktopSignature.SignerCertificate.Thumbprint) {
+    if (-not $service -or $service.Status -ne "Running") {
+        throw "The trusted signed package did not install and start the LocalSystem Agent service."
+    }
+    $serviceRecord = Get-CimInstance -ClassName Win32_Service -Filter "Name='BlacklistInevitableAgent'"
+    if ($serviceRecord.StartName -notin @("LocalSystem", "NT AUTHORITY\\SYSTEM")) {
+        throw "The Agent service is not running as LocalSystem."
+    }
+    if ($serviceRecord.StartMode -ne "Auto") {
+        throw "The Agent service is not configured for automatic startup."
+    }
+    if ($serviceRecord.PathName -notmatch [Regex]::Escape($agentPath)) {
+        throw "The Agent service image path does not point to the installed sidecar."
+    }
+} elseif ($agentSignature.Status -eq "NotSigned" -and $desktopSignature.Status -eq "NotSigned") {
+    if ($service) {
+        throw "An unsigned package must not register a privileged Agent service."
+    }
+} else {
+    throw "The installed Agent and desktop binaries do not have matching valid Authenticode signatures."
 }
 
 Write-Host "Launching the installed desktop application..."
@@ -62,9 +96,14 @@ $uninstall = Start-Process -FilePath $uninstallerPath -ArgumentList @("/S") -Wai
 if ($uninstall.ExitCode -ne 0) {
     throw "The NSIS uninstaller exited with code $($uninstall.ExitCode)."
 }
-
 if (Test-Path -LiteralPath $appPath) {
     throw "The application executable remains after uninstallation: $appPath"
 }
+if (Test-Path -LiteralPath $agentPath) {
+    throw "The Agent sidecar remains after uninstallation: $agentPath"
+}
+if (Get-Service -Name "BlacklistInevitableAgent" -ErrorAction SilentlyContinue) {
+    throw "The Agent Windows service remains registered after uninstallation."
+}
 
-Write-Host "Windows installer smoke test passed: install, launch, and uninstall."
+Write-Host "Windows installer smoke test passed: install, launch, service lifecycle, and uninstall."

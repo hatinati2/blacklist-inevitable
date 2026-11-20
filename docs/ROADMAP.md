@@ -65,6 +65,7 @@ Naive import/config mapping is implemented for a bounded subset; remote authenti
 
 ## M4 — Normal connection lifecycle
 
+- [x] Add a versioned, bounded, non-secret Windows Agent recovery journal with monotonic checkpoints and fail-closed loading; service wiring and OS reconciliation remain open.
 - [ ] Add an explicit Rust-owned Connect / Disconnect state machine.
 - [ ] Add Windows platform integration only for the normal connection path.
 - [ ] Implement a signed, narrowly scoped Windows VPN agent/service so the Tauri UI remains unelevated; add authenticated named-pipe IPC and secure credential handoff.

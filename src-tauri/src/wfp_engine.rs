@@ -33,12 +33,13 @@ impl WfpEngine {
     /// service context. A successful open does not imply any filter is installed.
     pub fn open_local() -> Result<Self, String> {
         use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FwpmEngineOpen0;
+        use windows_sys::Win32::System::Rpc::RPC_C_AUTHN_WINNT;
 
         let mut handle = std::ptr::null_mut();
         let status = unsafe {
             FwpmEngineOpen0(
                 std::ptr::null(),
-                0,
+                RPC_C_AUTHN_WINNT,
                 std::ptr::null(),
                 std::ptr::null(),
                 &mut handle,

@@ -78,6 +78,37 @@ jobs:
       - name: Build dedicated Windows Agent service host
         run: cargo build --locked --release --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc --bin blacklist-inevitable-agent
 
+      - name: Stage Agent sidecar for NSIS
+        shell: pwsh
+        run: |
+          $source = "src-tauri/target/x86_64-pc-windows-msvc/release/blacklist-inevitable-agent.exe"
+          $destinationDirectory = "src-tauri/binaries"
+          $destination = Join-Path $destinationDirectory "blacklist-inevitable-agent-x86_64-pc-windows-msvc.exe"
+          if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "The dedicated Agent binary was not built: $source" }
+          New-Item -ItemType Directory -Path $destinationDirectory -Force | Out-Null
+          Copy-Item -LiteralPath $source -Destination $destination -Force
+          if (-not (Test-Path -LiteralPath $destination -PathType Leaf)) { throw "The Agent sidecar could not be staged for Tauri." }
+
+      - name: Create trusted CI code-signing certificate
+        shell: pwsh
+        run: |
+          $certificate = New-SelfSignedCertificate -Subject "CN=Blacklist Inevitable CI" -Type CodeSigningCert -CertStoreLocation "Cert:\CurrentUser\My"
+          if (-not $certificate) { throw "Could not create the CI code-signing certificate." }
+          $root = Import-Certificate -CertStoreLocation "Cert:\LocalMachine\Root" -FilePath (Export-Certificate -Cert $certificate -FilePath (Join-Path $env:RUNNER_TEMP "agent-ci-code-signing.cer") -Force).FullName
+          if (-not $root) { throw "Could not trust the ephemeral CI code-signing certificate." }
+          $agent = "src-tauri/binaries/blacklist-inevitable-agent-x86_64-pc-windows-msvc.exe"
+          $desktop = "src-tauri/target/x86_64-pc-windows-msvc/release/blacklist-inevitable.exe"
+          foreach ($binary in @($agent, $desktop)) {
+            if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) { throw "Missing binary to sign: $binary" }
+            $signature = Set-AuthenticodeSignature -FilePath $binary -Certificate $certificate -HashAlgorithm SHA256
+            if ($signature.Status -ne "Valid") { throw "Could not create a valid Authenticode signature for $binary (status: $($signature.Status))." }
+          }
+          $agentSignature = Get-AuthenticodeSignature -LiteralPath $agent
+          $desktopSignature = Get-AuthenticodeSignature -LiteralPath $desktop
+          if ($agentSignature.Status -ne "Valid" -or $desktopSignature.Status -ne "Valid" -or $agentSignature.SignerCertificate.Thumbprint -ne $desktopSignature.SignerCertificate.Thumbprint) {
+            throw "The CI Agent and desktop executables do not share the same trusted signer."
+          }
+
       - name: Build Windows installer
         run: npm run tauri -- build
 

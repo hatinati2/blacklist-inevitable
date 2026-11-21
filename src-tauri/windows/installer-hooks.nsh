@@ -76,9 +76,19 @@
   SetErrorLevel 1
   Abort
   helper_uninstall_done:
-  SetOutPath "$INSTDIR"
-!macroend
-
-!macro NSIS_HOOK_POSTUNINSTALL
+  ; Tauri's uninstall section attempts RMDir before POSTUNINSTALL is called.
+  ; Remove the persisted helper here, after PowerShell has exited, so the
+  ; normal uninstaller can remove the installation directory on its first pass.
   Delete "$INSTDIR\\agent-service.ps1"
+  IfFileExists "$INSTDIR\\agent-service.ps1" helper_delete_failed
+  Goto helper_delete_done
+  helper_delete_failed:
+    FileOpen $R9 "$TEMP\\BlacklistInevitableAgent-uninstall-hook.log" a
+    FileWrite $R9 "ERROR: persisted helper could not be deleted after service removal."
+    FileClose $R9
+    MessageBox MB_ICONSTOP "The Agent service was removed, but its uninstall helper could not be deleted. Uninstallation has been stopped; run it again after closing any process that is using the helper." /SD IDOK
+    SetErrorLevel 1
+    Abort
+  helper_delete_done:
+  SetOutPath "$INSTDIR"
 !macroend

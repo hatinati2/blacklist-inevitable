@@ -40,6 +40,15 @@ jobs:
       - name: Verify Tauri Windows CLI binding
         run: npm ls @tauri-apps/cli @tauri-apps/cli-win32-x64-msvc
 
+      - name: Bootstrap external binary path for Rust build scripts
+        shell: pwsh
+        run: |
+          $destinationDirectory = "src-tauri/binaries"
+          $destination = Join-Path $destinationDirectory "blacklist-inevitable-agent-x86_64-pc-windows-msvc.exe"
+          New-Item -ItemType Directory -Path $destinationDirectory -Force | Out-Null
+          Copy-Item -LiteralPath "$env:SystemRoot\\System32\\where.exe" -Destination $destination -Force
+          if (-not (Test-Path -LiteralPath $destination -PathType Leaf)) { throw "Could not bootstrap the external binary path required by tauri-build." }
+
       - name: Download and verify pinned sing-box config validator
         shell: pwsh
         run: |
@@ -78,8 +87,67 @@ jobs:
       - name: Build dedicated Windows Agent service host
         run: cargo build --locked --release --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc --bin blacklist-inevitable-agent
 
-      - name: Build Windows installer
-        run: npm run tauri -- build
+      - name: Stage Agent sidecar for NSIS
+        shell: pwsh
+        run: |
+          $source = "src-tauri/target/x86_64-pc-windows-msvc/release/blacklist-inevitable-agent.exe"
+          $destinationDirectory = "src-tauri/binaries"
+          $destination = Join-Path $destinationDirectory "blacklist-inevitable-agent-x86_64-pc-windows-msvc.exe"
+          if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "The dedicated Agent binary was not built: $source" }
+          New-Item -ItemType Directory -Path $destinationDirectory -Force | Out-Null
+          Copy-Item -LiteralPath $source -Destination $destination -Force
+          if (-not (Test-Path -LiteralPath $destination -PathType Leaf)) { throw "The Agent sidecar could not be staged for Tauri." }
+          $sourceHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
+          $destinationHash = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash
+          if ($sourceHash -ne $destinationHash) { throw "The packaged sidecar is not byte-identical to the freshly built Agent executable." }
+
+      - name: Build desktop executable for NSIS without bundling
+        # Build once; sign the resulting PE before the separate bundle command.
+        run: npm run tauri -- build --no-bundle
+
+      - name: Create trusted CI code-signing certificate
+        shell: pwsh
+        run: |
+          $certificate = New-SelfSignedCertificate -Subject "CN=Blacklist Inevitable CI" -Type CodeSigningCert -CertStoreLocation "Cert:\CurrentUser\My"
+          if (-not $certificate) { throw "Could not create the CI code-signing certificate." }
+          $certificateFile = Join-Path $env:RUNNER_TEMP "agent-ci-code-signing.cer"
+          Export-Certificate -Cert $certificate -FilePath $certificateFile -Force | Out-Null
+          $root = Import-Certificate -CertStoreLocation "Cert:\LocalMachine\Root" -FilePath $certificateFile
+          if (-not $root) { throw "Could not trust the ephemeral CI code-signing certificate." }
+          $agent = "src-tauri/binaries/blacklist-inevitable-agent-x86_64-pc-windows-msvc.exe"
+          # Tauri stages externalBin into target/release under its runtime filename.
+          # The NSIS bundle consumes that staged copy, not the source triple-suffixed file.
+          $stagedAgent = "src-tauri/target/release/blacklist-inevitable-agent.exe"
+          $desktop = "src-tauri/target/release/blacklist-inevitable.exe"
+          foreach ($binary in @($agent, $stagedAgent, $desktop)) {
+            if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) { throw "Missing binary to sign: $binary" }
+            $signature = Set-AuthenticodeSignature -FilePath $binary -Certificate $certificate -HashAlgorithm SHA256
+            if ($signature.Status -ne "Valid") { throw "Could not create a valid Authenticode signature for $binary (status: $($signature.Status))." }
+          }
+          $agentSignature = Get-AuthenticodeSignature -LiteralPath $agent
+          $stagedAgentSignature = Get-AuthenticodeSignature -LiteralPath $stagedAgent
+          $desktopSignature = Get-AuthenticodeSignature -LiteralPath $desktop
+          $sameSigner = $agentSignature.SignerCertificate.Thumbprint -eq $stagedAgentSignature.SignerCertificate.Thumbprint -and $agentSignature.SignerCertificate.Thumbprint -eq $desktopSignature.SignerCertificate.Thumbprint
+          if ($agentSignature.Status -ne "Valid" -or $stagedAgentSignature.Status -ne "Valid" -or $desktopSignature.Status -ne "Valid" -or -not $sameSigner) {
+            throw "The source Agent, Tauri-staged Agent, and desktop executables must all have valid signatures from the same trusted signer."
+          }
+
+      - name: Bundle Windows installer
+        # Bundle the already-built and signed PE files without recompiling or patching them.
+        run: npm run tauri -- bundle --no-binary-patching
+
+      - name: Verify Authenticode signatures after Tauri bundling
+        shell: pwsh
+        run: |
+          $agent = "src-tauri/binaries/blacklist-inevitable-agent-x86_64-pc-windows-msvc.exe"
+          $desktop = "src-tauri/target/release/blacklist-inevitable.exe"
+          $agentSignature = Get-AuthenticodeSignature -LiteralPath $agent
+          $desktopSignature = Get-AuthenticodeSignature -LiteralPath $desktop
+          if ($agentSignature.Status -ne "Valid") { throw "The Agent signature is not valid after Tauri bundling: $($agentSignature.Status)." }
+          if ($desktopSignature.Status -ne "Valid") { throw "The desktop signature is not valid after Tauri bundling: $($desktopSignature.Status)." }
+          if ($agentSignature.SignerCertificate.Thumbprint -ne $desktopSignature.SignerCertificate.Thumbprint) {
+            throw "Tauri bundling left the Agent and desktop executables with different signers."
+          }
 
       - name: Install, launch, and uninstall smoke test
         shell: pwsh

@@ -2,8 +2,10 @@ $ErrorActionPreference = "Stop"
 
 $agentServiceLog = Join-Path $env:TEMP "BlacklistInevitableAgent-service.log"
 $installerLog = Join-Path $env:TEMP "blacklist-inevitable-nsis-install.log"
+$uninstallerLog = Join-Path $env:TEMP "blacklist-inevitable-nsis-uninstall.log"
 Remove-Item -LiteralPath $agentServiceLog -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $installerLog -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $uninstallerLog -Force -ErrorAction SilentlyContinue
 
 $installerDirectory = Join-Path $PSScriptRoot "..\src-tauri\target\release\bundle\nsis"
 $installer = Get-ChildItem -Path $installerDirectory -Filter "*.exe" -File |
@@ -225,7 +227,7 @@ finally {
 }
 
 Write-Host "Uninstalling the application silently..."
-$uninstallProcess = Start-Process -FilePath $uninstallerPath -ArgumentList @("/S") -PassThru
+$uninstallProcess = Start-Process -FilePath $uninstallerPath -ArgumentList @("/S", "/LOG=$uninstallerLog") -PassThru
 if (-not $uninstallProcess.WaitForExit(120000)) {
     try {
         $uninstallProcess.Kill($true)
@@ -240,6 +242,23 @@ if ($uninstallProcess.ExitCode -ne 0) {
     throw "The NSIS uninstaller exited with code $($uninstallProcess.ExitCode)."
 }
 if (Test-Path -LiteralPath $appPath) {
+    $remainingApp = Get-Item -LiteralPath $appPath -Force | Select-Object FullName, Length, LastWriteTime, Attributes
+    $appProcesses = @(Get-CimInstance -ClassName Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object { $_.ExecutablePath -eq $appPath } |
+        Select-Object ProcessId, ParentProcessId, Name, ExecutablePath, CommandLine)
+    Write-Host "Uninstaller exit code: $($uninstallProcess.ExitCode)"
+    Write-Host ("Remaining application file: " + ($remainingApp | Format-List | Out-String))
+    Write-Host ("Processes still using installed application path: " + ($appProcesses | Format-Table -AutoSize | Out-String))
+    if (Test-Path -LiteralPath $uninstallerLog) {
+        Write-Host "NSIS uninstaller diagnostic log:"
+        Get-Content -LiteralPath $uninstallerLog -Tail 300 | ForEach-Object { Write-Host $_ }
+    } else {
+        Write-Host "NSIS uninstaller log was not created: $uninstallerLog"
+    }
+    if (Test-Path -LiteralPath $agentServiceLog) {
+        Write-Host "Agent helper diagnostic log:"
+        Get-Content -LiteralPath $agentServiceLog -Tail 200 | ForEach-Object { Write-Host $_ }
+    }
     throw "The application executable remains after uninstallation: $appPath"
 }
 if (Test-Path -LiteralPath $agentPath) {

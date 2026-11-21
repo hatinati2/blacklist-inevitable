@@ -382,6 +382,10 @@ fn write_pipe_chunk_overlapped(
 }
 
 fn read_one_request(pipe: HANDLE, stop_event: HANDLE) -> Result<crate::agent_protocol::AgentRequest, String> {
+    // ImpersonateNamedPipeClient is bound to the last client message read from
+    // this pipe. Read only the fixed-size header first, then authenticate the
+    // peer before allocating/reading the bounded JSON payload or dispatching it.
+    let active_session = active_console_session_for_pipe(pipe)?;
     let deadline = Instant::now() + FRAME_TIMEOUT;
     let mut header = [0u8; 4];
     read_exact_pipe(pipe, stop_event, &mut header, deadline)?;
@@ -390,6 +394,8 @@ fn read_one_request(pipe: HANDLE, stop_event: HANDLE) -> Result<crate::agent_pro
     if announced == 0 || announced > MAX_AGENT_REQUEST_BYTES {
         return Err("The Agent IPC frame length is invalid.".into());
     }
+
+    authenticate_active_console_client(pipe, active_session)?;
 
     let mut payload = vec![0u8; announced];
     read_exact_pipe(pipe, stop_event, &mut payload, deadline)?;
@@ -482,7 +488,7 @@ fn write_one_response(pipe: HANDLE, stop_event: HANDLE, response: &AgentResponse
     Ok(())
 }
 
-fn authenticate_active_console_client(pipe: HANDLE) -> Result<(), String> {
+fn active_console_session_for_pipe(pipe: HANDLE) -> Result<u32, String> {
     let active_session = unsafe { WTSGetActiveConsoleSessionId() };
     if active_session == u32::MAX {
         return Err("There is no active physical-console user session.".into());
@@ -494,7 +500,13 @@ fn authenticate_active_console_client(pipe: HANDLE) -> Result<(), String> {
     {
         return Err("The Agent pipe client is not in the active console session.".into());
     }
+    Ok(active_session)
+}
 
+fn authenticate_active_console_client(pipe: HANDLE, active_session: u32) -> Result<(), String> {
+    // This is called only after read_one_request has consumed the fixed-size
+    // request header. Win32 associates ImpersonateNamedPipeClient with the last
+    // client message read from the pipe; calling it before any read fails closed.
     // WTSQueryUserToken is deliberately used only in the highly trusted
     // LocalSystem service context; failure means no client is authorized.
     let mut active_user_token: HANDLE = std::ptr::null_mut();

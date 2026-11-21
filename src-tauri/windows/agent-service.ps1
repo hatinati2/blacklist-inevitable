@@ -428,8 +428,8 @@ function Install-AgentService {
         }
         $serviceOperation = "Create"
     }
-    if ($serviceOperation -eq "Change" -and [uint32]$serviceResult.ReturnValue -ne 0) {
-        throw "Win32_Service.Change failed with return value $($serviceResult.ReturnValue)."
+    if ([uint32]$serviceResult.ReturnValue -ne 0) {
+        throw "Win32_Service.$serviceOperation failed with return value $($serviceResult.ReturnValue)."
     }
     Write-AgentServiceLog "Win32_Service.$serviceOperation succeeded; requested quoted image path=[$quotedAgentPath]"
     Invoke-Sc @("description", $ServiceName, "Authenticated local status IPC host. Network-changing operations are disabled.")

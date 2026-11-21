@@ -11,7 +11,8 @@
 - `PIPE_REJECT_REMOTE_CLIENTS` rejects remote pipe clients. The server accepts one local client at a time.
 - Before reading a request, the server compares the pipe client session ID with the active physical-console session, obtains that session's user token, impersonates the pipe client only long enough to read the token SID/session ID, calls `RevertToSelf`, and requires both identities to match.
 - If `RevertToSelf` fails, the service process terminates rather than reusing a thread that might still carry a client impersonation token.
-- IPC frames use the shared four-byte little-endian length prefix, are bounded to 128 KiB, and have a finite 30-second read deadline. The implementation drains the pipe buffer incrementally so a payload larger than the kernel buffer cannot deadlock.
+- IPC frames use the shared four-byte little-endian length prefix, are bounded to 128 KiB, and have a finite 30-second read deadline.
+- The listener validates the active-console session, reads only the fixed four-byte frame header, then impersonates and verifies the client SID/session before allocating/reading the JSON payload or dispatching any operation. This ordering is required because Win32 binds `ImpersonateNamedPipeClient` to the last client message read from the pipe. The implementation drains the pipe buffer incrementally so a payload larger than the kernel buffer cannot deadlock.
 - A replay guard is created after peer authentication. One request is handled per connection; malformed or unauthorized clients are dropped.
 - Only `GetStatus` and `GetDiagnostics` return a status-only response. `Connect`, `Disconnect`, and `Recover` are explicitly rejected.
 - The Windows CI builds this executable independently, stages it as a Tauri sidecar, and exercises its service installation/start/removal lifecycle in the NSIS smoke test.

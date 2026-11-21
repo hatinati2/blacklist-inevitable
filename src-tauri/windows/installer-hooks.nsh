@@ -55,7 +55,8 @@
   helper_available:
   DetailPrint "Agent PREUNINSTALL: invoking persisted service removal helper..."
   ClearErrors
-  ExecWait '"$WINDIR\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\\agent-service.ps1" -Mode Uninstall -AgentPath "$INSTDIR\\blacklist-inevitable-agent.exe" -LogPath "$TEMP\\BlacklistInevitableAgent-service.log"' $0
+  ; Resolve PowerShell through NSIS instead of environment-variable expansion.
+  ExecWait '"$SYSDIR\\WindowsPowerShell\\v1.0\\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\\agent-service.ps1" -Mode Uninstall -AgentPath "$INSTDIR\\blacklist-inevitable-agent.exe" -LogPath "$TEMP\\BlacklistInevitableAgent-service.log"' $0
   IfErrors helper_launch_failed
   FileOpen $R9 "$TEMP\\BlacklistInevitableAgent-uninstall-hook.log" a
   FileWrite $R9 "PREUNINSTALL helper exit code=$0"
@@ -69,9 +70,10 @@
   Goto helper_uninstall_done
   helper_launch_failed:
   FileOpen $R9 "$TEMP\\BlacklistInevitableAgent-uninstall-hook.log" a
-  FileWrite $R9 "ERROR: ExecWait could not launch PowerShell (NSIS error flag set)."
+  FileWrite $R9 "ERROR: ExecWait could not launch PowerShell from $SYSDIR (NSIS error flag set)."
   FileClose $R9
   MessageBox MB_ICONSTOP "The Agent service removal helper could not be launched. Uninstallation has been cancelled." /SD IDOK
+  SetErrorLevel 1
   Abort
   helper_uninstall_done:
   SetOutPath "$INSTDIR"

@@ -17,9 +17,11 @@ A Windows-first desktop app for importing proxy profiles and testing them before
 Real Delay probe endpoints and request timeout can be changed in the UI and are saved in application data. Xray-core and Mihomo are target engines only; their adapters are not implemented yet.
 On Windows, during Tauri setup the application joins its own Job Object configured with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, after the initial Tauri/WebView helper processes have been initialized but before the app event loop can dispatch engine commands. Those existing UI helpers remain outside the engine Job Object. Windows automatically gives later child processes membership in their parent's Job Object at process creation, so each engine child is already contained before it can run or before the app can crash. Engine children are still created with their initial thread suspended; the supervisor verifies membership in this specific Job Object (and assigns them while still suspended only as a fallback) before resuming the thread. Production engine work starts blocked and is enabled only after Tauri setup confirms that the app process joined the Job Object. If attachment, membership verification, or safe thread resume fails, engine work remains blocked and the child is terminated. This removes the create-to-assignment orphan window; a Windows integration test also checks that closing one app instance's Job Object does not terminate another instance's child. The runtime cleanup-health gate remains in-memory.
 
+On Windows, the per-machine NSIS installer now bundles and installs a separate privileged Agent service after validating matching Authenticode signatures on the desktop and Agent executables. The service runs as LocalSystem, provisions a protected service-owned data directory, and exposes a local-only authenticated named pipe. The desktop app can query its status; the pipe still rejects Connect, Disconnect, and Recover. This is an installation and IPC milestone, not a working VPN connection.
+
 ## Not implemented
 
-- Normal Connect / Disconnect and device traffic routing.
+- Normal Connect / Disconnect and device traffic routing; the Agent currently exposes status/diagnostics only.
 - TUN, Wintun, packet capture, or Windows system-proxy integration.
 - Xray-core and Mihomo adapters.
 - Mieru profiles (the upstream sing-box 1.14.4 adapter does not implement Mieru).

@@ -400,10 +400,25 @@ function Install-AgentService {
         $serviceResult = Invoke-CimMethod -InputObject $service -MethodName Change -Arguments $serviceArguments -ErrorAction Stop
         $serviceOperation = "Change"
     } else {
-        $createProperties = @{} + $serviceArguments
-        $createProperties["Name"] = $ServiceName
         try {
-            $serviceResult = New-CimInstance -ClassName Win32_Service -Namespace "root/cimv2" -Property $createProperties -ErrorAction Stop
+            # Win32_Service is a dynamic WMI provider class. Create it through
+            # its Create method rather than New-CimInstance/PutInstance; the
+            # method accepts nullable strings and string arrays explicitly.
+            $serviceClass = [WMIClass]"\\.\root\cimv2:Win32_Service"
+            $serviceResult = $serviceClass.Create(
+                $ServiceName,
+                $DisplayName,
+                $quotedAgentPath,
+                [uint32]16,
+                [uint32]1,
+                "Automatic",
+                $false,
+                "LocalSystem",
+                $null,
+                $null,
+                [string[]]@(),
+                [string[]]@()
+            )
         } catch {
             Write-AgentServiceLog "Win32_Service.Create failed: $($_.Exception.GetType().FullName): $($_.Exception.Message)"
             if ($_.Exception.InnerException) {

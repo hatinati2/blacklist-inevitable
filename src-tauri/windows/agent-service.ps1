@@ -230,10 +230,15 @@ function Get-ServiceRecord {
     return Get-CimInstance -ClassName Win32_Service -Filter "Name='$ServiceName'" -ErrorAction SilentlyContinue
 }
 function Get-RegisteredBinaryPath($Service) {
-    if ($Service.PathName -match '^\s*"([^"]+)"') {
-        return Get-NormalizedPath $Matches[1]
+    $rawPath = ([string]$Service.PathName).Trim()
+    if (-not $rawPath.StartsWith([string][char]34, [StringComparison]::Ordinal)) {
+        throw "The registered Agent service image path is not quoted: [$rawPath]"
     }
-    return Get-NormalizedPath (($Service.PathName -split '\s+', 2)[0])
+    $closingQuote = $rawPath.IndexOf([char]34, 1)
+    if ($closingQuote -le 1 -or $rawPath.Substring($closingQuote + 1).Trim().Length -ne 0) {
+        throw "The registered Agent service image path is malformed or contains unexpected arguments: [$rawPath]"
+    }
+    return Get-NormalizedPath $rawPath.Substring(1, $closingQuote - 1)
 }
 function Assert-OwnedService($Service) {
     if (-not [string]::Equals((Get-RegisteredBinaryPath $Service), (Get-NormalizedPath $AgentPath), [StringComparison]::OrdinalIgnoreCase)) {
@@ -377,13 +382,33 @@ function Install-AgentService {
 
     Write-AgentServiceLog "Trusted signer pair accepted; configuring service image path."
     $quotedAgentPath = '"' + (Get-NormalizedPath $AgentPath) + '"'
+    $serviceArguments = @{
+        DisplayName = $DisplayName
+        PathName = $quotedAgentPath
+        ServiceType = [uint32]16
+        ErrorControl = [uint32]1
+        StartMode = "Auto"
+        DesktopInteract = $false
+        StartName = "LocalSystem"
+        StartPassword = $null
+        LoadOrderGroup = $null
+        LoadOrderGroupDependencies = [string[]]@()
+        ServiceDependencies = [string[]]@()
+    }
     if ($service) {
         Stop-OwnedService
-        Invoke-Sc @("config", $ServiceName, "binPath=", $quotedAgentPath, "start=", "auto", "obj=", "LocalSystem", "type=", "own", "error=", "normal", "DisplayName=", $DisplayName)
+        $serviceResult = Invoke-CimMethod -InputObject $service -MethodName Change -Arguments $serviceArguments -ErrorAction Stop
+        $serviceOperation = "Change"
     } else {
-        Invoke-Sc @("create", $ServiceName, "binPath=", $quotedAgentPath, "start=", "auto", "obj=", "LocalSystem", "type=", "own", "error=", "normal", "DisplayName=", $DisplayName)
+        $createArguments = @{} + $serviceArguments
+        $createArguments["Name"] = $ServiceName
+        $serviceResult = Invoke-CimMethod -ClassName Win32_Service -Namespace "root/cimv2" -MethodName Create -Arguments $createArguments -ErrorAction Stop
+        $serviceOperation = "Create"
     }
-
+    if ([uint32]$serviceResult.ReturnValue -ne 0) {
+        throw "Win32_Service.$serviceOperation failed with return value $($serviceResult.ReturnValue)."
+    }
+    Write-AgentServiceLog "Win32_Service.$serviceOperation succeeded; requested quoted image path=[$quotedAgentPath]"
     Invoke-Sc @("description", $ServiceName, "Authenticated local status IPC host. Network-changing operations are disabled.")
     Invoke-Sc @("sidtype", $ServiceName, "unrestricted")
     $sidOutput = (& "$env:SystemRoot\System32\sc.exe" showsid $ServiceName 2>&1 | Out-String)

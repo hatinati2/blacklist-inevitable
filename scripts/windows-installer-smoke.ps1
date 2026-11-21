@@ -310,36 +310,57 @@ if (Test-Path -LiteralPath $uninstallerPath) {
 if (Test-Path -LiteralPath (Join-Path $installDirectory "agent-service.ps1")) {
     throw "The persisted Agent service helper remains after uninstallation."
 }
-if (Test-Path -LiteralPath $installDirectory) {
+if (Test-Path -LiteralPath $installDirectory -PathType Container) {
     $remainingEntries = @(Get-ChildItem -LiteralPath $installDirectory -Force -ErrorAction SilentlyContinue |
         Select-Object -ExpandProperty FullName)
-    if ($remainingEntries.Count -gt 0) {
-        throw "The installation directory remains after uninstallation: $($remainingEntries -join '; ')"
+    $remainingDescription = if ($remainingEntries.Count -gt 0) {
+        $remainingEntries -join "; "
+    } else {
+        "(the directory is empty)"
     }
+    throw "The installation directory remains after uninstallation: $installDirectory; contents: $remainingDescription"
 }
 if (Get-Service -Name "BlacklistInevitableAgent" -ErrorAction SilentlyContinue) {
     throw "The Agent Windows service remains registered after uninstallation."
 }
+Write-Host "Verified uninstall cleanup: desktop executable, Agent sidecar, uninstall helper, uninstaller, installation directory, and Agent service are all absent."
 
 
+# Build real unsigned PE executables with the Rust toolchain already validated
+# by this workflow. PowerShell 7's Add-Type does not support ConsoleApplication
+# output, so do not use Add-Type -OutputType ConsoleApplication for this probe.
 $unsignedProbeDirectory = Join-Path $env:RUNNER_TEMP "blacklist-inevitable-unsigned-agent-probe"
 New-Item -ItemType Directory -Path $unsignedProbeDirectory -Force | Out-Null
-$unsignedAgent = Join-Path $unsignedProbeDirectory "agent.exe"
-$unsignedDesktop = Join-Path $unsignedProbeDirectory "desktop.exe"
-Add-Type -TypeDefinition "namespace BlacklistInevitableUnsignedAgentProbe { public static class Program { public static void Main() {} } }" -OutputAssembly $unsignedAgent -OutputType ConsoleApplication
-Add-Type -TypeDefinition "namespace BlacklistInevitableUnsignedDesktopProbe { public static class Program { public static void Main() {} } }" -OutputAssembly $unsignedDesktop -OutputType ConsoleApplication
-if ((Get-AuthenticodeSignature -LiteralPath $unsignedAgent).Status -ne "NotSigned" -or
-    (Get-AuthenticodeSignature -LiteralPath $unsignedDesktop).Status -ne "NotSigned") {
-    throw "The unsigned service-policy probe binaries unexpectedly have Authenticode signatures."
-}
-$serviceHelper = Join-Path $PSScriptRoot "..\\src-tauri\\windows\\agent-service.ps1"
-& "$env:SystemRoot\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $serviceHelper -Mode Install -AgentPath $unsignedAgent -DesktopPath $unsignedDesktop
-if ($LASTEXITCODE -ne 10) {
-    throw "The unsigned Agent installation policy returned $LASTEXITCODE instead of the explicit skip code 10."
-}
-if (Get-Service -Name "BlacklistInevitableAgent" -ErrorAction SilentlyContinue) {
-    throw "The unsigned service-policy probe registered a privileged Windows service."
-}
-Remove-Item -LiteralPath $unsignedProbeDirectory -Recurse -Force
+try {
+    $rustc = (Get-Command rustc -ErrorAction Stop).Source
+    $unsignedProbeSource = Join-Path $unsignedProbeDirectory "unsigned-probe.rs"
+    Set-Content -LiteralPath $unsignedProbeSource -Value "fn main() {}" -Encoding ascii
+    $unsignedAgent = Join-Path $unsignedProbeDirectory "agent.exe"
+    $unsignedDesktop = Join-Path $unsignedProbeDirectory "desktop.exe"
 
-Write-Host "Windows installer smoke test passed: install, launch, service lifecycle, and uninstall."
+    & $rustc --edition=2021 --target x86_64-pc-windows-msvc --crate-name unsigned_agent_probe -o $unsignedAgent $unsignedProbeSource
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $unsignedAgent -PathType Leaf)) {
+        throw "Could not compile the unsigned Agent PE probe (rustc exit code: $LASTEXITCODE)."
+    }
+    & $rustc --edition=2021 --target x86_64-pc-windows-msvc --crate-name unsigned_desktop_probe -o $unsignedDesktop $unsignedProbeSource
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $unsignedDesktop -PathType Leaf)) {
+        throw "Could not compile the unsigned desktop PE probe (rustc exit code: $LASTEXITCODE)."
+    }
+
+    if ((Get-AuthenticodeSignature -LiteralPath $unsignedAgent).Status -ne "NotSigned" -or
+        (Get-AuthenticodeSignature -LiteralPath $unsignedDesktop).Status -ne "NotSigned") {
+        throw "The unsigned service-policy probe binaries unexpectedly have Authenticode signatures."
+    }
+    $serviceHelper = Join-Path $PSScriptRoot "..\\src-tauri\\windows\\agent-service.ps1"
+    & "$env:SystemRoot\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $serviceHelper -Mode Install -AgentPath $unsignedAgent -DesktopPath $unsignedDesktop
+    if ($LASTEXITCODE -ne 10) {
+        throw "The unsigned Agent installation policy returned $LASTEXITCODE instead of the explicit skip code 10."
+    }
+    if (Get-Service -Name "BlacklistInevitableAgent" -ErrorAction SilentlyContinue) {
+        throw "The unsigned service-policy probe registered a privileged Windows service."
+    }
+} finally {
+    Remove-Item -LiteralPath $unsignedProbeDirectory -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+Write-Host "Windows installer smoke test passed: install, launch, signed service lifecycle, complete uninstall, and unsigned-package rejection."

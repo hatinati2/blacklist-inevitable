@@ -385,9 +385,9 @@ function Install-AgentService {
     $serviceArguments = @{
         DisplayName = $DisplayName
         PathName = $quotedAgentPath
-        ServiceType = [uint32]16
-        ErrorControl = [uint32]1
-        StartMode = "Auto"
+        ServiceType = [byte]16
+        ErrorControl = [byte]1
+        StartMode = "Automatic"
         DesktopInteract = $false
         StartName = "LocalSystem"
         StartPassword = $null

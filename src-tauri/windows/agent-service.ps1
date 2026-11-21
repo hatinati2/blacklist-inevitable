@@ -397,20 +397,24 @@ function Install-AgentService {
     }
     if ($service) {
         Stop-OwnedService
-        $serviceResult = Invoke-CimMethod -InputObject $service -MethodName Change -Arguments $serviceArguments -ErrorAction Stop
+        # Win32_Service.Change declares ServiceType and ErrorControl as uint32.
+        $changeArguments = @{} + $serviceArguments
+        $changeArguments["ServiceType"] = [uint32]16
+        $changeArguments["ErrorControl"] = [uint32]1
+        $serviceResult = Invoke-CimMethod -InputObject $service -MethodName Change -Arguments $changeArguments -ErrorAction Stop
         $serviceOperation = "Change"
     } else {
         try {
-            # Win32_Service is a dynamic WMI provider class. Create it through
-            # its Create method rather than New-CimInstance/PutInstance; the
-            # method accepts nullable strings and string arrays explicitly.
+            # Win32_Service.Create declares ServiceType and ErrorControl as uint8
+            # (unlike Change, which declares both as uint32). Keep the positional
+            # call aligned with the provider's MOF signature.
             $serviceClass = [WMIClass]"\\.\root\cimv2:Win32_Service"
             $serviceResult = $serviceClass.Create(
                 $ServiceName,
                 $DisplayName,
                 $quotedAgentPath,
-                [uint32]16,
-                [uint32]1,
+                [byte]16,
+                [byte]1,
                 "Automatic",
                 $false,
                 "LocalSystem",

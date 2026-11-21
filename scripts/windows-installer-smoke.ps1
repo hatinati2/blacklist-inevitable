@@ -136,8 +136,57 @@ if ($agentSignature.Status -eq "Valid" -and $desktopSignature.Status -eq "Valid"
         throw "The Agent service SID is not enabled."
     }
     $serviceSecurity = (& "$env:SystemRoot\System32\sc.exe" sdshow "BlacklistInevitableAgent" 2>&1 | Out-String)
-    if ($LASTEXITCODE -ne 0 -or $serviceSecurity -notmatch "\(A;;GA;;;SY\)" -or $serviceSecurity -notmatch "\(A;;GA;;;BA\)" -or $serviceSecurity -notmatch "\(A;;LC;;;IU\)") {
-        throw "The Agent service DACL does not match the expected SYSTEM, Administrators, and query-only Interactive Users policy."
+    $sdshowExitCode = $LASTEXITCODE
+    Write-Host "Agent service SDDL (sc.exe sdshow, exit=$sdshowExitCode): $($serviceSecurity.Trim())"
+    if ($sdshowExitCode -ne 0) {
+        throw "Could not read the Agent service DACL with sc.exe sdshow: $($serviceSecurity.Trim())"
+    }
+
+    # SCM may canonicalize generic SDDL rights (GA/LC) to their service-specific
+    # access masks. Parse the descriptor and compare effective masks instead of
+    # relying on the exact textual spelling returned by sdshow.
+    try {
+        $serviceDescriptor = [System.Security.AccessControl.RawSecurityDescriptor]::new($serviceSecurity.Trim())
+    } catch {
+        throw "Could not parse the Agent service SDDL [$($serviceSecurity.Trim())]: $($_.Exception.Message)"
+    }
+    $daclProtected = [bool]($serviceDescriptor.ControlFlags -band [System.Security.AccessControl.ControlFlags]::DiscretionaryAclProtected)
+    $actualServiceAces = @()
+    foreach ($ace in $serviceDescriptor.DiscretionaryAcl) {
+        if ($ace -isnot [System.Security.AccessControl.CommonAce] -or
+            $ace.AceType -ne [System.Security.AccessControl.AceType]::AccessAllowed) {
+            throw "The Agent service DACL contains a non-standard or non-allow ACE: $($ace.GetType().FullName), type=$($ace.AceType)."
+        }
+        $actualServiceAces += [pscustomobject]@{
+            Sid = $ace.SecurityIdentifier.Value
+            Mask = [uint32]$ace.AccessMask
+            Flags = $ace.AceFlags
+        }
+    }
+    $expectedServiceMasks = @{
+        "S-1-5-18" = @(0x000F01FF, 0x10000000) # LocalSystem: SERVICE_ALL_ACCESS
+        "S-1-5-32-544" = @(0x000F01FF, 0x10000000) # Administrators: SERVICE_ALL_ACCESS
+        "S-1-5-4" = @(0x00000004) # Interactive Users: SERVICE_QUERY_STATUS only
+    }
+    $serviceDaclValid = $daclProtected -and $actualServiceAces.Count -eq 3
+    foreach ($sid in $expectedServiceMasks.Keys) {
+        $sidAces = @($actualServiceAces | Where-Object { $_.Sid -eq $sid })
+        if ($sidAces.Count -ne 1 -or
+            $sidAces[0].Mask -notin $expectedServiceMasks[$sid] -or
+            $sidAces[0].Flags -ne [System.Security.AccessControl.AceFlags]::None) {
+            $serviceDaclValid = $false
+        }
+    }
+    if (-not $serviceDaclValid) {
+        $actualDescription = ($actualServiceAces | ForEach-Object {
+            "{0}=0x{1:X8}/flags:{2}" -f $_.Sid, $_.Mask, $_.Flags
+        }) -join "; "
+        Write-Host "Agent service DACL parsed details: protected=$daclProtected; ACEs=$actualDescription"
+        if (Test-Path -LiteralPath $agentServiceLog) {
+            Write-Host "Agent helper diagnostic log:"
+            Get-Content -LiteralPath $agentServiceLog -Tail 100 | ForEach-Object { Write-Host $_ }
+        }
+        throw "The Agent service DACL is not the exact protected policy. Expected SYSTEM and Administrators SERVICE_ALL_ACCESS (0xF01FF), Interactive Users SERVICE_QUERY_STATUS (0x4); actual: $actualDescription"
     }
     $journalDirectory = Join-Path $env:ProgramData "BlacklistInevitable\Agent"
     if (-not (Test-Path -LiteralPath $journalDirectory -PathType Container)) {

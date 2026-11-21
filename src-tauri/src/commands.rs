@@ -80,6 +80,32 @@ pub async fn get_app_status(app: AppHandle) -> AppStatus {
     }
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentServiceStatus {
+    available: bool,
+    state: String,
+    detail: String,
+}
+
+/// Query only the Agent's non-mutating status endpoint. No profile data or
+/// credentials cross this boundary; all network-mutating RPCs remain disabled.
+#[tauri::command]
+pub async fn get_agent_service_status() -> AgentServiceStatus {
+    match crate::agent_client::query_status().await {
+        Ok(detail) => AgentServiceStatus {
+            available: true,
+            state: "running".to_string(),
+            detail,
+        },
+        Err(detail) => AgentServiceStatus {
+            available: false,
+            state: if cfg!(windows) { "unavailable" } else { "unsupported" }.to_string(),
+            detail,
+        },
+    }
+}
+
 #[tauri::command]
 pub fn get_profiles(app: AppHandle) -> Result<Vec<ProfileSummary>, String> {
     profile_store::list_profiles(&app)

@@ -68,6 +68,7 @@ Naive import/config mapping is implemented for a bounded subset; remote authenti
 - [x] Add bounded length-prefixed Agent IPC stream helpers and a per-authenticated-connection duplicate-request guard; the Windows named-pipe listener, DACL, and caller-token checks remain open.
 - [x] Add a versioned, bounded, non-secret Windows Agent recovery journal with monotonic checkpoints and fail-closed loading; service wiring and OS reconciliation remain open.
 - [ ] Add an explicit Rust-owned Connect / Disconnect state machine.
+- [ ] Require a complete OS-derived security verification proof before `Connected`: Agent WFP enforcement/persistence, IPv4/IPv6 safety, encrypted DNS/bootstrap, routing-mode compatibility, and physical-egress probes.
 - [ ] Add Windows platform integration only for the normal connection path.
 - [ ] Implement a signed, narrowly scoped Windows VPN agent/service so the Tauri UI remains unelevated; add authenticated named-pipe IPC and secure credential handoff.
 - [x] Define destination-based Global and Rule routing; generate Iran-aware Direct rules from geosite-ir/geoip-ir, with foreign traffic using the VPN outbound by default.

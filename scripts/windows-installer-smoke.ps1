@@ -3,9 +3,11 @@ $ErrorActionPreference = "Stop"
 $agentServiceLog = Join-Path $env:TEMP "BlacklistInevitableAgent-service.log"
 $installerLog = Join-Path $env:TEMP "blacklist-inevitable-nsis-install.log"
 $uninstallerLog = Join-Path $env:TEMP "blacklist-inevitable-nsis-uninstall.log"
+$uninstallHookLog = Join-Path $env:TEMP "BlacklistInevitableAgent-uninstall-hook.log"
 Remove-Item -LiteralPath $agentServiceLog -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $installerLog -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $uninstallerLog -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $uninstallHookLog -Force -ErrorAction SilentlyContinue
 
 $installerDirectory = Join-Path $PSScriptRoot "..\src-tauri\target\release\bundle\nsis"
 $installer = Get-ChildItem -Path $installerDirectory -Filter "*.exe" -File |
@@ -255,6 +257,14 @@ if (Test-Path -LiteralPath $appPath) {
     } else {
         Write-Host "NSIS uninstaller log was not created: $uninstallerLog"
     }
+    if (Test-Path -LiteralPath $uninstallHookLog) {
+        Write-Host "NSIS PREUNINSTALL hook diagnostic log:"
+        Get-Content -LiteralPath $uninstallHookLog -Tail 100 | ForEach-Object { Write-Host $_ }
+    } else {
+        Write-Host "NSIS PREUNINSTALL hook was not entered; diagnostic log was not created: $uninstallHookLog"
+    }
+    $persistedHelper = Join-Path $installDirectory "agent-service.ps1"
+    Write-Host "Persisted uninstall helper exists: $(Test-Path -LiteralPath $persistedHelper -PathType Leaf)"
     if (Test-Path -LiteralPath $agentServiceLog) {
         Write-Host "Agent helper diagnostic log:"
         Get-Content -LiteralPath $agentServiceLog -Tail 200 | ForEach-Object { Write-Host $_ }

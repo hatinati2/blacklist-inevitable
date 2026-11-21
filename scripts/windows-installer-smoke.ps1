@@ -229,18 +229,48 @@ finally {
 }
 
 Write-Host "Uninstalling the application silently..."
-$uninstallProcess = Start-Process -FilePath $uninstallerPath -ArgumentList @("/S", "/LOG=$uninstallerLog") -PassThru
+# NSIS normally starts a second copy of its uninstaller from %TEMP% and exits
+# the original process immediately. Copy it ourselves and pass _?=$INSTDIR so
+# this process performs the uninstall directly and its exit code is meaningful.
+# The copy must live outside $installDirectory so NSIS can delete the installed
+# uninstall.exe and remove the installation directory.
+$smokeUninstaller = Join-Path $env:RUNNER_TEMP "blacklist-inevitable-smoke-uninstaller.exe"
+Remove-Item -LiteralPath $smokeUninstaller -Force -ErrorAction SilentlyContinue
+Copy-Item -LiteralPath $uninstallerPath -Destination $smokeUninstaller -Force
+if (-not (Test-Path -LiteralPath $smokeUninstaller -PathType Leaf)) {
+    throw "Could not stage a temporary copy of the NSIS uninstaller."
+}
+$uninstallArguments = @("/S", "/LOG=$uninstallerLog", "_?=$installDirectory")
+$uninstallProcess = Start-Process -FilePath $smokeUninstaller -ArgumentList $uninstallArguments -PassThru
 if (-not $uninstallProcess.WaitForExit(120000)) {
+    $uninstallPid = $uninstallProcess.Id
+    $uninstallTree = @(Get-CimInstance -ClassName Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object { $_.ProcessId -eq $uninstallPid -or $_.ParentProcessId -eq $uninstallPid } |
+        Select-Object ProcessId, ParentProcessId, Name, CommandLine)
+    Write-Host ("Uninstaller process tree snapshot: " + ($uninstallTree | Format-Table -AutoSize | Out-String))
     try {
         $uninstallProcess.Kill($true)
         [void]$uninstallProcess.WaitForExit(10000)
     } catch {
         Write-Warning "Could not terminate the timed-out uninstaller process tree: $_"
     }
-    throw "The NSIS uninstaller did not exit within 120 seconds."
+    throw "The NSIS uninstaller did not finish within 120 seconds."
 }
 $uninstallProcess.Refresh()
 if ($uninstallProcess.ExitCode -ne 0) {
+    Write-Host "NSIS uninstaller exited with code $($uninstallProcess.ExitCode)."
+    if (Test-Path -LiteralPath $uninstallerLog) {
+        Write-Host "NSIS uninstaller diagnostic log:"
+        Get-Content -LiteralPath $uninstallerLog -Tail 300 | ForEach-Object { Write-Host $_ }
+    }
+    if (Test-Path -LiteralPath $uninstallHookLog) {
+        Write-Host "NSIS PREUNINSTALL hook diagnostic log:"
+        Get-Content -LiteralPath $uninstallHookLog -Tail 100 | ForEach-Object { Write-Host $_ }
+    }
+    if (Test-Path -LiteralPath $agentServiceLog) {
+        Write-Host "Agent helper diagnostic log:"
+        Get-Content -LiteralPath $agentServiceLog -Tail 200 | ForEach-Object { Write-Host $_ }
+    }
     throw "The NSIS uninstaller exited with code $($uninstallProcess.ExitCode)."
 }
 if (Test-Path -LiteralPath $appPath) {
@@ -273,6 +303,19 @@ if (Test-Path -LiteralPath $appPath) {
 }
 if (Test-Path -LiteralPath $agentPath) {
     throw "The Agent sidecar remains after uninstallation: $agentPath"
+}
+if (Test-Path -LiteralPath $uninstallerPath) {
+    throw "The installed NSIS uninstaller remains after uninstallation: $uninstallerPath"
+}
+if (Test-Path -LiteralPath (Join-Path $installDirectory "agent-service.ps1")) {
+    throw "The persisted Agent service helper remains after uninstallation."
+}
+if (Test-Path -LiteralPath $installDirectory) {
+    $remainingEntries = @(Get-ChildItem -LiteralPath $installDirectory -Force -ErrorAction SilentlyContinue |
+        Select-Object -ExpandProperty FullName)
+    if ($remainingEntries.Count -gt 0) {
+        throw "The installation directory remains after uninstallation: $($remainingEntries -join '; ')"
+    }
 }
 if (Get-Service -Name "BlacklistInevitableAgent" -ErrorAction SilentlyContinue) {
     throw "The Agent Windows service remains registered after uninstallation."

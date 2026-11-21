@@ -400,13 +400,21 @@ function Install-AgentService {
         $serviceResult = Invoke-CimMethod -InputObject $service -MethodName Change -Arguments $serviceArguments -ErrorAction Stop
         $serviceOperation = "Change"
     } else {
-        $createArguments = @{} + $serviceArguments
-        $createArguments["Name"] = $ServiceName
-        $serviceResult = Invoke-CimMethod -ClassName Win32_Service -Namespace "root/cimv2" -MethodName Create -Arguments $createArguments -ErrorAction Stop
+        $createProperties = @{} + $serviceArguments
+        $createProperties["Name"] = $ServiceName
+        try {
+            $serviceResult = New-CimInstance -ClassName Win32_Service -Namespace "root/cimv2" -Property $createProperties -ErrorAction Stop
+        } catch {
+            Write-AgentServiceLog "Win32_Service.Create failed: $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+            if ($_.Exception.InnerException) {
+                Write-AgentServiceLog "Win32_Service.Create inner exception: $($_.Exception.InnerException.GetType().FullName): $($_.Exception.InnerException.Message)"
+            }
+            throw
+        }
         $serviceOperation = "Create"
     }
-    if ([uint32]$serviceResult.ReturnValue -ne 0) {
-        throw "Win32_Service.$serviceOperation failed with return value $($serviceResult.ReturnValue)."
+    if ($serviceOperation -eq "Change" -and [uint32]$serviceResult.ReturnValue -ne 0) {
+        throw "Win32_Service.Change failed with return value $($serviceResult.ReturnValue)."
     }
     Write-AgentServiceLog "Win32_Service.$serviceOperation succeeded; requested quoted image path=[$quotedAgentPath]"
     Invoke-Sc @("description", $ServiceName, "Authenticated local status IPC host. Network-changing operations are disabled.")

@@ -149,10 +149,13 @@ mod tests {
 
     #[test]
     fn bounds_and_sanitizes_response_details() {
-        let payload = format!(
-            r#"{{"version":1,"requestId":"status-1","status":"ok","detail":"{}"}} "#,
-            "ready\n".repeat(300)
-        );
+        let payload = serde_json::json!({
+            "version": 1,
+            "requestId": "status-1",
+            "status": "ok",
+            "detail": "ready\r\n".repeat(300),
+        })
+        .to_string();
         let decoded = decode_agent_response(payload.as_bytes(), "status-1").unwrap();
         assert!(decoded.len() <= 1200);
         assert!(!decoded.chars().any(|character| character == '\r'));

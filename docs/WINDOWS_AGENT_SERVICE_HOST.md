@@ -14,7 +14,7 @@
 - IPC frames use the shared four-byte little-endian length prefix, are bounded to 128 KiB, and have a finite 30-second read deadline. The implementation drains the pipe buffer incrementally so a payload larger than the kernel buffer cannot deadlock.
 - A replay guard is created after peer authentication. One request is handled per connection; malformed or unauthorized clients are dropped.
 - Only `GetStatus` and `GetDiagnostics` return a status-only response. `Connect`, `Disconnect`, and `Recover` are explicitly rejected.
-- The Windows CI builds this executable independently from the Tauri desktop installer.
+- The Windows CI builds this executable independently, stages it as a Tauri sidecar, and exercises its service installation/start/removal lifecycle in the NSIS smoke test.
 
 ## Important identity and deployment constraints
 
@@ -26,27 +26,19 @@ The named-pipe DACL is only the first access gate. Authorization also compares t
 
 ## Deliberate non-goals
 
-This is still a service/IPC foundation, not an installed or operational VPN Agent. It does not:
+This is now an installable Windows service/IPC foundation, but not an operational VPN Agent. The per-machine NSIS installer bundles the Agent sidecar and, when the desktop and Agent executables have valid matching Authenticode signatures, registers the service as LocalSystem with a service SID and protected ProgramData ACLs. An unsigned pair skips service registration; invalid or mismatched signatures fail closed. See [WINDOWS_AGENT_INSTALLATION.md](WINDOWS_AGENT_INSTALLATION.md).
 
-- register, install, upgrade, repair, or uninstall itself as a Windows service;
-- choose or provision its service account, service SID, binary signature policy, or service-owned journal directory ACL;
-- include a desktop-side named-pipe client or connect the Tauri UI to the service;
-- transfer credentials or accept Connect/Disconnect/Recover operations;
-- open WFP, start sing-box, create TUN, change routes/DNS, or mutate firewall policy;
-- load the recovery journal or report a real VPN connection state.
-
-The desktop app does not launch or install this binary. The NSIS installer does not bundle it yet. Do not manually register this executable as a production VPN service.
+The installer lifecycle does not yet connect the desktop UI to the pipe. The Agent continues to answer only `GetStatus` and `GetDiagnostics`; `Connect`, `Disconnect`, and `Recover` remain rejected. It does not open WFP, start sing-box, create TUN, change routes/DNS, mutate firewall policy, or load the recovery journal.
 
 ## Required next slices
 
-1. Add the unelevated desktop named-pipe client, finite timeouts, peer/server identity validation, and response correlation. Keep all network operations rejected.
-2. Add service installation/upgrade/removal with explicit UAC consent, signed-binary verification, LocalSystem/privilege provisioning, service SID hardening, protected journal directory ACLs, and tested rollback.
-3. Add authenticated profile/credential handoff with one-shot memory handling and no secret logging/persistence.
-4. Integrate the recovery journal and WFP transaction backend. Persist exact state before OS mutations and verify it during startup recovery.
-5. Add the Agent-owned connection runtime only after authorization and crash recovery are tested.
-6. Add Windows 10/11 integration tests for user logon/logoff, session switching, remote-client rejection, unauthorized SID rejection, malformed/oversized/replayed frames, stop during blocked pipe connect/read, service crash/reboot, and packet-capture leak acceptance.
+1. Add the unelevated desktop named-pipe client, finite timeouts, server identity validation, and response correlation. Keep all network operations rejected.
+2. Add authenticated profile/credential handoff with one-shot memory handling and no secret logging/persistence.
+3. Integrate the recovery journal and WFP transaction backend. Persist exact state before OS mutations and verify it during startup recovery.
+4. Add the Agent-owned connection runtime only after authorization and crash recovery are tested.
+5. Add Windows 10/11 integration tests for user logon/logoff, session switching, remote-client rejection, unauthorized SID rejection, malformed/oversized/replayed frames, stop during blocked pipe connect/read, service crash/reboot, and packet-capture leak acceptance.
 
-A green service-host build proves only that the Windows binary compiles and its automated checks pass. It is not evidence of a registered service, a connected desktop client, an active kill switch, or leak prevention.
+A green CI service lifecycle test proves that the signed test package can install, start, query, and remove the service on the hosted Windows runner. It does not prove that the desktop client connects, that VPN operations work, or that an active kill switch or leak prevention exists.
 
 ## Microsoft API references
 

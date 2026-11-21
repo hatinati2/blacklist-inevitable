@@ -204,6 +204,52 @@ if ($agentSignature.Status -eq "Valid" -and $desktopSignature.Status -eq "Valid"
     if (Compare-Object -ReferenceObject $expectedJournalSids -DifferenceObject $journalSids) {
         throw "The Agent journal directory ACL is not restricted to SYSTEM, Administrators, and the Agent service SID."
     }
+
+    # Exercise the installed service's status-only named-pipe protocol before
+    # launching the desktop app. This proves that the LocalSystem service is
+    # accepting an authenticated local caller and returning a correlated frame.
+    $agentPipe = [System.IO.Pipes.NamedPipeClientStream]::new(
+        ".",
+        "BlacklistInevitable.Agent.v1",
+        [System.IO.Pipes.PipeDirection]::InOut,
+        [System.IO.Pipes.PipeOptions]::None
+    )
+    try {
+        $agentPipe.Connect(10000)
+        $statusRequest = [Text.Encoding]::UTF8.GetBytes('{"version":1,"requestId":"ci-status-01","operation":"getStatus"}')
+        $statusHeader = [BitConverter]::GetBytes([uint32]$statusRequest.Length)
+        $agentPipe.Write($statusHeader, 0, $statusHeader.Length)
+        $agentPipe.Write($statusRequest, 0, $statusRequest.Length)
+        $agentPipe.Flush()
+
+        $readExact = {
+            param([IO.Stream]$Stream, [int]$Count)
+            $buffer = New-Object byte[] $Count
+            $offset = 0
+            while ($offset -lt $Count) {
+                $read = $Stream.Read($buffer, $offset, $Count - $offset)
+                if ($read -le 0) { throw "The Agent pipe closed before a complete response frame arrived." }
+                $offset += $read
+            }
+            return ,$buffer
+        }
+        $responseHeader = & $readExact $agentPipe 4
+        $responseLength = [BitConverter]::ToUInt32($responseHeader, 0)
+        if ($responseLength -lt 1 -or $responseLength -gt 131072) {
+            throw "The Agent status response frame length is invalid: $responseLength."
+        }
+        $responsePayload = & $readExact $agentPipe ([int]$responseLength)
+        $agentResponse = [Text.Encoding]::UTF8.GetString($responsePayload) | ConvertFrom-Json
+        if ($agentResponse.version -ne 1 -or
+            $agentResponse.requestId -ne "ci-status-01" -or
+            $agentResponse.status -ne "ok") {
+            throw "The Agent status response did not match the request or was not successful."
+        }
+        Write-Host "Verified Agent named-pipe status response and request correlation."
+    }
+    finally {
+        $agentPipe.Dispose()
+    }
 } elseif ($agentSignature.Status -eq "NotSigned" -and $desktopSignature.Status -eq "NotSigned") {
     if ($service) {
         throw "An unsigned package must not register a privileged Agent service."
@@ -369,4 +415,4 @@ try {
 # returns success to the GitHub Actions pwsh wrapper.
 $global:LASTEXITCODE = 0
 
-Write-Host "Windows installer smoke test passed: install, launch, signed service lifecycle, complete uninstall, and unsigned-package rejection."
+Write-Host "Windows installer smoke test passed: install, launch, named-pipe status IPC, signed service lifecycle, complete uninstall, and unsigned-package rejection."

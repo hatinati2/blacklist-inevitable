@@ -90,5 +90,7 @@
     SetErrorLevel 1
     Abort
   helper_delete_done:
-  SetOutPath "$INSTDIR"
+  ; SetOutPath changes the process working directory. Keep it outside $INSTDIR
+  ; so Tauri's later RMDir "$INSTDIR" can remove the now-empty install folder.
+  SetOutPath "$TEMP"
 !macroend

@@ -41,19 +41,16 @@
 
 !macro NSIS_HOOK_PREUNINSTALL
   FileOpen $R9 "$TEMP\\BlacklistInevitableAgent-uninstall-hook.log" w
-  FileWrite $R9 "PREUNINSTALL entered; helper=$INSTDIR\\agent-service.ps1$$
-"
+  FileWrite $R9 "PREUNINSTALL entered; helper=$INSTDIR\\agent-service.ps1"
   IfFileExists "$INSTDIR\\agent-service.ps1" helper_available
-    FileWrite $R9 "ERROR: persisted helper is missing.$$
-"
+    FileWrite $R9 "ERROR: persisted helper is missing."
     FileClose $R9
     MessageBox MB_ICONSTOP "The Agent service helper is missing. Uninstallation has been cancelled to avoid leaving the service orphaned." /SD IDOK
     Abort
   helper_available:
   DetailPrint "Agent PREUNINSTALL: invoking persisted service removal helper..."
   ExecWait '"$WINDIR\\Sysnative\\WindowsPowerShell\\v1.0\\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\\agent-service.ps1" -Mode Uninstall -AgentPath "$INSTDIR\\blacklist-inevitable-agent.exe" -LogPath "$TEMP\\BlacklistInevitableAgent-service.log"' $0
-  FileWrite $R9 "PREUNINSTALL helper exit code=$0$$
-"
+  FileWrite $R9 "PREUNINSTALL helper exit code=$0"
   FileClose $R9
   DetailPrint "Agent PREUNINSTALL helper exit code: $0"
   ${If} $0 != 0

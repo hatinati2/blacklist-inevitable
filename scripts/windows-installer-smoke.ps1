@@ -208,11 +208,30 @@ if ($agentSignature.Status -eq "Valid" -and $desktopSignature.Status -eq "Valid"
     # Exercise the installed service's status-only named-pipe protocol before
     # launching the desktop app. This proves that the LocalSystem service is
     # accepting an authenticated local caller and returning a correlated frame.
+    if (-not ("BlacklistInevitable.SmokeSessionProbe" -as [type])) {
+        Add-Type -TypeDefinition @"
+using System.Runtime.InteropServices;
+namespace BlacklistInevitable {
+    public static class SmokeSessionProbe {
+        [DllImport("kernel32.dll", ExactSpelling = true)]
+        public static extern uint WTSGetActiveConsoleSessionId();
+    }
+}
+"@
+    }
+    $clientSessionId = [Diagnostics.Process]::GetCurrentProcess().SessionId
+    $consoleSessionId = [BlacklistInevitable.SmokeSessionProbe]::WTSGetActiveConsoleSessionId()
+    Write-Host "Agent IPC smoke-test client session: $clientSessionId; active console session: $consoleSessionId"
+    if ($clientSessionId -ne $consoleSessionId) {
+        throw "The Windows smoke-test process is not running in the active console session; authenticated Agent IPC cannot be tested from this session."
+    }
+
     $agentPipe = [System.IO.Pipes.NamedPipeClientStream]::new(
         ".",
         "BlacklistInevitable.Agent.v1",
         [System.IO.Pipes.PipeDirection]::InOut,
-        [System.IO.Pipes.PipeOptions]::None
+        [System.IO.Pipes.PipeOptions]::None,
+        [System.Security.Principal.TokenImpersonationLevel]::Identification
     )
     try {
         $agentPipe.Connect(10000)

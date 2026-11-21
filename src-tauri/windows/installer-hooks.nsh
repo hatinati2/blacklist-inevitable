@@ -40,16 +40,23 @@
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL
+  ; Do not keep an NSIS file handle open across ExecWait: execution can
+  ; overwrite volatile registers. Reopen the diagnostic file after the child.
   FileOpen $R9 "$TEMP\\BlacklistInevitableAgent-uninstall-hook.log" w
   FileWrite $R9 "PREUNINSTALL entered; helper=$INSTDIR\\agent-service.ps1"
+  FileClose $R9
   IfFileExists "$INSTDIR\\agent-service.ps1" helper_available
+    FileOpen $R9 "$TEMP\\BlacklistInevitableAgent-uninstall-hook.log" a
     FileWrite $R9 "ERROR: persisted helper is missing."
     FileClose $R9
     MessageBox MB_ICONSTOP "The Agent service helper is missing. Uninstallation has been cancelled to avoid leaving the service orphaned." /SD IDOK
     Abort
   helper_available:
   DetailPrint "Agent PREUNINSTALL: invoking persisted service removal helper..."
+  ClearErrors
   ExecWait '"$WINDIR\\Sysnative\\WindowsPowerShell\\v1.0\\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\\agent-service.ps1" -Mode Uninstall -AgentPath "$INSTDIR\\blacklist-inevitable-agent.exe" -LogPath "$TEMP\\BlacklistInevitableAgent-service.log"' $0
+  IfErrors helper_launch_failed
+  FileOpen $R9 "$TEMP\\BlacklistInevitableAgent-uninstall-hook.log" a
   FileWrite $R9 "PREUNINSTALL helper exit code=$0"
   FileClose $R9
   DetailPrint "Agent PREUNINSTALL helper exit code: $0"
@@ -57,6 +64,14 @@
     MessageBox MB_ICONSTOP "The Agent service could not be removed safely. Uninstallation has been cancelled." /SD IDOK
     Abort
   ${EndIf}
+  Goto helper_uninstall_done
+  helper_launch_failed:
+  FileOpen $R9 "$TEMP\\BlacklistInevitableAgent-uninstall-hook.log" a
+  FileWrite $R9 "ERROR: ExecWait could not launch PowerShell (NSIS error flag set)."
+  FileClose $R9
+  MessageBox MB_ICONSTOP "The Agent service removal helper could not be launched. Uninstallation has been cancelled." /SD IDOK
+  Abort
+  helper_uninstall_done:
   SetOutPath "$INSTDIR"
 !macroend
 

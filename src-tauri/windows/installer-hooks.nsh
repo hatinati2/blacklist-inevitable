@@ -50,11 +50,12 @@
     FileWrite $R9 "ERROR: persisted helper is missing."
     FileClose $R9
     MessageBox MB_ICONSTOP "The Agent service helper is missing. Uninstallation has been cancelled to avoid leaving the service orphaned." /SD IDOK
+    SetErrorLevel 1
     Abort
   helper_available:
   DetailPrint "Agent PREUNINSTALL: invoking persisted service removal helper..."
   ClearErrors
-  ExecWait '"$WINDIR\\Sysnative\\WindowsPowerShell\\v1.0\\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\\agent-service.ps1" -Mode Uninstall -AgentPath "$INSTDIR\\blacklist-inevitable-agent.exe" -LogPath "$TEMP\\BlacklistInevitableAgent-service.log"' $0
+  ExecWait '"$WINDIR\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\\agent-service.ps1" -Mode Uninstall -AgentPath "$INSTDIR\\blacklist-inevitable-agent.exe" -LogPath "$TEMP\\BlacklistInevitableAgent-service.log"' $0
   IfErrors helper_launch_failed
   FileOpen $R9 "$TEMP\\BlacklistInevitableAgent-uninstall-hook.log" a
   FileWrite $R9 "PREUNINSTALL helper exit code=$0"
@@ -62,6 +63,7 @@
   DetailPrint "Agent PREUNINSTALL helper exit code: $0"
   ${If} $0 != 0
     MessageBox MB_ICONSTOP "The Agent service could not be removed safely. Uninstallation has been cancelled." /SD IDOK
+    SetErrorLevel 1
     Abort
   ${EndIf}
   Goto helper_uninstall_done

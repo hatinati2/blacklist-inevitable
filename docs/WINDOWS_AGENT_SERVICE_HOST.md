@@ -32,8 +32,8 @@ The installer lifecycle does not yet connect the desktop UI to the pipe. The Age
 
 ## Required next slices
 
-1. Add the unelevated desktop named-pipe client, finite timeouts, server identity validation, and response correlation. Keep all network operations rejected.
-2. Add authenticated profile/credential handoff with one-shot memory handling and no secret logging/persistence.
+1. [x] Add the unelevated desktop status-only named-pipe client with finite timeouts, protocol-version checks, request correlation, and a hosted-Windows install/start/query/uninstall smoke test. No credentials or network-mutating requests are sent.
+2. Verify the server process image and signer from the desktop side before adding authenticated profile/credential handoff with one-shot memory handling and no secret logging/persistence.
 3. Integrate the recovery journal and WFP transaction backend. Persist exact state before OS mutations and verify it during startup recovery.
 4. Add the Agent-owned connection runtime only after authorization and crash recovery are tested.
 5. Add Windows 10/11 integration tests for user logon/logoff, session switching, remote-client rejection, unauthorized SID rejection, malformed/oversized/replayed frames, stop during blocked pipe connect/read, service crash/reboot, and packet-capture leak acceptance.

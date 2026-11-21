@@ -363,4 +363,10 @@ try {
     Remove-Item -LiteralPath $unsignedProbeDirectory -Recurse -Force -ErrorAction SilentlyContinue
 }
 
+# The unsigned-policy helper intentionally returns 10 to indicate that an unsigned
+# package must skip privileged service registration. We asserted that exact code
+# above; clear PowerShell's native exit status so the successful smoke test itself
+# returns success to the GitHub Actions pwsh wrapper.
+$global:LASTEXITCODE = 0
+
 Write-Host "Windows installer smoke test passed: install, launch, signed service lifecycle, complete uninstall, and unsigned-package rejection."

@@ -764,6 +764,10 @@ mod tests {
         assert!(journal.validate().is_err());
 
         let mut journal = example_journal(1, 1);
+        journal.routes[0].applied.interface_luid = Some(0);
+        assert!(journal.validate().is_err());
+
+        let mut journal = example_journal(1, 1);
         journal.dns[0].interface_index = 0;
         assert!(journal.validate().is_err());
 
@@ -774,6 +778,24 @@ mod tests {
         let mut journal = example_journal(1, 1);
         journal.firewall_filters[0].filter_id = 0;
         assert!(journal.validate().is_err());
+    }
+
+    #[test]
+    fn legacy_route_records_decode_without_stable_luid() {
+        let mut legacy = serde_json::to_value(example_journal(73, 1)).unwrap();
+        legacy["routes"][0]["applied"]
+            .as_object_mut()
+            .unwrap()
+            .remove("interfaceLuid");
+        legacy["routes"][0]["previous"]
+            .as_object_mut()
+            .unwrap()
+            .remove("interfaceLuid");
+
+        let decoded: RecoveryJournal = serde_json::from_value(legacy).unwrap();
+        assert_eq!(decoded.routes[0].applied.interface_luid, None);
+        assert_eq!(decoded.routes[0].previous.as_ref().unwrap().interface_luid, None);
+        decoded.validate().unwrap();
     }
 
     #[test]

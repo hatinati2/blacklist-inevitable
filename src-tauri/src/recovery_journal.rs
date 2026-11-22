@@ -127,6 +127,7 @@ pub struct DnsStackConfiguration {
     pub register_adapter_name: bool,
     pub enable_llmnr: bool,
     pub query_adapter_name: bool,
+    pub disable_unconstrained_queries: bool,
     /// Adapter settings flags returned by Windows, preserved for exact comparison.
     pub settings_flags: u64,
     pub server_properties: Vec<DnsDohServerProperty>,
@@ -141,8 +142,6 @@ pub struct DnsInterfaceConfiguration {
     /// None means the observer could not establish a complete stack snapshot.
     pub ipv4: Option<DnsStackConfiguration>,
     pub ipv6: Option<DnsStackConfiguration>,
-    /// Reserved Windows field is retained exactly if a future API version exposes it.
-    pub disable_unconstrained_queries: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -985,6 +984,7 @@ mod tests {
             register_adapter_name: false,
             enable_llmnr: false,
             query_adapter_name: false,
+            disable_unconstrained_queries: true,
             settings_flags: if ipv6 { 0x0001 | 0x0002 | 0x0004 | 0x0020 } else { 0x0002 | 0x0004 | 0x0020 },
             server_properties: vec![],
             profile_server_properties: vec![],
@@ -996,7 +996,6 @@ mod tests {
             interface_guid: "4d36e972-e325-11ce-bfc1-08002be10318".into(),
             ipv4: Some(dns_stack(false, "192.0.2.53")),
             ipv6: Some(dns_stack(true, "2001:db8::53")),
-            disable_unconstrained_queries: Some(true),
         })
     }
 

@@ -26,6 +26,20 @@ For each checkpoint, the store validates the full record, creates a unique pendi
 
 `remove_session` is idempotent, but it must only be called after the service has independently verified engine exit, TUN teardown, route/DNS restoration, and WFP filter cleanup. A journal is not a substitute for checking the real operating-system state.
 
+## Read-only reconciliation assessment
+
+`src-tauri/src/recovery_assessment.rs` now compares a journal against an explicitly supplied OS observation snapshot. It is a pure planner and does not query Windows or perform cleanup. Each resource is classified as:
+
+- `VerifiedClean`: positively absent or the exact prior route/DNS state is restored.
+- `NeedsCleanup`: the exact journaled engine, tunnel, route, or WFP filter is still present.
+- `NeedsRestore`: the exact session-applied route/DNS state still needs its recorded previous value restored.
+- `Conflict`: the observation does not match the journal's ownership and expected state.
+- `Unknown`: the OS observation is incomplete or cannot safely identify the resource.
+
+The planner uses process creation time with PID, stable tunnel GUID, exact route and DNS values, and provider/layer/filter GUIDs for WFP. It deliberately ignores the WFP runtime filter ID when identifying a filter. Missing route/DNS observations, incomplete WFP enumeration, legacy WFP records that cannot be matched by stable key, unexpected provider-owned filters, PID reuse, and conflicting resource state all keep recovery blocked.
+
+The `can_remove_journal` result is true only when every recorded resource is positively clean and the complete provider-scoped WFP inventory confirms no product-owned filters remain. A future Windows reconciler must gather authoritative snapshots, perform cleanup/restoration using exact ownership checks, take a fresh snapshot, and only then act on this result. This planner does not itself authorize or execute destructive operations.
+
 ## Security boundary and remaining work
 
 The journal is not an authentication or integrity mechanism. Its trust depends on the service-owned directory ACL and the service's validation of every record. The service must not open a user-writable directory as its journal root. Reparse-point entries are rejected, and files are never selected using a caller-supplied path.

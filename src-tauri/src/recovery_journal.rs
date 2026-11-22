@@ -49,6 +49,15 @@ pub struct EngineProcessRecord {
     pub creation_time_100ns: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TunnelAddressRecord {
+    /// Assigned IPv4 or IPv6 unicast address.
+    pub address: IpAddr,
+    /// On-link prefix length returned by the Windows unicast address table.
+    pub prefix_length: u8,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TunnelInterfaceRecord {
@@ -57,7 +66,12 @@ pub struct TunnelInterfaceRecord {
     pub interface_index: u32,
     pub alias: String,
     pub mtu: u32,
+    /// Compatibility address list retained for existing version-1 journals.
     pub addresses: Vec<IpAddr>,
+    /// Complete address/prefix identities. Empty only in legacy journals that
+    /// predate address-prefix recording; those journals are never fully verified.
+    #[serde(default)]
+    pub address_details: Vec<TunnelAddressRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -175,6 +189,22 @@ impl RecoveryJournal {
             let unique: BTreeSet<_> = tunnel.addresses.iter().collect();
             if unique.len() != tunnel.addresses.len() {
                 return Err("The recovery journal contains duplicate tunnel addresses.".to_string());
+            }
+            if !tunnel.address_details.is_empty() {
+                if tunnel.address_details.len() != tunnel.addresses.len() {
+                    return Err("The recovery journal tunnel address details are incomplete.".to_string());
+                }
+                let mut detail_addresses = BTreeSet::new();
+                for detail in &tunnel.address_details {
+                    let maximum = if detail.address.is_ipv4() { 32 } else { 128 };
+                    if detail.prefix_length > maximum || !detail_addresses.insert(detail.address) {
+                        return Err("The recovery journal contains invalid or duplicate tunnel address details.".to_string());
+                    }
+                }
+                let address_set: BTreeSet<_> = tunnel.addresses.iter().copied().collect();
+                if detail_addresses != address_set {
+                    return Err("The recovery journal tunnel address details do not match its address list.".to_string());
+                }
             }
         }
         if self.routes.len() > MAX_ROUTES {
@@ -618,6 +648,10 @@ mod tests {
             alias: "blacklist-inevitable".to_string(),
             mtu: 1500,
             addresses: vec!["198.18.0.1".parse().unwrap(), "fd00::1".parse().unwrap()],
+            address_details: vec![
+                TunnelAddressRecord { address: "198.18.0.1".parse().unwrap(), prefix_length: 30 },
+                TunnelAddressRecord { address: "fd00::1".parse().unwrap(), prefix_length: 64 },
+            ],
         });
         journal.routes.push(RouteMutationRecord {
             destination_prefix: "0.0.0.0/0".to_string(),

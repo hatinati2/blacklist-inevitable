@@ -154,8 +154,6 @@ fn stop_requested(stop_event: HANDLE) -> bool {
 }
 
 fn handle_authenticated_connection(pipe: HANDLE, stop_event: HANDLE) -> Result<(), String> {
-    authenticate_active_console_client(pipe)?;
-
     let mut replay_guard = AgentRequestReplayGuard::default();
     let request = read_one_request(pipe, stop_event)?;
     replay_guard.accept(&request)?;

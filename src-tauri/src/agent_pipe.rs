@@ -126,6 +126,10 @@ pub fn serve(pipe: HANDLE, stop_event: HANDLE) -> Result<(), String> {
             handle_authenticated_connection(pipe, stop_event)
         };
 
+        if let Err(error) = &request_result {
+            write_last_ipc_diagnostic(error);
+        }
+
         // Continuing on a thread that failed to revert impersonation would risk
         // running the next request under the prior client token. Stop the service
         // process instead; Windows will close the pipe handle on process exit.
@@ -151,6 +155,26 @@ pub fn serve(pipe: HANDLE, stop_event: HANDLE) -> Result<(), String> {
 
 fn stop_requested(stop_event: HANDLE) -> bool {
     unsafe { WaitForSingleObject(stop_event, 0) == WAIT_OBJECT_0 }
+}
+
+/// Keep one bounded, secret-free diagnostic for the last rejected local IPC
+/// connection. The directory is provisioned with a SYSTEM/Administrators/
+—service-SID DACL by the installer; diagnostic failure never changes auth.
+fn write_last_ipc_diagnostic(message: &str) {
+    let Some(program_data) = std::env::var_os("ProgramData") else {
+        return;
+    };
+    let path = std::path::PathBuf::from(program_data)
+        .join("BlacklistInevitable")
+        .join("Agent")
+        .join("last-ipc-error.txt");
+    let safe_message: String = message
+        .chars()
+        .filter(|character| !character.is_control() || matches!(*character, '\\n' | '\\t'))
+        .take(1024)
+        .collect();
+    let record = format!("Agent IPC rejected request: {safe_message}\\n");
+    let _ = std::fs::write(path, record);
 }
 
 fn handle_authenticated_connection(pipe: HANDLE, stop_event: HANDLE) -> Result<(), String> {
@@ -383,22 +407,22 @@ fn read_one_request(pipe: HANDLE, stop_event: HANDLE) -> Result<crate::agent_pro
     // ImpersonateNamedPipeClient is bound to the last client message read from
     // this pipe. Read only the fixed-size header first, then authenticate the
     // peer before allocating/reading the bounded JSON payload or dispatching it.
-    let active_session = active_console_session_for_pipe(pipe)?;
+    let active_session = active_console_session_for_pipe(pipe)\n        .map_err(|error| format!("session-check: {error}"))?;
     let deadline = Instant::now() + FRAME_TIMEOUT;
     let mut header = [0u8; 4];
-    read_exact_pipe(pipe, stop_event, &mut header, deadline)?;
+    read_exact_pipe(pipe, stop_event, &mut header, deadline)\n        .map_err(|error| format!("request-header: {error}"))?;
 
     let announced = u32::from_le_bytes(header) as usize;
     if announced == 0 || announced > MAX_AGENT_REQUEST_BYTES {
         return Err("The Agent IPC frame length is invalid.".into());
     }
 
-    authenticate_active_console_client(pipe, active_session)?;
+    authenticate_active_console_client(pipe, active_session)\n        .map_err(|error| format!("client-authentication: {error}"))?;
 
     let mut payload = vec![0u8; announced];
-    read_exact_pipe(pipe, stop_event, &mut payload, deadline)?;
+    read_exact_pipe(pipe, stop_event, &mut payload, deadline)\n        .map_err(|error| format!("request-payload: {error}"))?;
 
-    crate::agent_protocol::decode_agent_request(&payload)
+    crate::agent_protocol::decode_agent_request(&payload)\n        .map_err(|error| format!("request-decode: {error}"))
 }
 
 /// Read exactly the requested byte count while draining the bounded pipe buffer.

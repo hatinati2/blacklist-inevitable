@@ -810,6 +810,14 @@ mod tests {
         assert!(journal.validate().is_err());
 
         let mut journal = example_journal(1, 1);
+        journal.tunnel.as_mut().unwrap().address_details[0].prefix_length = 33;
+        assert!(journal.validate().is_err());
+
+        let mut journal = example_journal(1, 1);
+        journal.tunnel.as_mut().unwrap().address_details.pop();
+        assert!(journal.validate().is_err());
+
+        let mut journal = example_journal(1, 1);
         journal.firewall_filters[0].filter_id = 0;
         assert!(journal.validate().is_err());
     }
@@ -829,6 +837,19 @@ mod tests {
         let decoded: RecoveryJournal = serde_json::from_value(legacy).unwrap();
         assert_eq!(decoded.routes[0].applied.interface_luid, None);
         assert_eq!(decoded.routes[0].previous.as_ref().unwrap().interface_luid, None);
+        decoded.validate().unwrap();
+    }
+
+    #[test]
+    fn legacy_tunnel_records_decode_without_address_prefix_details() {
+        let mut legacy = serde_json::to_value(example_journal(75, 1)).unwrap();
+        legacy["tunnel"]
+            .as_object_mut()
+            .unwrap()
+            .remove("addressDetails");
+
+        let decoded: RecoveryJournal = serde_json::from_value(legacy).unwrap();
+        assert!(decoded.tunnel.as_ref().unwrap().address_details.is_empty());
         decoded.validate().unwrap();
     }
 

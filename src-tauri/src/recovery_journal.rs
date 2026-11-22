@@ -268,6 +268,73 @@ fn validate_dns_configuration(configuration: &DnsConfiguration) -> Result<(), St
     Ok(())
 }
 
+/// Validate that a new checkpoint cannot make previously recorded resources disappear.
+///
+/// The newest committed checkpoint is the recovery source of truth. Resource
+/// inventories therefore grow monotonically; a caller must not rewrite an old
+/// mutation or omit it merely because cleanup is believed to have succeeded.
+/// The complete session journal is removed only after an OS reconciler verifies
+/// every recorded resource.
+fn validate_checkpoint_progress(
+    previous: &RecoveryJournal,
+    next: &RecoveryJournal,
+) -> Result<(), String> {
+    if previous.session_id != next.session_id {
+        return Err("A recovery checkpoint cannot change its session identity.".to_string());
+    }
+
+    let phase_can_advance = match (previous.phase, next.phase) {
+        (left, right) if left == right => true,
+        (JournalPhase::Preparing, JournalPhase::EngineStarted)
+        | (JournalPhase::Preparing, JournalPhase::Disconnecting)
+        | (JournalPhase::Preparing, JournalPhase::RecoveryRequired)
+        | (JournalPhase::EngineStarted, JournalPhase::TunnelCreated)
+        | (JournalPhase::EngineStarted, JournalPhase::Disconnecting)
+        | (JournalPhase::EngineStarted, JournalPhase::RecoveryRequired)
+        | (JournalPhase::TunnelCreated, JournalPhase::NetworkConfigured)
+        | (JournalPhase::TunnelCreated, JournalPhase::Disconnecting)
+        | (JournalPhase::TunnelCreated, JournalPhase::RecoveryRequired)
+        | (JournalPhase::NetworkConfigured, JournalPhase::Disconnecting)
+        | (JournalPhase::NetworkConfigured, JournalPhase::RecoveryRequired)
+        | (JournalPhase::Disconnecting, JournalPhase::RecoveryRequired) => true,
+        _ => false,
+    };
+    if !phase_can_advance {
+        return Err("The recovery journal phase cannot move backwards or leave RecoveryRequired.".to_string());
+    }
+
+    if previous.engine.is_some() && previous.engine != next.engine {
+        return Err("A checkpoint cannot replace or remove the recorded engine process identity.".to_string());
+    }
+    if previous.tunnel.is_some() && previous.tunnel != next.tunnel {
+        return Err("A checkpoint cannot replace or remove the recorded tunnel identity.".to_string());
+    }
+    if previous.routes.iter().any(|record| !next.routes.contains(record)) {
+        return Err("A checkpoint cannot rewrite or remove a recorded route mutation.".to_string());
+    }
+    if previous.dns.iter().any(|record| !next.dns.contains(record)) {
+        return Err("A checkpoint cannot rewrite or remove a recorded DNS mutation.".to_string());
+    }
+
+    for previous_filter in &previous.firewall_filters {
+        let retained = match previous_filter.filter_key.as_deref() {
+            Some(stable_key) => next.firewall_filters.iter().any(|candidate| {
+                candidate.filter_key.as_deref() == Some(stable_key)
+                    && candidate.provider_key == previous_filter.provider_key
+                    && candidate.layer_key == previous_filter.layer_key
+            }),
+            // A legacy record has no durable filter key. Preserve the entire
+            // record; a runtime filter ID alone is never enough to re-identify it.
+            None => next.firewall_filters.contains(previous_filter),
+        };
+        if !retained {
+            return Err("A checkpoint cannot rewrite or remove a recorded WFP filter identity.".to_string());
+        }
+    }
+
+    Ok(())
+}
+
 pub struct RecoveryJournalStore {
     root: PathBuf,
     gate: Mutex<()>,
@@ -301,6 +368,7 @@ impl RecoveryJournalStore {
             if journal.revision <= previous.revision {
                 return Err("Recovery journal revisions must increase monotonically.".to_string());
             }
+            validate_checkpoint_progress(previous, journal)?;
         }
 
         let bytes = serde_json::to_vec(journal)
@@ -352,7 +420,7 @@ impl RecoveryJournalStore {
     /// Remove all checkpoints for a session. Call only after engine exit, tunnel
     /// teardown, route/DNS restoration, and WFP cleanup have all been verified.
     /// Missing sessions are treated as already removed.
-    pub fn remove_session(&self, session_id: u64) -> Result<(), String> {
+    pub(crate) fn remove_session(&self, session_id: u64) -> Result<(), String> {
         if session_id == 0 {
             return Err("A valid recovery journal session is required.".to_string());
         }
@@ -600,6 +668,82 @@ mod tests {
         let (root, store) = store();
         store.persist(&example_journal(7, 3)).unwrap();
         assert!(store.persist(&example_journal(7, 2)).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn assert_checkpoint_mutation_rejected(
+        mutate: impl FnOnce(&mut RecoveryJournal),
+        expected_error: &str,
+    ) {
+        let (root, store) = store();
+        let first = example_journal(81, 1);
+        store.persist(&first).unwrap();
+
+        let mut next = first.clone();
+        next.revision = 2;
+        mutate(&mut next);
+        let error = store.persist(&next).unwrap_err();
+        assert!(error.contains(expected_error), "unexpected error: {error}");
+
+        let latest = store.load_unresolved().unwrap();
+        assert_eq!(latest.len(), 1);
+        assert_eq!(latest[0], first);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn checkpoint_cannot_drop_or_rewrite_recorded_resources() {
+        assert_checkpoint_mutation_rejected(
+            |journal| journal.engine = None,
+            "engine process identity",
+        );
+        assert_checkpoint_mutation_rejected(
+            |journal| journal.tunnel = None,
+            "tunnel identity",
+        );
+        assert_checkpoint_mutation_rejected(
+            |journal| journal.routes.clear(),
+            "route mutation",
+        );
+        assert_checkpoint_mutation_rejected(
+            |journal| journal.dns.clear(),
+            "DNS mutation",
+        );
+        assert_checkpoint_mutation_rejected(
+            |journal| journal.firewall_filters.clear(),
+            "WFP filter identity",
+        );
+    }
+
+    #[test]
+    fn checkpoint_phase_cannot_regress() {
+        let (root, store) = store();
+        let mut first = RecoveryJournal::new(82);
+        first.phase = JournalPhase::EngineStarted;
+        store.persist(&first).unwrap();
+
+        let mut regressed = first.clone();
+        regressed.revision = 2;
+        regressed.phase = JournalPhase::Preparing;
+        assert!(store
+            .persist(&regressed)
+            .unwrap_err()
+            .contains("phase cannot move backwards"));
+        assert_eq!(store.load_unresolved().unwrap()[0], first);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stable_wfp_key_allows_only_runtime_id_refresh() {
+        let (root, store) = store();
+        let first = example_journal(83, 1);
+        store.persist(&first).unwrap();
+
+        let mut refreshed = first.clone();
+        refreshed.revision = 2;
+        refreshed.firewall_filters[0].filter_id = 88;
+        store.persist(&refreshed).unwrap();
+        assert_eq!(store.load_unresolved().unwrap()[0], refreshed);
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -101,17 +101,26 @@ pub struct RouteMutationRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DnsDohServerProperty {
+    /// DNS_SERVER_PROPERTY_VERSION1.
+    pub version: u32,
     /// Index into the matching adapter or profile name-server list.
     pub server_index: u32,
+    /// DnsServerDohProperty; unknown property types are never discarded.
+    pub property_type: u32,
     /// Exact DNS_DOH_SERVER_SETTINGS flags returned by Windows.
     pub flags: u64,
-    /// Explicit HTTPS URI template; None is valid only for automatic discovery.
+    /// Explicit HTTPS URI template; None is valid for auto/disengaged policy.
     pub template: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DnsStackConfiguration {
+    /// Version of DNS_INTERFACE_SETTINGS returned by the observer (3 or 4).
+    pub settings_version: u32,
+    /// Present only when a documented/verified v4 settings structure was read.
+    #[serde(default)]
+    pub encrypted_dns_adapter_flags: Option<u32>,
     /// Raw adapter-configured name servers for this stack. None means Windows
     /// did not return an explicit static list (for example DHCP/automatic).
     pub name_servers: Option<Vec<IpAddr>>,
@@ -431,8 +440,11 @@ fn validate_dns_doh_properties(
     for property in properties {
         let auto = property.flags & DOH_AUTO != 0;
         let enabled = property.flags & DOH_ENABLED != 0;
-        if property.flags & !DOH_KNOWN_FLAGS != 0
-            || auto == enabled
+        let has_base_policy = auto || enabled;
+        if property.version != 1
+            || property.property_type != 1
+            || property.flags & !DOH_KNOWN_FLAGS != 0
+            || (auto && enabled)
             || property.server_index as usize >= server_count
             || !indexes.insert(property.server_index)
             || (auto && property.template.is_some())
@@ -441,8 +453,9 @@ fn validate_dns_doh_properties(
                     || !template.starts_with("https://")
                     || template.chars().any(char::is_control)
             }))
+            || (!has_base_policy && property.template.is_some())
             || (property.flags & (DOH_FALLBACK_TO_UDP | DOH_AUTO_UPGRADE) != 0
-                && !auto && !enabled)
+                && !has_base_policy)
         {
             return Err("The recovery journal contains an invalid DNS-over-HTTPS server property.".to_string());
         }
@@ -478,7 +491,10 @@ fn validate_dns_stack(
         | DNS_SETTING_DOH_PROFILE;
 
     let flags = stack.settings_flags;
-    if flags & !KNOWN_FLAGS != 0
+    if !matches!(stack.settings_version, 3 | 4)
+        || (stack.settings_version == 3 && stack.encrypted_dns_adapter_flags.is_some())
+        || (stack.settings_version == 4 && stack.encrypted_dns_adapter_flags.is_none())
+        || flags & !KNOWN_FLAGS != 0
         || (flags & DNS_SETTING_IPV6 != 0) != ipv6
         || (flags & DNS_SETTING_NAMESERVER != 0) != stack.name_servers.is_some()
         || (flags & DNS_SETTING_PROFILE_NAMESERVER != 0)
@@ -487,9 +503,11 @@ fn validate_dns_stack(
         || (flags & DNS_SETTING_SEARCHLIST != 0) != stack.search_list.is_some()
         || (flags & DNS_SETTING_SUPPLEMENTAL_SEARCH_LIST != 0)
             != stack.supplemental_search_list.is_some()
-        || (flags & DNS_SETTING_DOH != 0) != !stack.server_properties.is_empty()
-        || (flags & DNS_SETTING_DOH_PROFILE != 0)
-            != !stack.profile_server_properties.is_empty()
+        || (flags & DNS_SETTING_DOH == 0 && !stack.server_properties.is_empty())
+        || (flags & DNS_SETTING_DOH_PROFILE == 0
+            && !stack.profile_server_properties.is_empty())
+        || (flags & DNS_SETTING_DOH != 0 && stack.name_servers.is_none())
+        || (flags & DNS_SETTING_DOH_PROFILE != 0 && stack.profile_name_servers.is_none())
         || stack.registration_enabled > 1
         || stack.register_adapter_name > 1
         || stack.enable_llmnr > 1
@@ -1012,6 +1030,8 @@ mod tests {
 
     fn dns_stack(ipv6: bool, nameserver: &str) -> DnsStackConfiguration {
         DnsStackConfiguration {
+            settings_version: 3,
+            encrypted_dns_adapter_flags: None,
             name_servers: Some(vec![nameserver.parse().unwrap()]),
             profile_name_servers: None,
             effective_name_servers: vec![nameserver.parse().unwrap()],
@@ -1128,7 +1148,9 @@ mod tests {
         configuration.ipv4.as_mut().unwrap().settings_flags |= 0x1000;
         configuration.ipv4.as_mut().unwrap().server_properties.push(
             DnsDohServerProperty {
+                version: 1,
                 server_index: 0,
+                property_type: 1,
                 flags: 0x0002,
                 template: Some("https://dns.example.test/dns-query{?dns}".into()),
             },
@@ -1153,7 +1175,9 @@ mod tests {
         invalid.ipv4.as_mut().unwrap().settings_flags |= 0x1000;
         invalid.ipv4.as_mut().unwrap().server_properties.push(
             DnsDohServerProperty {
+                version: 1,
                 server_index: 0,
+                property_type: 1,
                 flags: 0x0003,
                 template: Some("https://dns.example.test/dns-query".into()),
             },

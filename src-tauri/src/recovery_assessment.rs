@@ -358,7 +358,7 @@ mod tests {
             tunnel_guid: Observation::Absent,
             routes: BTreeMap::new(),
             dns: BTreeMap::new(),
-            firewall_filters: Observation::Absent,
+            firewall_filters: Observation::Present(Vec::new()),
         }
     }
 
@@ -372,6 +372,11 @@ mod tests {
         let result = assess_recovery(&journal, &snapshot);
         assert!(!result.can_remove_journal);
         assert_eq!(result.firewall_filters, ResourceDisposition::Unknown);
+
+        snapshot.firewall_filters = Observation::Absent;
+        let absent_provider = assess_recovery(&journal, &snapshot);
+        assert_eq!(absent_provider.firewall_filters, ResourceDisposition::Unknown);
+        assert!(!absent_provider.can_remove_journal);
     }
 
     #[test]

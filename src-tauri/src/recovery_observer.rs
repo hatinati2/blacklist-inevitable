@@ -136,7 +136,7 @@ pub fn observe_recorded_tunnel_interface(
 
     let expected_guid = uuid::Uuid::parse_str(&expected.interface_guid)
         .map_err(|_| "The recorded tunnel GUID is invalid.".to_string())?;
-    if expected_guid.to_string() != expected.interface_guid {
+    if !expected_guid.to_string().eq_ignore_ascii_case(&expected.interface_guid) {
         return Ok(Observation::Unknown);
     }
 
@@ -184,7 +184,7 @@ pub fn observe_recorded_tunnel_interface(
         if row.InterfaceIndex == 0
             || row.InterfaceIndex != expected.interface_index
             || row.Mtu != expected.mtu
-            || alias != expected.alias
+            || !alias.eq_ignore_ascii_case(&expected.alias)
         {
             return Ok(Observation::Unknown);
         }
@@ -212,7 +212,7 @@ pub fn observe_recorded_routes(
         FreeMibTable, GetIpForwardTable2, MIB_IPFORWARD_ROW2, MIB_IPFORWARD_TABLE2,
     };
     use windows_sys::Win32::Networking::WinSock::{
-        AF_INET, AF_INET6, AF_UNSPEC, SOCKADDR_INET,
+        AF_UNSPEC,
     };
 
     const MAX_ROUTE_ROWS: usize = 16_384;
@@ -306,8 +306,6 @@ pub fn observe_recorded_routes(
         }
     }
 
-    // Validate the AF constants against the family tags accepted by sockaddr_address.
-    let _ = (AF_INET, AF_INET6);
     Ok(routes)
 }
 

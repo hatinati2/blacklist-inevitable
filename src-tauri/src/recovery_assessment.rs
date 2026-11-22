@@ -251,39 +251,43 @@ fn assess_dns(
         return ResourceDisposition::Unknown;
     };
 
-    // DNS interface indexes are reusable. A record created before stable GUID
-    // identity was added remains readable, but cannot authorize a positive
-    // match on a live interface.
+    // Compact DHCP/static records predate the complete DNS model. They remain
+    // deserializable, but cannot prove profile, search-list, and DoH state.
     let Some(expected_guid) = record.interface_guid.as_deref().and_then(normalize_guid) else {
         return ResourceDisposition::Unknown;
     };
+    let complete_interface = |configuration: &DnsConfiguration| match configuration {
+        DnsConfiguration::Interface(interface)
+            if interface.ipv4.is_some() && interface.ipv6.is_some() =>
+        {
+            normalize_guid(&interface.interface_guid)
+                .filter(|guid| guid == &expected_guid)
+                .map(|_| interface)
+        }
+        DnsConfiguration::Dhcp | DnsConfiguration::Static(_) | DnsConfiguration::Interface(_) => None,
+    };
+    if complete_interface(&record.previous).is_none()
+        || complete_interface(&record.applied).is_none()
+    {
+        return ResourceDisposition::Unknown;
+    }
 
     match observed {
         // An absent/unavailable interface does not prove what DNS state Windows
         // will apply if that interface returns; keep recovery blocked.
         Observation::Unknown | Observation::Absent => ResourceDisposition::Unknown,
         Observation::Present(actual) => {
-            if let DnsConfiguration::Interface(actual_interface) = actual {
-                let Some(actual_guid) = normalize_guid(&actual_interface.interface_guid) else {
-                    return ResourceDisposition::Unknown;
-                };
-                if actual_guid != expected_guid {
-                    return ResourceDisposition::Conflict;
-                }
-                if actual_interface.ipv4.is_none() || actual_interface.ipv6.is_none() {
-                    return ResourceDisposition::Unknown;
-                }
-            }
-
-            for expected in [&record.previous, &record.applied] {
-                if let DnsConfiguration::Interface(expected_interface) = expected {
-                    if normalize_guid(&expected_interface.interface_guid)
-                        .as_deref() != Some(expected_guid.as_str())
-                        || expected_interface.ipv4.is_none()
-                        || expected_interface.ipv6.is_none()
-                    {
-                        return ResourceDisposition::Unknown;
+            match complete_interface(actual) {
+                Some(_) => {}
+                None => {
+                    if let DnsConfiguration::Interface(interface) = actual {
+                        if normalize_guid(&interface.interface_guid)
+                            .is_some_and(|guid| guid != expected_guid)
+                        {
+                            return ResourceDisposition::Conflict;
+                        }
                     }
+                    return ResourceDisposition::Unknown;
                 }
             }
 
@@ -433,6 +437,7 @@ mod tests {
             register_adapter_name: false,
             enable_llmnr: false,
             query_adapter_name: false,
+            disable_unconstrained_queries: true,
             settings_flags: if ipv6 { 0x0001 | 0x0002 | 0x0004 | 0x0020 } else { 0x0002 | 0x0004 | 0x0020 },
             server_properties: vec![],
             profile_server_properties: vec![],
@@ -444,7 +449,6 @@ mod tests {
             interface_guid: "4d36e972-e325-11ce-bfc1-08002be10318".into(),
             ipv4: Some(dns_stack(false, server4, server4)),
             ipv6: Some(dns_stack(true, server6, server6)),
-            disable_unconstrained_queries: Some(true),
         })
     }
 

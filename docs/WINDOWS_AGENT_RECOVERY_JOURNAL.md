@@ -36,7 +36,7 @@ For each checkpoint, the store validates the full record, creates a unique pendi
 - `Conflict`: the observation does not match the journal's ownership and expected state.
 - `Unknown`: the OS observation is incomplete or cannot safely identify the resource.
 
-The planner uses process creation time with PID, stable tunnel GUID, exact route and DNS values, and provider/layer/filter GUIDs for WFP. It deliberately ignores the WFP runtime filter ID when identifying a filter. Missing route/DNS observations, incomplete WFP enumeration, legacy WFP records that cannot be matched by stable key, unexpected provider-owned filters, PID reuse, and conflicting resource state all keep recovery blocked.
+The planner uses process creation time with PID, stable tunnel GUID, exact route and DNS values, and provider/layer/filter GUIDs for WFP. It deliberately ignores the WFP runtime filter ID when identifying an extant filter. A complete, positively verified empty provider inventory proves that all product filters are absent even for legacy records; if any filter remains but its stable key is missing, ownership cannot be matched and recovery stays blocked. Missing route/DNS observations, incomplete WFP enumeration, unexpected provider-owned filters, PID reuse, and conflicting resource state also keep recovery blocked.
 
 The `can_remove_journal` result is true only when every recorded resource is positively clean and the complete provider-scoped WFP inventory confirms no product-owned filters remain. A future Windows reconciler must gather authoritative snapshots, perform cleanup/restoration using exact ownership checks, take a fresh snapshot, and only then act on this result. This planner does not itself authorize or execute destructive operations.
 

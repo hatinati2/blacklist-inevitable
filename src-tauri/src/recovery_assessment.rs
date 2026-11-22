@@ -159,17 +159,17 @@ fn assess_tunnel(
         return ResourceDisposition::VerifiedClean;
     };
 
-    // Older version-1 journals recorded only the IP values, not their prefix
-    // lengths. They remain readable, but cannot authorize a positive identity
-    // match or destructive cleanup.
-    if expected.address_details.is_empty() {
-        return ResourceDisposition::Unknown;
-    }
-
     match observed {
         Observation::Unknown => ResourceDisposition::Unknown,
         Observation::Absent => ResourceDisposition::VerifiedClean,
         Observation::Present(actual) => {
+            // Older version-1 journals recorded only the IP values, not their
+            // prefix lengths. They remain readable, but cannot authorize a
+            // positive identity match while the adapter is still present.
+            if expected.address_details.is_empty() {
+                return ResourceDisposition::Unknown;
+            }
+
             let expected_guid = normalize_guid(&expected.interface_guid);
             let actual_guid = normalize_guid(&actual.interface_guid);
             if expected_guid.is_none() || actual_guid.is_none() {
@@ -485,6 +485,12 @@ mod tests {
         let mut legacy = journal.tunnel.clone().unwrap();
         legacy.address_details.clear();
         journal.tunnel = Some(legacy.clone());
+        snapshot.tunnel = Observation::Absent;
+        assert_eq!(
+            assess_recovery(&journal, &snapshot).tunnel,
+            ResourceDisposition::VerifiedClean
+        );
+
         snapshot.tunnel = Observation::Present(legacy);
         assert_eq!(
             assess_recovery(&journal, &snapshot).tunnel,

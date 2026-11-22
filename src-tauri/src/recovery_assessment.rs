@@ -506,6 +506,27 @@ mod tests {
     }
 
     #[test]
+    fn reused_interface_index_with_a_different_luid_is_a_route_conflict() {
+        let mut journal = RecoveryJournal::new(92);
+        let record = route_record();
+        let previous = record.previous.clone().unwrap();
+        journal.routes.push(record.clone());
+
+        let mut snapshot = empty_snapshot();
+        let mut observed = previous;
+        observed.interface_index = record.previous.as_ref().unwrap().interface_index;
+        observed.interface_luid = Some(0x0001_0000_0000_FFFF);
+        snapshot.routes.insert(
+            record.destination_prefix,
+            Observation::Present(observed),
+        );
+
+        let result = assess_recovery(&journal, &snapshot);
+        assert_eq!(result.routes[0].disposition, ResourceDisposition::Conflict);
+        assert!(!result.can_remove_journal);
+    }
+
+    #[test]
     fn legacy_route_without_stable_interface_luid_blocks_recovery() {
         let mut journal = RecoveryJournal::new(91);
         let mut record = route_record();

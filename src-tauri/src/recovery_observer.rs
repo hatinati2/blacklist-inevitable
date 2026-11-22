@@ -16,7 +16,7 @@ pub fn observe_recorded_engine_process(
     expected: &EngineProcessRecord,
 ) -> Result<Observation<EngineProcessRecord>, String> {
     use windows_sys::Win32::Foundation::{
-        CloseHandle, GetLastError, ERROR_INVALID_PARAMETER, FILETIME, WAIT_OBJECT_0,
+        GetLastError, ERROR_INVALID_PARAMETER, FILETIME, WAIT_OBJECT_0,
         WAIT_TIMEOUT,
     };
     use windows_sys::Win32::System::Threading::{

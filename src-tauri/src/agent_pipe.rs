@@ -39,7 +39,8 @@ use windows_sys::Win32::System::Threading::{
 use windows_sys::Win32::Foundation::HANDLE;
 
 use crate::agent_protocol::{
-    AgentOperation, AgentRequestReplayGuard, AgentResponse, MAX_AGENT_REQUEST_BYTES,
+    AgentOperation, AgentRequestReplayGuard, AgentResponse, AGENT_RESPONSE_ACK_BYTE,
+    MAX_AGENT_REQUEST_BYTES,
 };
 
 const PIPE_NAME: &str = r"\\.\pipe\BlacklistInevitable.Agent.v1";
@@ -116,15 +117,21 @@ pub fn serve(pipe: HANDLE, stop_event: HANDLE) -> Result<(), String> {
             return Ok(());
         }
 
+        write_last_ipc_diagnostic("listener: waiting for client");
         if !connect_client_overlapped(pipe, stop_event)? {
             return Ok(());
         }
+        write_last_ipc_diagnostic("connection: client accepted");
 
         let request_result = if stop_requested(stop_event) {
             Ok(())
         } else {
             handle_authenticated_connection(pipe, stop_event)
         };
+
+        if let Err(error) = &request_result {
+            write_last_ipc_diagnostic(error);
+        }
 
         // Continuing on a thread that failed to revert impersonation would risk
         // running the next request under the prior client token. Stop the service
@@ -153,21 +160,49 @@ fn stop_requested(stop_event: HANDLE) -> bool {
     unsafe { WaitForSingleObject(stop_event, 0) == WAIT_OBJECT_0 }
 }
 
-fn handle_authenticated_connection(pipe: HANDLE, stop_event: HANDLE) -> Result<(), String> {
-    authenticate_active_console_client(pipe)?;
+/// Keep one bounded, secret-free diagnostic for the last rejected local IPC
+/// connection. The parent directory is provisioned with a restrictive DACL by
+/// the installer; a diagnostic write never changes the authentication decision.
+fn write_last_ipc_diagnostic(message: &str) {
+    let program_data = std::env::var_os("ProgramData")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\ProgramData"));
+    let path = program_data
+        .join("BlacklistInevitable")
+        .join("Agent")
+        .join("last-ipc-error.txt");
+    let safe_message: String = message
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(1024)
+        .collect();
+    let record = format!("Agent IPC rejected request: {}\n", safe_message);
+    let _ = std::fs::write(path, record);
+}
 
+fn handle_authenticated_connection(pipe: HANDLE, stop_event: HANDLE) -> Result<(), String> {
     let mut replay_guard = AgentRequestReplayGuard::default();
+    write_last_ipc_diagnostic("request: reading framed request");
     let request = read_one_request(pipe, stop_event)?;
+    write_last_ipc_diagnostic("request: decoded and authenticated");
     replay_guard.accept(&request)?;
 
     let response = match request.operation {
         AgentOperation::GetStatus | AgentOperation::GetDiagnostics => {
-            let mut response = AgentResponse::ok(request.request_id, None);
-            response.detail = Some(
-                "The privileged Agent IPC host is running; VPN connection operations are not enabled yet."
-                    .to_string(),
-            );
-            response
+            match crate::agent_service::startup_recovery_status() {
+                Ok(()) => {
+                    let mut response = AgentResponse::ok(request.request_id, None);
+                    response.detail = Some(
+                        "The privileged Agent IPC host is running; startup recovery is clean. VPN connection operations are not enabled yet."
+                            .to_string(),
+                    );
+                    response
+                }
+                Err(error) => AgentResponse::rejected(
+                    request.request_id,
+                    format!("The Agent is blocked by startup recovery: {error}"),
+                ),
+            }
         }
         AgentOperation::Connect { .. }
         | AgentOperation::Disconnect { .. }
@@ -177,7 +212,35 @@ fn handle_authenticated_connection(pipe: HANDLE, stop_event: HANDLE) -> Result<(
         ),
     };
 
+    write_last_ipc_diagnostic("response: writing bounded response frame");
     write_one_response(pipe, stop_event, &response)
+        .map_err(|error| format!("response-write: {error}"))?;
+    write_last_ipc_diagnostic("response: frame written; waiting for client acknowledgement");
+    read_response_ack(pipe, stop_event)?;
+    write_last_ipc_diagnostic("response: client acknowledged full frame");
+    Ok(())
+}
+
+/// A response is not complete until the client confirms it consumed every byte.
+/// DisconnectNamedPipe discards unread outbound data, so disconnecting immediately
+/// after WriteFile can race a client that has not yet started reading. The ACK is
+/// deliberately one byte and bounded; a client that never reads cannot hold the
+/// privileged service's single pipe instance indefinitely.
+fn read_response_ack(pipe: HANDLE, stop_event: HANDLE) -> Result<(), String> {
+    const ACK_TIMEOUT: Duration = Duration::from_secs(5);
+    let mut acknowledgement = [0u8; 1];
+    read_exact_pipe(
+        pipe,
+        stop_event,
+        &mut acknowledgement,
+        Instant::now() + ACK_TIMEOUT,
+    )
+    .map_err(|error| format!("response-ack: {error}"))?;
+
+    if acknowledgement[0] != AGENT_RESPONSE_ACK_BYTE {
+        return Err("response-ack: the client sent an invalid response acknowledgement.".into());
+    }
+    Ok(())
 }
 
 fn create_io_event() -> Result<HANDLE, String> {
@@ -381,20 +444,34 @@ fn write_pipe_chunk_overlapped(
     Ok(transferred as usize)
 }
 
-fn read_one_request(pipe: HANDLE, stop_event: HANDLE) -> Result<crate::agent_protocol::AgentRequest, String> {
+fn read_one_request(
+    pipe: HANDLE,
+    stop_event: HANDLE,
+) -> Result<crate::agent_protocol::AgentRequest, String> {
+    // ImpersonateNamedPipeClient is bound to the last client message read from
+    // this pipe. Read only the fixed-size header first, then authenticate the
+    // peer before allocating/reading the bounded JSON payload or dispatching it.
+    let active_session = active_console_session_for_pipe(pipe)
+        .map_err(|error| format!("session-check: {error}"))?;
     let deadline = Instant::now() + FRAME_TIMEOUT;
     let mut header = [0u8; 4];
-    read_exact_pipe(pipe, stop_event, &mut header, deadline)?;
+    read_exact_pipe(pipe, stop_event, &mut header, deadline)
+        .map_err(|error| format!("request-header: {error}"))?;
 
     let announced = u32::from_le_bytes(header) as usize;
     if announced == 0 || announced > MAX_AGENT_REQUEST_BYTES {
-        return Err("The Agent IPC frame length is invalid.".into());
+        return Err("request-header: frame length is invalid".into());
     }
 
+    authenticate_active_console_client(pipe, active_session)
+        .map_err(|error| format!("client-authentication: {error}"))?;
+
     let mut payload = vec![0u8; announced];
-    read_exact_pipe(pipe, stop_event, &mut payload, deadline)?;
+    read_exact_pipe(pipe, stop_event, &mut payload, deadline)
+        .map_err(|error| format!("request-payload: {error}"))?;
 
     crate::agent_protocol::decode_agent_request(&payload)
+        .map_err(|error| format!("request-decode: {error}"))
 }
 
 /// Read exactly the requested byte count while draining the bounded pipe buffer.
@@ -482,7 +559,7 @@ fn write_one_response(pipe: HANDLE, stop_event: HANDLE, response: &AgentResponse
     Ok(())
 }
 
-fn authenticate_active_console_client(pipe: HANDLE) -> Result<(), String> {
+fn active_console_session_for_pipe(pipe: HANDLE) -> Result<u32, String> {
     let active_session = unsafe { WTSGetActiveConsoleSessionId() };
     if active_session == u32::MAX {
         return Err("There is no active physical-console user session.".into());
@@ -494,7 +571,13 @@ fn authenticate_active_console_client(pipe: HANDLE) -> Result<(), String> {
     {
         return Err("The Agent pipe client is not in the active console session.".into());
     }
+    Ok(active_session)
+}
 
+fn authenticate_active_console_client(pipe: HANDLE, active_session: u32) -> Result<(), String> {
+    // This is called only after read_one_request has consumed the fixed-size
+    // request header. Win32 associates ImpersonateNamedPipeClient with the last
+    // client message read from the pipe; calling it before any read fails closed.
     // WTSQueryUserToken is deliberately used only in the highly trusted
     // LocalSystem service context; failure means no client is authorized.
     let mut active_user_token: HANDLE = std::ptr::null_mut();

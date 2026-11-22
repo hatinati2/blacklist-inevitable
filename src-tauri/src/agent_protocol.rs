@@ -9,6 +9,8 @@ use crate::connection_state::ConnectionSnapshot;
 use crate::profiles::ProfileSummary;
 
 pub const AGENT_PROTOCOL_VERSION: u16 = 1;
+/// One-byte acknowledgement sent only after the client has consumed the full response frame.
+pub const AGENT_RESPONSE_ACK_BYTE: u8 = 0x06;
 pub const MAX_AGENT_REQUEST_BYTES: usize = 128 * 1024;
 pub const AGENT_FRAME_HEADER_BYTES: usize = 4;
 pub const MAX_AGENT_REQUESTS_PER_CONNECTION: usize = 4096;
@@ -446,6 +448,33 @@ mod tests {
                 },
             },
         }
+    }
+
+    #[test]
+    fn status_request_uses_the_nested_operation_tag_on_the_wire() {
+        let request = AgentRequest {
+            version: AGENT_PROTOCOL_VERSION,
+            request_id: "status-1".to_string(),
+            operation: AgentOperation::GetStatus,
+        };
+        let encoded = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            encoded,
+            serde_json::json!({
+                "version": 1,
+                "requestId": "status-1",
+                "operation": {
+                    "operation": "getStatus"
+                }
+            })
+        );
+
+        let decoded = decode_agent_request(&serde_json::to_vec(&encoded).unwrap()).unwrap();
+        assert!(matches!(decoded.operation, AgentOperation::GetStatus));
+
+        let old_flat_shape =
+            br#"{"version":1,"requestId":"status-1","operation":"getStatus"}"#;
+        assert!(decode_agent_request(old_flat_shape).is_err());
     }
 
     #[test]

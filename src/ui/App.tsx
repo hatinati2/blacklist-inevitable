@@ -20,6 +20,12 @@ type AppStatus = {
   engines: EngineTarget[];
 };
 
+type AgentServiceStatus = {
+  available: boolean;
+  state: "running" | "unavailable" | "unsupported" | "recoveryRequired";
+  detail: string;
+};
+
 type Profile = {
   id: string;
   name: string;
@@ -64,6 +70,8 @@ type EndpointResult = {
 
 export default function App() {
   const [status, setStatus] = useState<AppStatus | null>(null);
+  const [agentStatus, setAgentStatus] = useState<AgentServiceStatus | null>(null);
+  const [agentStatusLoading, setAgentStatusLoading] = useState(false);
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [shareText, setShareText] = useState("");
   const [endpointResults, setEndpointResults] = useState<EndpointResult[] | null>(null);
@@ -91,6 +99,22 @@ export default function App() {
       setStatus(null);
       setMessage("Browser preview mode — run the desktop app to access local profiles.");
       setPreviewMode(true);
+    }
+  }, []);
+
+  const refreshAgentStatus = useCallback(async () => {
+    setAgentStatusLoading(true);
+    try {
+      const nextStatus = await invoke<AgentServiceStatus>("get_agent_service_status");
+      setAgentStatus(nextStatus);
+    } catch (error) {
+      setAgentStatus({
+        available: false,
+        state: "unavailable",
+        detail: typeof error === "string" ? error : "The Agent status request failed.",
+      });
+    } finally {
+      setAgentStatusLoading(false);
     }
   }, []);
 
@@ -141,9 +165,10 @@ export default function App() {
 
   useEffect(() => {
     void refreshStatus();
+    void refreshAgentStatus();
     void refreshProfiles();
     void refreshRealDelaySettings();
-  }, [refreshStatus, refreshProfiles, refreshRealDelaySettings]);
+  }, [refreshStatus, refreshAgentStatus, refreshProfiles, refreshRealDelaySettings]);
 
   const engines = status?.engines ?? [
     { kind: "sing-box", binaryName: "sing-box", integrationStage: "implemented · preflight only" },
@@ -278,7 +303,7 @@ export default function App() {
             <h1>blacklist-inevitable</h1>
           </div>
         </div>
-        <span className="stage-tag">SING-BOX PREFLIGHT</span>
+        <span className="stage-tag">AGENT STATUS · PREFLIGHT</span>
       </header>
 
       <section className="hero">
@@ -311,6 +336,49 @@ export default function App() {
           </p>
         </section>
       )}
+
+      <section className="panel">
+        <div className="panel-heading">
+          <div>
+            <p className="eyebrow">WINDOWS PRIVILEGED AGENT</p>
+            <h2>Agent service status</h2>
+          </div>
+          <span
+            className={
+              agentStatus?.state === "recoveryRequired"
+                ? "result-pill failure"
+                : agentStatus?.available
+                  ? "result-pill success"
+                  : "result-pill neutral"
+            }
+          >
+            {agentStatusLoading && !agentStatus
+              ? "Checking…"
+              : agentStatus?.available
+                ? "Responding"
+                : agentStatus?.state === "recoveryRequired"
+                  ? "Recovery required"
+                  : agentStatus?.state === "unsupported"
+                    ? "Windows only"
+                    : "Unavailable"}
+          </span>
+        </div>
+        <p className="panel-copy" aria-live="polite">
+          {agentStatus?.detail ?? "Checking the local Agent service…"}
+        </p>
+        <div className="panel-actions">
+          <span className="hint-text">
+            Read-only status channel. Connect, Disconnect, and recovery remain disabled.
+          </span>
+          <button
+            className="quiet-button"
+            onClick={() => void refreshAgentStatus()}
+            disabled={previewMode || agentStatusLoading}
+          >
+            {agentStatusLoading ? "Checking…" : "Refresh Agent"}
+          </button>
+        </div>
+      </section>
 
       <section className="workspace-grid">
         <article className="panel import-panel">

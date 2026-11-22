@@ -65,16 +65,19 @@ Naive import/config mapping is implemented for a bounded subset; remote authenti
 
 ## M4 — Normal connection lifecycle
 
-- [x] Add bounded length-prefixed Agent IPC stream helpers and a per-authenticated-connection duplicate-request guard; the Windows named-pipe listener, DACL, and caller-token checks remain open.
-- [x] Add a versioned, bounded, non-secret Windows Agent recovery journal with monotonic checkpoints and fail-closed loading; service wiring and OS reconciliation remain open.
+- [x] Add bounded length-prefixed Agent IPC, per-connection replay protection, a local-only Windows named-pipe listener with a protected DACL and caller SID/session checks, a read-only desktop status client, and fail-closed SCM PID plus installed-image-path verification before sending requests. A pinned production publisher thumbprint remains required before credential handoff.
+- [x] Add a versioned, bounded, non-secret Windows Agent recovery journal with monotonic checkpoints; load it at service startup and fail closed on missing/unsafe/corrupt or unresolved state. Actual OS resource reconciliation and rollback remain open.
 - [ ] Add an explicit Rust-owned Connect / Disconnect state machine.
 - [ ] Add Windows platform integration only for the normal connection path.
-- [ ] Implement a signed, narrowly scoped Windows VPN agent/service so the Tauri UI remains unelevated; add authenticated named-pipe IPC and secure credential handoff.
+- [x] Install a narrowly scoped LocalSystem Agent service through the per-machine signed-package lifecycle, with matching Authenticode signer checks and protected service data ACLs.
+- [x] Verify the connected named-pipe server PID against the running Service Control Manager Agent PID and require its executable image to resolve to the installed Agent beside the desktop app before sending requests.
+- [ ] Add authenticated one-shot profile/credential handoff over IPC only after the server identity gate above is independently validated on supported Windows versions.
 - [x] Define destination-based Global and Rule routing; generate Iran-aware Direct rules from geosite-ir/geoip-ir, with foreign traffic using the VPN outbound by default.
 - [ ] Add a Rule/Global mode selector, rule-list management, protected rule-set cache/download, and user-editable domain/IP exceptions to the Windows UI and Agent.
 - [x] Define Windows split-tunnel policy modes (Full Tunnel, Direct Only, Include Selected, Exclude Selected, and per-app Custom VPN/Direct/Block) and map them to sing-box process-path route rules.
 - [ ] Add the split-tunnel policy editor and persistent settings in the Windows UI; enforce process-path matching and DNS behavior in the privileged agent.
-- [ ] Test agent install/upgrade/uninstall, UAC denial, service crash/recovery, and UI-agent IPC authorization.
+- [x] Test signed install/start/status-query/uninstall and unsigned no-service behavior in Windows CI.
+- [ ] Test upgrade, UAC denial, service crash/recovery, server identity verification, and UI-agent authorization on clean Windows 10/11 machines.
 - [ ] Test repeated connect / disconnect, crashes, sleep / resume, and shutdown.
 - [ ] Block normal Connect if prior runtime cleanup is uncertain.
 - [ ] Verify DNS handling and traffic routing without leaking traffic outside the selected tunnel.

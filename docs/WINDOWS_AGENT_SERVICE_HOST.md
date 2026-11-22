@@ -7,13 +7,19 @@
 - The service reports start-pending, running, stop-pending, and stopped states.
 - Stop and shutdown signal a manual-reset event. Every blocking pipe operation uses an OVERLAPPED record and waits on both its I/O event and the service-stop event; on Stop, the operation is cancelled and drained before its buffer/OVERLAPPED storage is released.
 - The service creates one first-instance named pipe at `\\.\pipe\BlacklistInevitable.Agent.v1`.
+- Before writing request bytes, the desktop client obtains the connected pipe server PID, compares it to the running `BlacklistInevitableAgent` PID reported by the Service Control Manager, opens that process with query-only access, and requires its canonical executable path to match the Agent sidecar beside the desktop executable. API errors, stopped service, PID mismatch, or image-path mismatch fail closed.
+- The installer smoke test runs the production Rust client against the installed LocalSystem service, so the same server-identity gate used by the UI is exercised in Windows CI.
 - The pipe DACL grants SYSTEM and Administrators full access, and Interactive Users read/write access only. No Everyone or broad Users ACE is added.
 - `PIPE_REJECT_REMOTE_CLIENTS` rejects remote pipe clients. The server accepts one local client at a time.
 - Before reading a request, the server compares the pipe client session ID with the active physical-console session, obtains that session's user token, impersonates the pipe client only long enough to read the token SID/session ID, calls `RevertToSelf`, and requires both identities to match.
 - If `RevertToSelf` fails, the service process terminates rather than reusing a thread that might still carry a client impersonation token.
-- IPC frames use the shared four-byte little-endian length prefix, are bounded to 128 KiB, and have a finite 30-second read deadline. The implementation drains the pipe buffer incrementally so a payload larger than the kernel buffer cannot deadlock.
+- IPC frames use the shared four-byte little-endian length prefix, are bounded to 128 KiB, and have a finite 30-second read deadline.
+- After writing a bounded response frame, the server waits up to five seconds for a one-byte `0x06` client acknowledgement. The desktop client and installer smoke test send this only after reading and validating the complete response. This prevents `DisconnectNamedPipe` from discarding an unread response and bounds how long an unresponsive client can hold the single pipe instance.
+- The listener validates the active-console session, reads only the fixed four-byte frame header, then impersonates and verifies the client SID/session before allocating/reading the JSON payload or dispatching any operation. This ordering is required because Win32 binds `ImpersonateNamedPipeClient` to the last client message read from the pipe. The implementation drains the pipe buffer incrementally so a payload larger than the kernel buffer cannot deadlock.
 - A replay guard is created after peer authentication. One request is handled per connection; malformed or unauthorized clients are dropped.
 - Only `GetStatus` and `GetDiagnostics` return a status-only response. `Connect`, `Disconnect`, and `Recover` are explicitly rejected.
+- At each service-process startup, the Agent opens `%ProgramData%\\BlacklistInevitable\\Agent` through `RecoveryJournalStore`, loads every committed journal, and fails closed if the directory is missing/unsafe, a committed record is corrupt, or any prior session remains unresolved. The service keeps the read-only pipe available for diagnostics, but `GetStatus`/`GetDiagnostics` return `Rejected` with a recovery-blocked detail instead of advertising clean status. The desktop UI displays this separately as **Recovery required**, rather than as an unreachable service. No journal is automatically deleted and no OS resource is mutated by this gate.
+- The Windows installer smoke test writes a valid unresolved journal, restarts the service, verifies the production Rust client is rejected, removes the probe, restarts cleanly, and verifies status succeeds again.
 - The Windows CI builds this executable independently, stages it as a Tauri sidecar, and exercises its service installation/start/removal lifecycle in the NSIS smoke test.
 
 ## Important identity and deployment constraints
@@ -32,9 +38,9 @@ The installer lifecycle does not yet connect the desktop UI to the pipe. The Age
 
 ## Required next slices
 
-1. Add the unelevated desktop named-pipe client, finite timeouts, server identity validation, and response correlation. Keep all network operations rejected.
-2. Add authenticated profile/credential handoff with one-shot memory handling and no secret logging/persistence.
-3. Integrate the recovery journal and WFP transaction backend. Persist exact state before OS mutations and verify it during startup recovery.
+1. [x] Add the unelevated desktop status-only named-pipe client with finite timeouts, protocol-version checks, request correlation, and a hosted-Windows install/start/query/uninstall smoke test. No credentials or network-mutating requests are sent.
+2. [x] Verify the pipe server PID against the running SCM Agent PID and require its canonical image path to match the installed Agent sidecar before sending request bytes. [ ] Pin and verify the production publisher thumbprint before adding authenticated profile/credential handoff with one-shot memory handling and no secret logging/persistence.
+3. [x] Load the protected recovery journal at service startup and fail closed on unresolved/corrupt records. Integrate the WFP transaction backend, persist exact state before OS mutations, and reconcile every recorded OS resource before allowing recovery to clear.
 4. Add the Agent-owned connection runtime only after authorization and crash recovery are tested.
 5. Add Windows 10/11 integration tests for user logon/logoff, session switching, remote-client rejection, unauthorized SID rejection, malformed/oversized/replayed frames, stop during blocked pipe connect/read, service crash/reboot, and packet-capture leak acceptance.
 

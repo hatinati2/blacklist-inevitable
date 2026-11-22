@@ -685,7 +685,6 @@ mod tests {
                 interface_guid: "6d6f8e80-62d4-4b90-a1b8-10ac74e55e20".into(),
                 ipv4: Some(dns_stack(false, "192.0.2.53", "192.0.2.53")),
                 ipv6: Some(dns_stack(true, "2001:db8::53", "2001:db8::53")),
-                disable_unconstrained_queries: Some(true),
             },
         );
         snapshot.dns.insert(12, Observation::Present(different_interface));

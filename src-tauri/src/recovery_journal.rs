@@ -99,16 +99,70 @@ pub struct RouteMutationRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DnsDohServerProperty {
+    /// Index into the matching adapter or profile name-server list.
+    pub server_index: u32,
+    /// Exact DNS_DOH_SERVER_SETTINGS flags returned by Windows.
+    pub flags: u64,
+    /// Explicit HTTPS URI template; None is valid only for automatic discovery.
+    pub template: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DnsStackConfiguration {
+    /// Raw adapter-configured name servers for this stack. None means Windows
+    /// did not return an explicit static list (for example DHCP/automatic).
+    pub name_servers: Option<Vec<IpAddr>>,
+    /// Profile-specific name servers are kept separate from adapter servers.
+    pub profile_name_servers: Option<Vec<IpAddr>>,
+    /// Effective resolver addresses observed for this stack, including dynamic
+    /// configuration. This is distinct from static and profile configuration.
+    pub effective_name_servers: Vec<IpAddr>,
+    pub domain: Option<String>,
+    pub search_list: Option<Vec<String>>,
+    pub supplemental_search_list: Option<Vec<String>>,
+    pub registration_enabled: bool,
+    pub register_adapter_name: bool,
+    pub enable_llmnr: bool,
+    pub query_adapter_name: bool,
+    /// Adapter settings flags returned by Windows, preserved for exact comparison.
+    pub settings_flags: u64,
+    pub server_properties: Vec<DnsDohServerProperty>,
+    pub profile_server_properties: Vec<DnsDohServerProperty>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DnsInterfaceConfiguration {
+    /// Stable adapter GUID. Interface indexes are diagnostic only.
+    pub interface_guid: String,
+    /// None means the observer could not establish a complete stack snapshot.
+    pub ipv4: Option<DnsStackConfiguration>,
+    pub ipv6: Option<DnsStackConfiguration>,
+    /// Reserved Windows field is retained exactly if a future API version exposes it.
+    pub disable_unconstrained_queries: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "servers", rename_all = "camelCase")]
 pub enum DnsConfiguration {
+    /// Legacy version-1 representation retained for backward deserialization.
     Dhcp,
     Static(Vec<IpAddr>),
+    /// Complete dual-stack configuration. Both stack snapshots are required
+    /// before recovery assessment can positively compare or restore DNS.
+    Interface(DnsInterfaceConfiguration),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DnsMutationRecord {
     pub interface_index: u32,
+    /// Stable adapter identity. Missing only in legacy version-1 journals.
+    #[serde(default)]
+    pub interface_guid: Option<String>,
     pub applied: DnsConfiguration,
     pub previous: DnsConfiguration,
 }
@@ -229,8 +283,19 @@ impl RecoveryJournal {
             if change.interface_index == 0 || !dns_interfaces.insert(change.interface_index) {
                 return Err("The recovery journal contains an invalid or duplicate DNS interface.".to_string());
             }
+            if let Some(interface_guid) = &change.interface_guid {
+                validate_guid(interface_guid)?;
+            }
             validate_dns_configuration(&change.applied)?;
             validate_dns_configuration(&change.previous)?;
+            for configuration in [&change.applied, &change.previous] {
+                if let DnsConfiguration::Interface(snapshot) = configuration {
+                    validate_guid(&snapshot.interface_guid)?;
+                    if change.interface_guid.as_deref() != Some(snapshot.interface_guid.as_str()) {
+                        return Err("The DNS snapshot GUID does not match its journaled interface identity.".to_string());
+                    }
+                }
+            }
         }
         if self.firewall_filters.len() > MAX_FIREWALL_FILTERS {
             return Err("The recovery journal contains too many firewall filter identities.".to_string());
@@ -292,15 +357,131 @@ fn validate_route_state(state: &RouteState, destination: IpAddr) -> Result<(), S
 }
 
 fn validate_dns_configuration(configuration: &DnsConfiguration) -> Result<(), String> {
-    if let DnsConfiguration::Static(servers) = configuration {
-        if servers.is_empty() || servers.len() > MAX_DNS_SERVERS {
-            return Err("The recovery journal contains an invalid DNS server list.".to_string());
+    match configuration {
+        DnsConfiguration::Dhcp => Ok(()),
+        DnsConfiguration::Static(servers) => {
+            validate_dns_servers(servers, None, false)
         }
-        let unique: BTreeSet<_> = servers.iter().collect();
-        if unique.len() != servers.len() {
-            return Err("The recovery journal contains duplicate DNS servers.".to_string());
+        DnsConfiguration::Interface(snapshot) => {
+            validate_guid(&snapshot.interface_guid)?;
+            if let Some(ipv4) = &snapshot.ipv4 {
+                validate_dns_stack(ipv4, false)?;
+            }
+            if let Some(ipv6) = &snapshot.ipv6 {
+                validate_dns_stack(ipv6, true)?;
+            }
+            Ok(())
         }
     }
+}
+
+fn validate_dns_servers(
+    servers: &[IpAddr],
+    ipv6: Option<bool>,
+    allow_empty: bool,
+) -> Result<(), String> {
+    if servers.len() > MAX_DNS_SERVERS || (!allow_empty && servers.is_empty()) {
+        return Err("The recovery journal contains an invalid DNS server list.".to_string());
+    }
+    let unique: BTreeSet<_> = servers.iter().collect();
+    if unique.len() != servers.len() {
+        return Err("The recovery journal contains duplicate DNS servers.".to_string());
+    }
+    if let Some(ipv6) = ipv6 {
+        if servers.iter().any(|server| server.is_ipv6() != ipv6) {
+            return Err("The recovery journal contains a DNS server in the wrong IP family.".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn validate_dns_names(
+    values: &[String],
+    maximum: usize,
+) -> Result<(), String> {
+    if values.len() > maximum
+        || values.iter().any(|value| {
+            value.is_empty()
+                || value.len() > 253
+                || value.chars().any(char::is_control)
+                || value.trim() != value
+        })
+    {
+        return Err("The recovery journal contains an invalid DNS search-name list.".to_string());
+    }
+    Ok(())
+}
+
+fn validate_dns_doh_properties(
+    properties: &[DnsDohServerProperty],
+    server_count: usize,
+) -> Result<(), String> {
+    const DOH_AUTO: u64 = 0x0001;
+    const DOH_ENABLED: u64 = 0x0002;
+    const DOH_FALLBACK_TO_UDP: u64 = 0x0004;
+    const DOH_AUTO_UPGRADE: u64 = 0x0008;
+    const DOH_KNOWN_FLAGS: u64 =
+        DOH_AUTO | DOH_ENABLED | DOH_FALLBACK_TO_UDP | DOH_AUTO_UPGRADE;
+
+    if properties.len() > MAX_DNS_SERVERS {
+        return Err("The recovery journal contains too many DNS-over-HTTPS properties.".to_string());
+    }
+    let mut indexes = BTreeSet::new();
+    for property in properties {
+        let auto = property.flags & DOH_AUTO != 0;
+        let enabled = property.flags & DOH_ENABLED != 0;
+        if property.flags & !DOH_KNOWN_FLAGS != 0
+            || auto == enabled
+            || property.server_index as usize >= server_count
+            || !indexes.insert(property.server_index)
+            || (auto && property.template.is_some())
+            || (enabled && property.template.as_ref().is_none_or(|template| {
+                template.len() > 2048
+                    || !template.starts_with("https://")
+                    || template.chars().any(char::is_control)
+            }))
+            || (property.flags & (DOH_FALLBACK_TO_UDP | DOH_AUTO_UPGRADE) != 0
+                && !auto && !enabled)
+        {
+            return Err("The recovery journal contains an invalid DNS-over-HTTPS server property.".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn validate_dns_stack(
+    stack: &DnsStackConfiguration,
+    ipv6: bool,
+) -> Result<(), String> {
+    const DNS_SETTING_IPV6: u64 = 0x0001;
+
+    if (stack.settings_flags & DNS_SETTING_IPV6 != 0) != ipv6 {
+        return Err("The DNS stack settings flags do not match the recorded IP family.".to_string());
+    }
+    if let Some(servers) = &stack.name_servers {
+        validate_dns_servers(servers, Some(ipv6), false)?;
+    }
+    if let Some(servers) = &stack.profile_name_servers {
+        validate_dns_servers(servers, Some(ipv6), false)?;
+    }
+    validate_dns_servers(&stack.effective_name_servers, Some(ipv6), true)?;
+    if let Some(domain) = &stack.domain {
+        validate_dns_names(std::slice::from_ref(domain), 1)?;
+    }
+    if let Some(names) = &stack.search_list {
+        validate_dns_names(names, 32)?;
+    }
+    if let Some(names) = &stack.supplemental_search_list {
+        validate_dns_names(names, 32)?;
+    }
+    validate_dns_doh_properties(
+        &stack.server_properties,
+        stack.name_servers.as_ref().map_or(0, Vec::len),
+    )?;
+    validate_dns_doh_properties(
+        &stack.profile_server_properties,
+        stack.profile_name_servers.as_ref().map_or(0, Vec::len),
+    )?;
     Ok(())
 }
 
@@ -670,6 +851,7 @@ mod tests {
         });
         journal.dns.push(DnsMutationRecord {
             interface_index: 12,
+            interface_guid: Some("4d36e972-e325-11ce-bfc1-08002be10318".into()),
             applied: DnsConfiguration::Static(vec!["198.18.0.1".parse().unwrap()]),
             previous: DnsConfiguration::Dhcp,
         });

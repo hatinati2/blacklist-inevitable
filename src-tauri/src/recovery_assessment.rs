@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::recovery_journal::{
     DnsConfiguration, DnsMutationRecord, EngineProcessRecord, FirewallFilterRecord,
-    RecoveryJournal, RouteMutationRecord, RouteState,
+    RecoveryJournal, RouteMutationRecord, RouteState, TunnelInterfaceRecord,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,8 +42,8 @@ pub enum ResourceDisposition {
 pub struct RecoverySnapshot {
     /// Process identity must include PID and creation time to detect PID reuse.
     pub engine: Observation<EngineProcessRecord>,
-    /// Stable adapter GUID, not an alias or interface index.
-    pub tunnel_guid: Observation<String>,
+    /// Full journaled tunnel identity and assigned unicast address inventory.
+    pub tunnel: Observation<TunnelInterfaceRecord>,
     /// Entries are keyed by the exact destination prefix stored in the journal.
     /// An omitted key is Unknown, never implicitly Absent.
     pub routes: BTreeMap<String, Observation<RouteState>>,
@@ -83,10 +83,7 @@ pub fn assess_recovery(
     snapshot: &RecoverySnapshot,
 ) -> RecoveryAssessment {
     let engine = assess_engine(journal.engine.as_ref(), &snapshot.engine);
-    let tunnel = assess_tunnel(
-        journal.tunnel.as_ref().map(|record| record.interface_guid.as_str()),
-        &snapshot.tunnel_guid,
-    );
+    let tunnel = assess_tunnel(journal.tunnel.as_ref(), &snapshot.tunnel);
 
     let routes: Vec<_> = journal
         .routes
@@ -155,22 +152,50 @@ fn assess_engine(
 }
 
 fn assess_tunnel(
-    expected_guid: Option<&str>,
-    observed: &Observation<String>,
+    expected: Option<&TunnelInterfaceRecord>,
+    observed: &Observation<TunnelInterfaceRecord>,
 ) -> ResourceDisposition {
-    let Some(expected_guid) = expected_guid else {
+    let Some(expected) = expected else {
         return ResourceDisposition::VerifiedClean;
     };
 
     match observed {
         Observation::Unknown => ResourceDisposition::Unknown,
         Observation::Absent => ResourceDisposition::VerifiedClean,
-        Observation::Present(actual_guid)
-            if actual_guid.eq_ignore_ascii_case(expected_guid) =>
-        {
-            ResourceDisposition::NeedsCleanup
+        Observation::Present(actual) => {
+            // Older version-1 journals recorded only the IP values, not their
+            // prefix lengths. They remain readable, but cannot authorize a
+            // positive identity match while the adapter is still present.
+            if expected.address_details.is_empty() {
+                return ResourceDisposition::Unknown;
+            }
+
+            let expected_guid = normalize_guid(&expected.interface_guid);
+            let actual_guid = normalize_guid(&actual.interface_guid);
+            if expected_guid.is_none() || actual_guid.is_none() {
+                return ResourceDisposition::Unknown;
+            }
+            if expected_guid != actual_guid {
+                return ResourceDisposition::Conflict;
+            }
+
+            let expected_addresses: BTreeSet<_> = expected.addresses.iter().copied().collect();
+            let actual_addresses: BTreeSet<_> = actual.addresses.iter().copied().collect();
+            let expected_details: BTreeSet<_> =
+                expected.address_details.iter().cloned().collect();
+            let actual_details: BTreeSet<_> = actual.address_details.iter().cloned().collect();
+
+            if expected.interface_index == actual.interface_index
+                && expected.alias.eq_ignore_ascii_case(&actual.alias)
+                && expected.mtu == actual.mtu
+                && expected_addresses == actual_addresses
+                && expected_details == actual_details
+            {
+                ResourceDisposition::NeedsCleanup
+            } else {
+                ResourceDisposition::Conflict
+            }
         }
-        Observation::Present(_) => ResourceDisposition::Conflict,
     }
 }
 
@@ -374,7 +399,7 @@ mod tests {
     fn empty_snapshot() -> RecoverySnapshot {
         RecoverySnapshot {
             engine: Observation::Absent,
-            tunnel_guid: Observation::Absent,
+            tunnel: Observation::Absent,
             routes: BTreeMap::new(),
             dns: BTreeMap::new(),
             firewall_filters: Observation::Present(Vec::new()),
@@ -427,22 +452,49 @@ mod tests {
             alias: "product-tun".into(),
             mtu: 1500,
             addresses: vec!["198.18.0.1".parse::<IpAddr>().unwrap()],
+            address_details: vec![crate::recovery_journal::TunnelAddressRecord {
+                address: "198.18.0.1".parse().unwrap(),
+                prefix_length: 30,
+            }],
         });
 
         let mut snapshot = empty_snapshot();
-        snapshot.tunnel_guid =
-            Observation::Present("4D36E972-E325-11CE-BFC1-08002BE10318".into());
+        snapshot.tunnel = Observation::Present(journal.tunnel.clone().unwrap());
         assert_eq!(
             assess_recovery(&journal, &snapshot).tunnel,
             ResourceDisposition::NeedsCleanup
         );
 
-        snapshot.tunnel_guid = Observation::Present(
-            "6d6f8e80-62d4-4b90-a1b8-10ac74e55e20".into(),
-        );
+        let mut changed_address = journal.tunnel.clone().unwrap();
+        changed_address.address_details[0].prefix_length = 29;
+        snapshot.tunnel = Observation::Present(changed_address);
         assert_eq!(
             assess_recovery(&journal, &snapshot).tunnel,
             ResourceDisposition::Conflict
+        );
+
+        let mut different_adapter = journal.tunnel.clone().unwrap();
+        different_adapter.interface_guid =
+            "6d6f8e80-62d4-4b90-a1b8-10ac74e55e20".into();
+        snapshot.tunnel = Observation::Present(different_adapter);
+        assert_eq!(
+            assess_recovery(&journal, &snapshot).tunnel,
+            ResourceDisposition::Conflict
+        );
+
+        let mut legacy = journal.tunnel.clone().unwrap();
+        legacy.address_details.clear();
+        journal.tunnel = Some(legacy.clone());
+        snapshot.tunnel = Observation::Absent;
+        assert_eq!(
+            assess_recovery(&journal, &snapshot).tunnel,
+            ResourceDisposition::VerifiedClean
+        );
+
+        snapshot.tunnel = Observation::Present(legacy);
+        assert_eq!(
+            assess_recovery(&journal, &snapshot).tunnel,
+            ResourceDisposition::Unknown
         );
     }
 

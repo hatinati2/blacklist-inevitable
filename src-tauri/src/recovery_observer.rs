@@ -119,17 +119,17 @@ pub fn observe_agent_wfp_filters(
 
 
 
-/// Observe a recorded TUN adapter by stable interface GUID. The interface index
-/// is treated as a live consistency check, not as the durable identity. Alias
-/// and MTU must also match; assigned address enumeration is a separate probe
-/// and is not claimed by this function.
+/// Observe a recorded TUN adapter and its complete IPv4/IPv6 unicast address
+/// inventory. The stable interface GUID selects the adapter; its NET_LUID
+/// correlates address-table rows so a reused interface index cannot steal them.
 #[cfg(windows)]
 pub fn observe_recorded_tunnel_interface(
     expected: &crate::recovery_journal::TunnelInterfaceRecord,
-) -> Result<Observation<String>, String> {
+) -> Result<Observation<crate::recovery_journal::TunnelInterfaceRecord>, String> {
     use windows_sys::Win32::NetworkManagement::IpHelper::{
         FreeMibTable, GetIfTable2, MIB_IF_ROW2, MIB_IF_TABLE2,
     };
+
     const MAX_INTERFACES: usize = 2048;
 
     let expected_guid = uuid::Uuid::parse_str(&expected.interface_guid)
@@ -138,62 +138,155 @@ pub fn observe_recorded_tunnel_interface(
         return Ok(Observation::Unknown);
     }
 
-    let mut table: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
-    let status = unsafe { GetIfTable2(&mut table) };
+    let found = {
+        let mut table: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
+        let status = unsafe { GetIfTable2(&mut table) };
+        if status != 0 {
+            if !table.is_null() {
+                unsafe { FreeMibTable(table.cast()) };
+            }
+            return Err(format!("GetIfTable2 failed with Windows error {status}."));
+        }
+        if table.is_null() {
+            return Err("GetIfTable2 succeeded without an interface table.".into());
+        }
+        let _table = OwnedIpHelperTable(table.cast());
+
+        let table_ref = unsafe { &*table };
+        let count = table_ref.NumEntries as usize;
+        if count > MAX_INTERFACES {
+            return Err("The Windows interface inventory exceeds its safe bound.".into());
+        }
+
+        let rows = unsafe {
+            std::slice::from_raw_parts(
+                std::ptr::addr_of!((*table).Table).cast::<MIB_IF_ROW2>(),
+                count,
+            )
+        };
+
+        let mut found = None;
+        for row in rows {
+            let guid = uuid::Uuid::from_u128(guid_to_u128(&row.InterfaceGuid));
+            if guid != expected_guid {
+                continue;
+            }
+            if found.is_some() {
+                return Err("Windows returned duplicate rows for the recorded tunnel GUID.".into());
+            }
+
+            let interface_index = row.InterfaceIndex;
+            let interface_luid = unsafe { row.InterfaceLuid.Value };
+            if interface_index == 0 || interface_luid == 0 {
+                return Err("Windows returned an invalid TUN interface identity.".into());
+            }
+
+            let alias_end = row.Alias.iter().position(|unit| *unit == 0)
+                .unwrap_or(row.Alias.len());
+            let alias = String::from_utf16(&row.Alias[..alias_end])
+                .map_err(|_| "Windows returned an invalid tunnel interface alias.".to_string())?;
+
+            found = Some((guid.to_string(), interface_index, interface_luid, alias, row.Mtu));
+        }
+        found
+    };
+
+    let Some((interface_guid, interface_index, interface_luid, alias, mtu)) = found else {
+        return Ok(Observation::Absent);
+    };
+
+    let address_details = observe_tunnel_unicast_addresses(interface_luid, interface_index)?;
+    let addresses = address_details.iter().map(|item| item.address).collect();
+
+    Ok(Observation::Present(
+        crate::recovery_journal::TunnelInterfaceRecord {
+            interface_guid,
+            interface_index,
+            alias,
+            mtu,
+            addresses,
+            address_details,
+        },
+    ))
+}
+
+/// Read both IP families in one snapshot. All rows are correlated by NET_LUID;
+/// the index is checked only as a live consistency value. Any incomplete,
+/// duplicate, oversized, or invalid inventory is an error and therefore Unknown.
+#[cfg(windows)]
+fn observe_tunnel_unicast_addresses(
+    expected_interface_luid: u64,
+    expected_interface_index: u32,
+) -> Result<Vec<crate::recovery_journal::TunnelAddressRecord>, String> {
+    use std::collections::BTreeSet;
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        FreeMibTable, GetUnicastIpAddressTable, MIB_UNICASTIPADDRESS_ROW,
+        MIB_UNICASTIPADDRESS_TABLE,
+    };
+    use windows_sys::Win32::Networking::WinSock::AF_UNSPEC;
+
+    const MAX_UNICAST_ADDRESSES: usize = 16_384;
+    const MAX_TUN_ADDRESSES: usize = 8;
+
+    let mut table: *mut MIB_UNICASTIPADDRESS_TABLE = std::ptr::null_mut();
+    let status = unsafe { GetUnicastIpAddressTable(AF_UNSPEC, &mut table) };
     if status != 0 {
         if !table.is_null() {
             unsafe { FreeMibTable(table.cast()) };
         }
-        return Err(format!("GetIfTable2 failed with Windows error {status}."));
+        return Err(format!(
+            "GetUnicastIpAddressTable failed with Windows error {status}."
+        ));
     }
     if table.is_null() {
-        return Err("GetIfTable2 succeeded without an interface table.".into());
+        return Err("GetUnicastIpAddressTable succeeded without an address table.".into());
     }
     let _table = OwnedIpHelperTable(table.cast());
 
     let table_ref = unsafe { &*table };
     let count = table_ref.NumEntries as usize;
-    if count > MAX_INTERFACES {
-        return Err("The Windows interface inventory exceeds its safe bound.".into());
+    if count > MAX_UNICAST_ADDRESSES {
+        return Err("The Windows unicast address inventory exceeds its safe bound.".into());
     }
 
     let rows = unsafe {
         std::slice::from_raw_parts(
-            std::ptr::addr_of!((*table).Table).cast::<MIB_IF_ROW2>(),
+            std::ptr::addr_of!((*table).Table).cast::<MIB_UNICASTIPADDRESS_ROW>(),
             count,
         )
     };
 
-    let mut found = None;
+    let mut addresses = Vec::new();
+    let mut seen = BTreeSet::new();
     for row in rows {
-        let guid = uuid::Uuid::from_u128(guid_to_u128(&row.InterfaceGuid));
-        if guid != expected_guid {
+        let interface_luid = unsafe { row.InterfaceLuid.Value };
+        if interface_luid != expected_interface_luid {
             continue;
         }
-        if found.is_some() {
-            return Err("Windows returned duplicate rows for the recorded tunnel GUID.".into());
+        if row.InterfaceIndex != expected_interface_index {
+            return Err("The TUN unicast address table contains a mismatched interface index.".into());
         }
 
-        let alias_end = row.Alias.iter().position(|unit| *unit == 0)
-            .unwrap_or(row.Alias.len());
-        let alias = String::from_utf16(&row.Alias[..alias_end])
-            .map_err(|_| "Windows returned an invalid tunnel interface alias.".to_string())?;
-
-        if row.InterfaceIndex == 0
-            || row.InterfaceIndex != expected.interface_index
-            || row.Mtu != expected.mtu
-            || !alias.eq_ignore_ascii_case(&expected.alias)
-        {
-            return Ok(Observation::Unknown);
+        let address = sockaddr_address(&row.Address)?;
+        let maximum_prefix = if address.is_ipv4() { 32 } else { 128 };
+        if row.OnLinkPrefixLength > maximum_prefix {
+            return Err("Windows returned an invalid TUN unicast prefix length.".into());
+        }
+        if !seen.insert(address) {
+            return Err("Windows returned a duplicate TUN unicast address.".into());
         }
 
-        found = Some(guid.to_string());
+        addresses.push(crate::recovery_journal::TunnelAddressRecord {
+            address,
+            prefix_length: row.OnLinkPrefixLength,
+        });
+        if addresses.len() > MAX_TUN_ADDRESSES {
+            return Err("The TUN unicast address inventory exceeds its journal bound.".into());
+        }
     }
 
-    Ok(match found {
-        Some(guid) => Observation::Present(guid),
-        None => Observation::Absent,
-    })
+    addresses.sort_unstable();
+    Ok(addresses)
 }
 
 /// Read every IPv4 and IPv6 route row in one IP Helper snapshot, then return

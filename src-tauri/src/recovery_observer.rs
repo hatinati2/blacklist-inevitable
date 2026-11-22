@@ -130,8 +130,6 @@ pub fn observe_recorded_tunnel_interface(
     use windows_sys::Win32::NetworkManagement::IpHelper::{
         FreeMibTable, GetIfTable2, MIB_IF_ROW2, MIB_IF_TABLE2,
     };
-    use windows_sys::core::GUID;
-
     const MAX_INTERFACES: usize = 2048;
 
     let expected_guid = uuid::Uuid::parse_str(&expected.interface_guid)
@@ -207,7 +205,6 @@ pub fn observe_recorded_routes(
     journal: &crate::recovery_journal::RecoveryJournal,
 ) -> Result<std::collections::BTreeMap<String, Observation<crate::recovery_journal::RouteState>>, String> {
     use std::collections::BTreeMap;
-    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     use windows_sys::Win32::NetworkManagement::IpHelper::{
         FreeMibTable, GetIpForwardTable2, MIB_IPFORWARD_ROW2, MIB_IPFORWARD_TABLE2,
     };
@@ -399,5 +396,20 @@ mod tests {
             super::filetime_to_ticks(0x89AB_CDEF, 0x0123_4567),
             0x0123_4567_89AB_CDEF
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn route_prefixes_are_compared_in_canonical_network_form() {
+        assert_eq!(
+            super::canonicalize_ip_prefix("203.0.113.129".parse().unwrap(), 24).unwrap(),
+            "203.0.113.0/24"
+        );
+        assert_eq!(
+            super::canonicalize_ip_prefix("2001:db8::abcd".parse().unwrap(), 64).unwrap(),
+            "2001:db8::/64"
+        );
+        assert!(super::canonicalize_ip_prefix("203.0.113.1".parse().unwrap(), 33).is_err());
+        assert!(super::canonicalize_ip_prefix("2001:db8::1".parse().unwrap(), 129).is_err());
     }
 }

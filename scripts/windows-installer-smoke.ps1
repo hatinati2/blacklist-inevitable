@@ -4,6 +4,7 @@ $agentServiceLog = Join-Path $env:TEMP "BlacklistInevitableAgent-service.log"
 $installerLog = Join-Path $env:TEMP "blacklist-inevitable-nsis-install.log"
 $uninstallerLog = Join-Path $env:TEMP "blacklist-inevitable-nsis-uninstall.log"
 $uninstallHookLog = Join-Path $env:TEMP "BlacklistInevitableAgent-uninstall-hook.log"
+$agentIpcDiagnostic = Join-Path $env:ProgramData "BlacklistInevitable\Agent\last-ipc-error.txt"
 Remove-Item -LiteralPath $agentServiceLog -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $installerLog -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $uninstallerLog -Force -ErrorAction SilentlyContinue
@@ -205,6 +206,9 @@ if ($agentSignature.Status -eq "Valid" -and $desktopSignature.Status -eq "Valid"
         throw "The Agent journal directory ACL is not restricted to SYSTEM, Administrators, and the Agent service SID."
     }
 
+    # Clear a previous run's protected service-side diagnostic before probing IPC.
+    Remove-Item -LiteralPath $agentIpcDiagnostic -Force -ErrorAction SilentlyContinue
+
     # Exercise the installed service's status-only named-pipe protocol before
     # launching the desktop app. This proves that the LocalSystem service is
     # accepting an authenticated local caller and returning a correlated frame.
@@ -265,6 +269,20 @@ namespace BlacklistInevitable {
             throw "The Agent status response did not match the request or was not successful."
         }
         Write-Host "Verified Agent named-pipe status response and request correlation."
+    }
+    catch {
+        Write-Host "Agent IPC request failed; collecting protected service-side diagnostics."
+        if (Test-Path -LiteralPath $agentIpcDiagnostic -PathType Leaf) {
+            Get-Content -LiteralPath $agentIpcDiagnostic -Tail 20 | ForEach-Object { Write-Host "AGENT IPC: $_" }
+        } else {
+            Write-Host "No service-side IPC diagnostic file was written."
+        }
+        $serviceAfterIpc = Get-Service -Name "BlacklistInevitableAgent" -ErrorAction SilentlyContinue
+        $serviceRecordAfterIpc = Get-CimInstance -ClassName Win32_Service -Filter "Name='BlacklistInevitableAgent'" -ErrorAction SilentlyContinue
+        Write-Host "Agent service after IPC failure: $(if ($serviceAfterIpc) { $serviceAfterIpc.Status } else { 'not registered' }); PID=$($serviceRecordAfterIpc.ProcessId); ExitCode=$($serviceRecordAfterIpc.ExitCode); ServiceSpecificExitCode=$($serviceRecordAfterIpc.ServiceSpecificExitCode)"
+        $scSnapshot = (& "$env:SystemRoot\System32\sc.exe" queryex "BlacklistInevitableAgent" 2>&1 | Out-String)
+        Write-Host "Agent service queryex snapshot: $($scSnapshot.Trim())"
+        throw
     }
     finally {
         $agentPipe.Dispose()

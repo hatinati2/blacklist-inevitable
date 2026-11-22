@@ -7,6 +7,8 @@
 - The service reports start-pending, running, stop-pending, and stopped states.
 - Stop and shutdown signal a manual-reset event. Every blocking pipe operation uses an OVERLAPPED record and waits on both its I/O event and the service-stop event; on Stop, the operation is cancelled and drained before its buffer/OVERLAPPED storage is released.
 - The service creates one first-instance named pipe at `\\.\pipe\BlacklistInevitable.Agent.v1`.
+- Before writing request bytes, the desktop client obtains the connected pipe server PID, compares it to the running `BlacklistInevitableAgent` PID reported by the Service Control Manager, opens that process with query-only access, and requires its canonical executable path to match the Agent sidecar beside the desktop executable. API errors, stopped service, PID mismatch, or image-path mismatch fail closed.
+- The installer smoke test runs the production Rust client against the installed LocalSystem service, so the same server-identity gate used by the UI is exercised in Windows CI.
 - The pipe DACL grants SYSTEM and Administrators full access, and Interactive Users read/write access only. No Everyone or broad Users ACE is added.
 - `PIPE_REJECT_REMOTE_CLIENTS` rejects remote pipe clients. The server accepts one local client at a time.
 - Before reading a request, the server compares the pipe client session ID with the active physical-console session, obtains that session's user token, impersonates the pipe client only long enough to read the token SID/session ID, calls `RevertToSelf`, and requires both identities to match.

@@ -292,6 +292,33 @@ namespace BlacklistInevitable {
     finally {
         $agentPipe.Dispose()
     }
+
+    # Exercise the production Rust desktop client, including its SCM PID and
+    # process-image checks, against the just-installed Windows service.
+    $statusClientResult = Join-Path $env:RUNNER_TEMP "BlacklistInevitableAgent-rust-client-smoke.txt"
+    Remove-Item -LiteralPath $statusClientResult -Force -ErrorAction SilentlyContinue
+    $env:BLACKLIST_AGENT_STATUS_SMOKE_RESULT = $statusClientResult
+    try {
+        $statusClientProcess = Start-Process -FilePath $appPath -ArgumentList @("--agent-status-smoke-test") -WorkingDirectory $installDirectory -WindowStyle Hidden -Wait -PassThru
+    } finally {
+        Remove-Item Env:\BLACKLIST_AGENT_STATUS_SMOKE_RESULT -ErrorAction SilentlyContinue
+    }
+    if ($statusClientProcess.ExitCode -ne 0) {
+        $resultDetail = if (Test-Path -LiteralPath $statusClientResult) {
+            Get-Content -LiteralPath $statusClientResult -Raw
+        } else {
+            "The Rust desktop client did not write its smoke-test result."
+        }
+        throw "The production Rust Agent client rejected the installed service identity or status response: $resultDetail"
+    }
+    if (-not (Test-Path -LiteralPath $statusClientResult -PathType Leaf)) {
+        throw "The production Rust Agent client did not produce a smoke-test result."
+    }
+    $statusClientDetail = Get-Content -LiteralPath $statusClientResult -Raw
+    if ($statusClientDetail -notmatch "^success:") {
+        throw "The production Rust Agent client returned an invalid smoke-test result: $statusClientDetail"
+    }
+    Write-Host "Verified production Rust Agent client identity and correlated status response: $($statusClientDetail.Trim())"
 } elseif ($agentSignature.Status -eq "NotSigned" -and $desktopSignature.Status -eq "NotSigned") {
     if ($service) {
         throw "An unsigned package must not register a privileged Agent service."

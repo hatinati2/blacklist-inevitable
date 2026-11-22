@@ -70,7 +70,8 @@ Naive import/config mapping is implemented for a bounded subset; remote authenti
 - [ ] Add an explicit Rust-owned Connect / Disconnect state machine.
 - [ ] Add Windows platform integration only for the normal connection path.
 - [x] Install a narrowly scoped LocalSystem Agent service through the per-machine signed-package lifecycle, with matching Authenticode signer checks and protected service data ACLs.
-- [ ] Add authenticated one-shot profile/credential handoff over IPC; verify the server process identity before any secret or mutating request is sent.
+- [x] Verify the connected named-pipe server PID against the running Service Control Manager Agent PID and require its executable image to resolve to the installed Agent beside the desktop app before sending requests.
+- [ ] Add authenticated one-shot profile/credential handoff over IPC only after the server identity gate above is independently validated on supported Windows versions.
 - [x] Define destination-based Global and Rule routing; generate Iran-aware Direct rules from geosite-ir/geoip-ir, with foreign traffic using the VPN outbound by default.
 - [ ] Add a Rule/Global mode selector, rule-list management, protected rule-set cache/download, and user-editable domain/IP exceptions to the Windows UI and Agent.
 - [x] Define Windows split-tunnel policy modes (Full Tunnel, Direct Only, Include Selected, Exclude Selected, and per-app Custom VPN/Direct/Block) and map them to sing-box process-path route rules.

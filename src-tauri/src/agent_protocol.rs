@@ -9,6 +9,8 @@ use crate::connection_state::ConnectionSnapshot;
 use crate::profiles::ProfileSummary;
 
 pub const AGENT_PROTOCOL_VERSION: u16 = 1;
+/// One-byte acknowledgement sent only after the client has consumed the full response frame.
+pub const AGENT_RESPONSE_ACK_BYTE: u8 = 0x06;
 pub const MAX_AGENT_REQUEST_BYTES: usize = 128 * 1024;
 pub const AGENT_FRAME_HEADER_BYTES: usize = 4;
 pub const MAX_AGENT_REQUESTS_PER_CONNECTION: usize = 4096;

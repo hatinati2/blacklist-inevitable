@@ -8,7 +8,7 @@ use serde::Deserialize;
 
 use crate::agent_protocol::{
     write_agent_message, AgentOperation, AgentRequest, AGENT_PROTOCOL_VERSION,
-    MAX_AGENT_REQUEST_BYTES,
+    AGENT_RESPONSE_ACK_BYTE, MAX_AGENT_REQUEST_BYTES,
 };
 
 const PIPE_NAME: &str = r"\\.\pipe\BlacklistInevitable.Agent.v1";
@@ -55,7 +55,7 @@ fn decode_agent_response(payload: &[u8], expected_request_id: &str) -> Result<St
 pub async fn query_status() -> Result<String, String> {
     use std::time::{Duration, Instant};
 
-    use tokio::io::AsyncReadExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::windows::named_pipe::ClientOptions;
     use tokio::time::{sleep, timeout};
     use windows_sys::Win32::Foundation::ERROR_PIPE_BUSY;
@@ -105,7 +105,14 @@ pub async fn query_status() -> Result<String, String> {
         pipe.read_exact(&mut payload)
             .await
             .map_err(|_| "The Agent closed the status response before its payload arrived.".to_string())?;
-        decode_agent_response(&payload, &request_id)
+        let detail = decode_agent_response(&payload, &request_id)?;
+        pipe.write_all(&[AGENT_RESPONSE_ACK_BYTE])
+            .await
+            .map_err(|_| "The Agent response acknowledgement could not be sent.".to_string())?;
+        pipe.flush()
+            .await
+            .map_err(|_| "The Agent response acknowledgement could not be flushed.".to_string())?;
+        Ok(detail)
     })
     .await
     .map_err(|_| "The Agent status request timed out.".to_string())?

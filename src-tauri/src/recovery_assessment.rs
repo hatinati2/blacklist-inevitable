@@ -432,6 +432,8 @@ mod tests {
 
     fn dns_stack(ipv6: bool, server: &str, effective: &str) -> crate::recovery_journal::DnsStackConfiguration {
         crate::recovery_journal::DnsStackConfiguration {
+            settings_version: 3,
+            encrypted_dns_adapter_flags: None,
             name_servers: Some(vec![server.parse().unwrap()]),
             profile_name_servers: None,
             effective_name_servers: vec![effective.parse().unwrap()],

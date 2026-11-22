@@ -63,7 +63,12 @@ pub struct TunnelInterfaceRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RouteState {
+    /// Current Windows interface index; diagnostic only because indexes can be reused.
     pub interface_index: u32,
+    /// Stable NET_LUID identity of the interface. Legacy journals omit this and
+    /// must remain Unknown during reconciliation rather than trusting an index.
+    #[serde(default)]
+    pub interface_luid: Option<u64>,
     pub next_hop: Option<IpAddr>,
     pub metric: u32,
 }
@@ -248,6 +253,7 @@ fn parse_prefix(value: &str) -> Result<(IpAddr, u8), String> {
 
 fn validate_route_state(state: &RouteState, destination: IpAddr) -> Result<(), String> {
     if state.interface_index == 0
+        || state.interface_luid == Some(0)
         || state.next_hop.is_some_and(|gateway| gateway.is_ipv4() != destination.is_ipv4())
     {
         return Err("The recovery journal contains an invalid route state.".to_string());
@@ -617,11 +623,13 @@ mod tests {
             destination_prefix: "0.0.0.0/0".to_string(),
             applied: RouteState {
                 interface_index: 17,
+                interface_luid: Some(0x0001_0000_0000_0011),
                 next_hop: None,
                 metric: 5,
             },
             previous: Some(RouteState {
                 interface_index: 12,
+                interface_luid: Some(0x0001_0000_0000_000C),
                 next_hop: Some("192.0.2.1".parse().unwrap()),
                 metric: 25,
             }),

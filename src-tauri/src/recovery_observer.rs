@@ -16,12 +16,12 @@ pub fn observe_recorded_engine_process(
     expected: &EngineProcessRecord,
 ) -> Result<Observation<EngineProcessRecord>, String> {
     use windows_sys::Win32::Foundation::{
-        CloseHandle, GetLastError, ERROR_INVALID_PARAMETER, FILETIME, SYNCHRONIZE,
-        WAIT_OBJECT_0, WAIT_TIMEOUT,
+        CloseHandle, GetLastError, ERROR_INVALID_PARAMETER, FILETIME, WAIT_OBJECT_0,
+        WAIT_TIMEOUT,
     };
     use windows_sys::Win32::System::Threading::{
-        GetProcessTimes, OpenProcess, WaitForSingleObject,
-        PROCESS_QUERY_LIMITED_INFORMATION,
+        GetProcessTimes, OpenProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION,
+        PROCESS_SYNCHRONIZE,
     };
 
     if expected.process_id == 0 || expected.creation_time_100ns == 0 {
@@ -30,7 +30,7 @@ pub fn observe_recorded_engine_process(
 
     let handle = unsafe {
         OpenProcess(
-            PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
             0,
             expected.process_id,
         )

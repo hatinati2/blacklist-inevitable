@@ -256,18 +256,8 @@ fn assess_dns(
     let Some(expected_guid) = record.interface_guid.as_deref().and_then(normalize_guid) else {
         return ResourceDisposition::Unknown;
     };
-    let complete_interface = |configuration: &DnsConfiguration| match configuration {
-        DnsConfiguration::Interface(interface)
-            if interface.ipv4.is_some() && interface.ipv6.is_some() =>
-        {
-            normalize_guid(&interface.interface_guid)
-                .filter(|guid| guid == &expected_guid)
-                .map(|_| interface)
-        }
-        DnsConfiguration::Dhcp | DnsConfiguration::Static(_) | DnsConfiguration::Interface(_) => None,
-    };
-    if complete_interface(&record.previous).is_none()
-        || complete_interface(&record.applied).is_none()
+    if complete_dns_interface(&record.previous, &expected_guid).is_none()
+        || complete_dns_interface(&record.applied, &expected_guid).is_none()
     {
         return ResourceDisposition::Unknown;
     }
@@ -277,18 +267,15 @@ fn assess_dns(
         // will apply if that interface returns; keep recovery blocked.
         Observation::Unknown | Observation::Absent => ResourceDisposition::Unknown,
         Observation::Present(actual) => {
-            match complete_interface(actual) {
-                Some(_) => {}
-                None => {
-                    if let DnsConfiguration::Interface(interface) = actual {
-                        if normalize_guid(&interface.interface_guid)
-                            .is_some_and(|guid| guid != expected_guid)
-                        {
-                            return ResourceDisposition::Conflict;
-                        }
-                    }
-                    return ResourceDisposition::Unknown;
+            if let DnsConfiguration::Interface(interface) = actual {
+                if normalize_guid(&interface.interface_guid)
+                    .is_some_and(|guid| guid != expected_guid)
+                {
+                    return ResourceDisposition::Conflict;
                 }
+            }
+            if complete_dns_interface(actual, &expected_guid).is_none() {
+                return ResourceDisposition::Unknown;
             }
 
             if actual == &record.previous {
@@ -299,6 +286,24 @@ fn assess_dns(
                 ResourceDisposition::Conflict
             }
         }
+    }
+}
+
+fn complete_dns_interface<'a>(
+    configuration: &'a DnsConfiguration,
+    expected_guid: &str,
+) -> Option<&'a crate::recovery_journal::DnsInterfaceConfiguration> {
+    let DnsConfiguration::Interface(interface) = configuration else {
+        return None;
+    };
+    if interface.ipv4.is_none() || interface.ipv6.is_none() {
+        return None;
+    }
+    let actual_guid = normalize_guid(&interface.interface_guid)?;
+    if actual_guid == expected_guid {
+        Some(interface)
+    } else {
+        None
     }
 }
 

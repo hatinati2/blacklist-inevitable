@@ -116,9 +116,11 @@ pub fn serve(pipe: HANDLE, stop_event: HANDLE) -> Result<(), String> {
             return Ok(());
         }
 
+        write_last_ipc_diagnostic("listener: waiting for client");
         if !connect_client_overlapped(pipe, stop_event)? {
             return Ok(());
         }
+        write_last_ipc_diagnostic("connection: client accepted");
 
         let request_result = if stop_requested(stop_event) {
             Ok(())
@@ -161,10 +163,10 @@ fn stop_requested(stop_event: HANDLE) -> bool {
 /// connection. The parent directory is provisioned with a restrictive DACL by
 /// the installer; a diagnostic write never changes the authentication decision.
 fn write_last_ipc_diagnostic(message: &str) {
-    let Some(program_data) = std::env::var_os("ProgramData") else {
-        return;
-    };
-    let path = std::path::PathBuf::from(program_data)
+    let program_data = std::env::var_os("ProgramData")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\ProgramData"));
+    let path = program_data
         .join("BlacklistInevitable")
         .join("Agent")
         .join("last-ipc-error.txt");
@@ -179,7 +181,9 @@ fn write_last_ipc_diagnostic(message: &str) {
 
 fn handle_authenticated_connection(pipe: HANDLE, stop_event: HANDLE) -> Result<(), String> {
     let mut replay_guard = AgentRequestReplayGuard::default();
+    write_last_ipc_diagnostic("request: reading framed request");
     let request = read_one_request(pipe, stop_event)?;
+    write_last_ipc_diagnostic("request: decoded and authenticated");
     replay_guard.accept(&request)?;
 
     let response = match request.operation {
@@ -199,8 +203,11 @@ fn handle_authenticated_connection(pipe: HANDLE, stop_event: HANDLE) -> Result<(
         ),
     };
 
+    write_last_ipc_diagnostic("response: writing bounded response frame");
     write_one_response(pipe, stop_event, &response)
-        .map_err(|error| format!("response-write: {error}"))
+        .map_err(|error| format!("response-write: {error}"))?;
+    write_last_ipc_diagnostic("response: frame write completed");
+    Ok(())
 }
 
 fn create_io_event() -> Result<HANDLE, String> {

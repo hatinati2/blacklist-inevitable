@@ -251,17 +251,50 @@ fn assess_dns(
         return ResourceDisposition::Unknown;
     };
 
+    // DNS interface indexes are reusable. A record created before stable GUID
+    // identity was added remains readable, but cannot authorize a positive
+    // match on a live interface.
+    let Some(expected_guid) = record.interface_guid.as_deref().and_then(normalize_guid) else {
+        return ResourceDisposition::Unknown;
+    };
+
     match observed {
         // An absent/unavailable interface does not prove what DNS state Windows
         // will apply if that interface returns; keep recovery blocked.
         Observation::Unknown | Observation::Absent => ResourceDisposition::Unknown,
-        Observation::Present(actual) if actual == &record.previous => {
-            ResourceDisposition::VerifiedClean
+        Observation::Present(actual) => {
+            if let DnsConfiguration::Interface(actual_interface) = actual {
+                let Some(actual_guid) = normalize_guid(&actual_interface.interface_guid) else {
+                    return ResourceDisposition::Unknown;
+                };
+                if actual_guid != expected_guid {
+                    return ResourceDisposition::Conflict;
+                }
+                if actual_interface.ipv4.is_none() || actual_interface.ipv6.is_none() {
+                    return ResourceDisposition::Unknown;
+                }
+            }
+
+            for expected in [&record.previous, &record.applied] {
+                if let DnsConfiguration::Interface(expected_interface) = expected {
+                    if normalize_guid(&expected_interface.interface_guid)
+                        .as_deref() != Some(expected_guid.as_str())
+                        || expected_interface.ipv4.is_none()
+                        || expected_interface.ipv6.is_none()
+                    {
+                        return ResourceDisposition::Unknown;
+                    }
+                }
+            }
+
+            if actual == &record.previous {
+                ResourceDisposition::VerifiedClean
+            } else if actual == &record.applied {
+                ResourceDisposition::NeedsRestore
+            } else {
+                ResourceDisposition::Conflict
+            }
         }
-        Observation::Present(actual) if actual == &record.applied => {
-            ResourceDisposition::NeedsRestore
-        }
-        Observation::Present(_) => ResourceDisposition::Conflict,
     }
 }
 
@@ -382,9 +415,37 @@ mod tests {
     fn dns_record() -> DnsMutationRecord {
         DnsMutationRecord {
             interface_index: 12,
+            interface_guid: Some("4d36e972-e325-11ce-bfc1-08002be10318".into()),
             applied: DnsConfiguration::Static(vec!["198.18.0.1".parse().unwrap()]),
             previous: DnsConfiguration::Dhcp,
         }
+    }
+
+    fn dns_stack(ipv6: bool, server: &str, effective: &str) -> crate::recovery_journal::DnsStackConfiguration {
+        crate::recovery_journal::DnsStackConfiguration {
+            name_servers: Some(vec![server.parse().unwrap()]),
+            profile_name_servers: None,
+            effective_name_servers: vec![effective.parse().unwrap()],
+            domain: Some("vpn.example.test".into()),
+            search_list: Some(vec!["example.test".into()]),
+            supplemental_search_list: Some(vec!["internal.example.test".into()]),
+            registration_enabled: false,
+            register_adapter_name: false,
+            enable_llmnr: false,
+            query_adapter_name: false,
+            settings_flags: if ipv6 { 0x0001 | 0x0002 | 0x0004 | 0x0020 } else { 0x0002 | 0x0004 | 0x0020 },
+            server_properties: vec![],
+            profile_server_properties: vec![],
+        }
+    }
+
+    fn complete_dns(server4: &str, server6: &str) -> DnsConfiguration {
+        DnsConfiguration::Interface(crate::recovery_journal::DnsInterfaceConfiguration {
+            interface_guid: "4d36e972-e325-11ce-bfc1-08002be10318".into(),
+            ipv4: Some(dns_stack(false, server4, server4)),
+            ipv6: Some(dns_stack(true, server6, server6)),
+            disable_unconstrained_queries: Some(true),
+        })
     }
 
     fn filter_record(filter_id: u64) -> FirewallFilterRecord {
@@ -551,6 +612,102 @@ mod tests {
             assess_recovery(&journal, &snapshot).routes[0].disposition,
             ResourceDisposition::VerifiedClean
         );
+    }
+
+    #[test]
+    fn complete_dual_stack_dns_requires_exact_ipv4_ipv6_and_profile_state() {
+        let previous = complete_dns("192.0.2.53", "2001:db8::53");
+        let applied = complete_dns("198.18.0.1", "fd00::53");
+        let mut journal = RecoveryJournal::new(101);
+        journal.dns.push(DnsMutationRecord {
+            interface_index: 12,
+            interface_guid: Some("4d36e972-e325-11ce-bfc1-08002be10318".into()),
+            applied: applied.clone(),
+            previous: previous.clone(),
+        });
+        let mut snapshot = empty_snapshot();
+
+        snapshot.dns.insert(12, Observation::Present(previous));
+        assert_eq!(
+            assess_recovery(&journal, &snapshot).dns[0].disposition,
+            ResourceDisposition::VerifiedClean
+        );
+
+        snapshot.dns.insert(12, Observation::Present(applied));
+        assert_eq!(
+            assess_recovery(&journal, &snapshot).dns[0].disposition,
+            ResourceDisposition::NeedsRestore
+        );
+
+        snapshot.dns.insert(
+            12,
+            Observation::Present(complete_dns("198.18.0.1", "2001:db8::99")),
+        );
+        assert_eq!(
+            assess_recovery(&journal, &snapshot).dns[0].disposition,
+            ResourceDisposition::Conflict
+        );
+    }
+
+    #[test]
+    fn dns_with_missing_stack_or_reused_interface_index_is_not_clean() {
+        let previous = complete_dns("192.0.2.53", "2001:db8::53");
+        let applied = complete_dns("198.18.0.1", "fd00::53");
+        let mut journal = RecoveryJournal::new(102);
+        journal.dns.push(DnsMutationRecord {
+            interface_index: 12,
+            interface_guid: Some("4d36e972-e325-11ce-bfc1-08002be10318".into()),
+            applied,
+            previous,
+        });
+        let mut snapshot = empty_snapshot();
+
+        let mut incomplete = match complete_dns("192.0.2.53", "2001:db8::53") {
+            DnsConfiguration::Interface(config) => config,
+            _ => unreachable!(),
+        };
+        incomplete.ipv6 = None;
+        snapshot.dns.insert(
+            12,
+            Observation::Present(DnsConfiguration::Interface(incomplete)),
+        );
+        assert_eq!(
+            assess_recovery(&journal, &snapshot).dns[0].disposition,
+            ResourceDisposition::Unknown
+        );
+
+        let different_interface = DnsConfiguration::Interface(
+            crate::recovery_journal::DnsInterfaceConfiguration {
+                interface_guid: "6d6f8e80-62d4-4b90-a1b8-10ac74e55e20".into(),
+                ipv4: Some(dns_stack(false, "192.0.2.53", "192.0.2.53")),
+                ipv6: Some(dns_stack(true, "2001:db8::53", "2001:db8::53")),
+                disable_unconstrained_queries: Some(true),
+            },
+        );
+        snapshot.dns.insert(12, Observation::Present(different_interface));
+        assert_eq!(
+            assess_recovery(&journal, &snapshot).dns[0].disposition,
+            ResourceDisposition::Conflict
+        );
+    }
+
+    #[test]
+    fn legacy_dns_records_without_stable_guid_remain_unknown() {
+        let mut journal = RecoveryJournal::new(103);
+        let mut record = dns_record();
+        record.interface_guid = None;
+        journal.dns.push(record.clone());
+
+        let mut snapshot = empty_snapshot();
+        snapshot.dns.insert(
+            record.interface_index,
+            Observation::Present(record.previous),
+        );
+        assert_eq!(
+            assess_recovery(&journal, &snapshot).dns[0].disposition,
+            ResourceDisposition::Unknown
+        );
+        assert!(!assess_recovery(&journal, &snapshot).can_remove_journal);
     }
 
     #[test]

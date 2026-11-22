@@ -132,14 +132,10 @@ pub fn observe_agent_wfp_filters(
 pub fn observe_recorded_dns(
     expected: &crate::recovery_journal::DnsMutationRecord,
 ) -> Result<Observation<crate::recovery_journal::DnsConfiguration>, String> {
-    use windows_sys::Win32::Foundation::ERROR_BUFFER_OVERFLOW;
     use windows_sys::Win32::NetworkManagement::IpHelper::{
-        FreeInterfaceDnsSettings, GetAdaptersAddresses, GetIfTable2, GetInterfaceDnsSettings,
-        MIB_IF_ROW2, MIB_IF_TABLE2, DNS_INTERFACE_SETTINGS, DNS_INTERFACE_SETTINGS3,
+        FreeInterfaceDnsSettings, GetIfTable2, GetInterfaceDnsSettings, MIB_IF_ROW2,
+        MIB_IF_TABLE2, DNS_INTERFACE_SETTINGS, DNS_INTERFACE_SETTINGS3,
         DNS_INTERFACE_SETTINGS_VERSION3,
-    };
-    use windows_sys::Win32::NetworkManagement::IpHelper::{
-        GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_MULTICAST, GAA_FLAG_SKIP_UNICAST,
     };
 
     const MAX_INTERFACES: usize = 2048;
@@ -276,8 +272,10 @@ fn observe_effective_dns_servers(
     expected_interface_luid: u64,
 ) -> Result<EffectiveDnsServers, String> {
     use std::collections::BTreeSet;
+    use windows_sys::Win32::Foundation::ERROR_BUFFER_OVERFLOW;
     use windows_sys::Win32::NetworkManagement::IpHelper::{
-        GetAdaptersAddresses, IP_ADAPTER_ADDRESSES_LH,
+        GetAdaptersAddresses, IP_ADAPTER_ADDRESSES_LH, GAA_FLAG_SKIP_ANYCAST,
+        GAA_FLAG_SKIP_MULTICAST, GAA_FLAG_SKIP_UNICAST,
     };
     use windows_sys::Win32::Networking::WinSock::AF_UNSPEC;
 

@@ -39,7 +39,8 @@ use windows_sys::Win32::System::Threading::{
 use windows_sys::Win32::Foundation::HANDLE;
 
 use crate::agent_protocol::{
-    AgentOperation, AgentRequestReplayGuard, AgentResponse, MAX_AGENT_REQUEST_BYTES,
+    AgentOperation, AgentRequestReplayGuard, AgentResponse, AGENT_RESPONSE_ACK_BYTE,
+    MAX_AGENT_REQUEST_BYTES,
 };
 
 const PIPE_NAME: &str = r"\\.\pipe\BlacklistInevitable.Agent.v1";
@@ -206,7 +207,31 @@ fn handle_authenticated_connection(pipe: HANDLE, stop_event: HANDLE) -> Result<(
     write_last_ipc_diagnostic("response: writing bounded response frame");
     write_one_response(pipe, stop_event, &response)
         .map_err(|error| format!("response-write: {error}"))?;
-    write_last_ipc_diagnostic("response: frame write completed");
+    write_last_ipc_diagnostic("response: frame written; waiting for client acknowledgement");
+    read_response_ack(pipe, stop_event)?;
+    write_last_ipc_diagnostic("response: client acknowledged full frame");
+    Ok(())
+}
+
+/// A response is not complete until the client confirms it consumed every byte.
+/// DisconnectNamedPipe discards unread outbound data, so disconnecting immediately
+/// after WriteFile can race a client that has not yet started reading. The ACK is
+/// deliberately one byte and bounded; a client that never reads cannot hold the
+/// privileged service's single pipe instance indefinitely.
+fn read_response_ack(pipe: HANDLE, stop_event: HANDLE) -> Result<(), String> {
+    const ACK_TIMEOUT: Duration = Duration::from_secs(5);
+    let mut acknowledgement = [0u8; 1];
+    read_exact_pipe(
+        pipe,
+        stop_event,
+        &mut acknowledgement,
+        Instant::now() + ACK_TIMEOUT,
+    )
+    .map_err(|error| format!("response-ack: {error}"))?;
+
+    if acknowledgement[0] != AGENT_RESPONSE_ACK_BYTE {
+        return Err("response-ack: the client sent an invalid response acknowledgement.".into());
+    }
     Ok(())
 }
 

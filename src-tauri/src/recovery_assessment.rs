@@ -246,9 +246,9 @@ fn assess_firewall_filters(
     let Observation::Present(observed) = observed else {
         return match observed {
             Observation::Unknown => ResourceDisposition::Unknown,
-            // The provider-scoped inventory positively confirmed that no
-            // product-owned filter remains, including legacy records.
-            Observation::Absent => ResourceDisposition::VerifiedClean,
+            // No provider object does not prove that its persistent filters
+            // are absent. Only a successful complete enumeration can do that.
+            Observation::Absent => ResourceDisposition::Unknown,
             Observation::Present(_) => unreachable!(),
         };
     };

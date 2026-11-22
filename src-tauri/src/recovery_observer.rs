@@ -955,6 +955,37 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn dns_server_lists_preserve_both_ip_families_and_order() {
+        assert_eq!(
+            super::parse_dns_ip_list(Some("192.0.2.53, 1.1.1.1")).unwrap(),
+            Some(vec!["192.0.2.53".parse().unwrap(), "1.1.1.1".parse().unwrap()])
+        );
+        assert_eq!(
+            super::parse_dns_ip_list(Some("2001:db8::53, 2606:4700:4700::1111")).unwrap(),
+            Some(vec![
+                "2001:db8::53".parse().unwrap(),
+                "2606:4700:4700::1111".parse().unwrap(),
+            ])
+        );
+        assert!(super::parse_dns_ip_list(Some("not-an-address")).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn dns_search_lists_preserve_order_and_reject_oversized_entries() {
+        assert_eq!(
+            super::parse_dns_name_list(Some("example.test, internal.test corp.test")).unwrap(),
+            Some(vec![
+                "example.test".to_string(),
+                "internal.test".to_string(),
+                "corp.test".to_string(),
+            ])
+        );
+        assert!(super::parse_dns_name_list(Some(&"x".repeat(254))).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn route_prefixes_are_compared_in_canonical_network_form() {
         assert_eq!(
             super::canonicalize_ip_prefix("203.0.113.129".parse().unwrap(), 24).unwrap(),

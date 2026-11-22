@@ -262,6 +262,14 @@ fn assess_firewall_filters(
         };
     };
 
+    // A successful complete provider-scoped inventory with zero entries
+    // proves every product filter is absent, even for legacy journal records
+    // that predate stable filter GUIDs. Unknown/failed enumeration never reaches
+    // this branch because it is represented as Observation::Unknown.
+    if observed.is_empty() {
+        return ResourceDisposition::VerifiedClean;
+    }
+
     let mut expected_by_key = BTreeMap::new();
     for record in expected {
         let Some(filter_key) = record.filter_key.as_deref().and_then(normalize_guid) else {
@@ -583,6 +591,22 @@ mod tests {
         );
 
         snapshot.firewall_filters = Observation::Present(Vec::new());
+        assert_eq!(
+            assess_recovery(&journal, &snapshot).firewall_filters,
+            ResourceDisposition::VerifiedClean
+        );
+    }
+
+    #[test]
+    fn complete_empty_wfp_inventory_clears_legacy_filter_records() {
+        let mut journal = RecoveryJournal::new(93);
+        let mut legacy = filter_record(77);
+        legacy.filter_key = None;
+        journal.firewall_filters.push(legacy);
+
+        let mut snapshot = empty_snapshot();
+        snapshot.firewall_filters = Observation::Present(Vec::new());
+
         assert_eq!(
             assess_recovery(&journal, &snapshot).firewall_filters,
             ResourceDisposition::VerifiedClean

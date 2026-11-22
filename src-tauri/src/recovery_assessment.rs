@@ -712,6 +712,21 @@ mod tests {
             ResourceDisposition::Unknown
         );
         assert!(!assess_recovery(&journal, &snapshot).can_remove_journal);
+
+        // Even with a stable GUID, the pre-dual-stack DHCP/static model omits
+        // profile servers, search settings, and DoH policy and cannot prove clean.
+        let mut legacy_compact = dns_record();
+        legacy_compact.interface_guid =
+            Some("4d36e972-e325-11ce-bfc1-08002be10318".into());
+        journal.dns = vec![legacy_compact.clone()];
+        snapshot.dns.insert(
+            legacy_compact.interface_index,
+            Observation::Present(legacy_compact.previous),
+        );
+        assert_eq!(
+            assess_recovery(&journal, &snapshot).dns[0].disposition,
+            ResourceDisposition::Unknown
+        );
     }
 
     #[test]
@@ -766,9 +781,14 @@ mod tests {
     }
 
     #[test]
-    fn dns_requires_exact_previous_configuration() {
+    fn dns_requires_exact_previous_dual_stack_configuration() {
         let mut journal = RecoveryJournal::new(7);
-        let record = dns_record();
+        let record = DnsMutationRecord {
+            interface_index: 12,
+            interface_guid: Some("4d36e972-e325-11ce-bfc1-08002be10318".into()),
+            applied: complete_dns("198.18.0.1", "fd00::53"),
+            previous: complete_dns("192.0.2.53", "2001:db8::53"),
+        };
         journal.dns.push(record.clone());
 
         let mut snapshot = empty_snapshot();

@@ -246,7 +246,8 @@ fn assess_firewall_filters(
     let Observation::Present(observed) = observed else {
         return match observed {
             Observation::Unknown => ResourceDisposition::Unknown,
-            Observation::Absent if expected.is_empty() => ResourceDisposition::VerifiedClean,
+            // The provider-scoped inventory positively confirmed that no
+            // product-owned filter remains, including legacy records.
             Observation::Absent => ResourceDisposition::VerifiedClean,
             Observation::Present(_) => unreachable!(),
         };
@@ -308,10 +309,7 @@ fn assess_firewall_filters(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::recovery_journal::{
-        DnsMutationRecord, EngineProcessRecord, FirewallFilterRecord, RecoveryJournal,
-        RouteMutationRecord, RouteState, TunnelInterfaceRecord,
-    };
+    use crate::recovery_journal::{RecoveryJournal, TunnelInterfaceRecord};
     use std::net::IpAddr;
 
     fn engine() -> EngineProcessRecord {
@@ -577,7 +575,7 @@ mod tests {
 
         let result = assess_recovery(&journal, &snapshot);
         assert_eq!(result.engine, ResourceDisposition::NeedsCleanup);
-        assert!(result.can_remove_journal == false);
+        assert!(!result.can_remove_journal);
 
         snapshot.engine = Observation::Absent;
         assert!(assess_recovery(&journal, &snapshot).can_remove_journal);

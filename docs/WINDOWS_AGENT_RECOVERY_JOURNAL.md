@@ -42,12 +42,14 @@ The `can_remove_journal` result is true only when every recorded resource is pos
 
 ## Windows read-only resource observers
 
-`src-tauri/src/recovery_observer.rs` now contains the first real Windows observation calls:
+`src-tauri/src/recovery_observer.rs` now contains read-only Windows observation calls:
 
 - The engine-process probe opens the journaled PID with only query and synchronize rights, checks its wait state, reads the kernel FILETIME creation value, and checks liveness again. A PID that no longer exists is reported absent; access denied, API failures, and inconclusive states are errors and must become `Unknown`. The creation timestamp is compared by the assessment planner, so PID reuse is a conflict rather than permission to terminate another process.
-- The WFP probe calls `WfpEngine::enumerate_owned_filters`. It begins an explicit read-only BFE transaction, creates a provider-key-scoped enumeration handle, reads every bounded page, verifies each returned provider and stable filter GUID, destroys the enumeration handle, and commits the read-only transaction. It returns `Present(empty)` only after a complete successful enumeration. Any error or inventory above the 256-filter journal bound is inconclusive and must remain `Unknown`.
+- The tunnel-interface probe reads `GetIfTable2` and matches the stable interface GUID, then checks the journaled interface index, alias, and MTU. It does not yet enumerate unicast IP addresses, so it is not proof that every assigned TUN address matches the journal.
+- The route probe reads the full IPv4/IPv6 table with `GetIpForwardTable2(AF_UNSPEC)`, frees the IP Helper snapshot with `FreeMibTable`, and compares canonical destination prefixes, interface indexes, next hops, and metrics. If a destination prefix has multiple rows, it reports `Unknown`: the current journal schema keys routes only by destination prefix and cannot safely disambiguate multiple interfaces.
+- The WFP probe calls `WfpEngine::enumerate_owned_filters`. It begins an explicit read-only BFE transaction, creates a provider-key-scoped enumeration handle, reads every bounded page, verifies each returned provider and stable filter GUID, destroys the enumeration handle, and commits the read-only transaction. It returns `Present(empty)` only after a complete successful enumeration. A missing provider, any API error, or an inventory above the 256-filter journal bound remains `Unknown`.
 
-These probes do not stop processes, create/delete filters, alter WFP policy, change routes or DNS, touch TUN adapters, or remove journal files. They are not yet wired into the Agent startup gate; that gate remains fail-closed. Route, DNS, and TUN observers are still required before a complete recovery snapshot can be trusted.
+These probes do not stop processes, create/delete filters, alter WFP policy, change routes or DNS, or remove journal files. They are not wired into the Agent startup gate; that gate remains fail-closed. DNS settings are still not represented by a complete read-only observer for every supported Windows DNS configuration, and TUN address enumeration is still incomplete. A route with duplicate destination prefixes also remains unverified until the journal identity is extended to include the interface.
 
 ## Security boundary and remaining work
 

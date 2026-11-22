@@ -182,6 +182,15 @@ fn assess_route(
         return ResourceDisposition::Unknown;
     };
 
+    // A route's interface index can be reused after adapter removal or reboot.
+    // Both the applied route and any previous route must carry a stable NET_LUID
+    // before a match can authorize cleanup or journal removal.
+    if record.applied.interface_luid.is_none()
+        || record.previous.as_ref().is_some_and(|previous| previous.interface_luid.is_none())
+    {
+        return ResourceDisposition::Unknown;
+    }
+
     match observed {
         Observation::Unknown => ResourceDisposition::Unknown,
         Observation::Absent => {
@@ -252,6 +261,14 @@ fn assess_firewall_filters(
             Observation::Present(_) => unreachable!(),
         };
     };
+
+    // A successful complete provider-scoped inventory with zero entries
+    // proves every product filter is absent, even for legacy journal records
+    // that predate stable filter GUIDs. Unknown/failed enumeration never reaches
+    // this branch because it is represented as Observation::Unknown.
+    if observed.is_empty() {
+        return ResourceDisposition::VerifiedClean;
+    }
 
     let mut expected_by_key = BTreeMap::new();
     for record in expected {
@@ -324,11 +341,13 @@ mod tests {
             destination_prefix: "0.0.0.0/0".into(),
             applied: RouteState {
                 interface_index: 17,
+                interface_luid: Some(0x0001_0000_0000_0011),
                 next_hop: None,
                 metric: 5,
             },
             previous: Some(RouteState {
                 interface_index: 12,
+                interface_luid: Some(0x0001_0000_0000_000C),
                 next_hop: Some("192.0.2.1".parse().unwrap()),
                 metric: 25,
             }),
@@ -495,6 +514,45 @@ mod tests {
     }
 
     #[test]
+    fn reused_interface_index_with_a_different_luid_is_a_route_conflict() {
+        let mut journal = RecoveryJournal::new(92);
+        let record = route_record();
+        let previous = record.previous.clone().unwrap();
+        journal.routes.push(record.clone());
+
+        let mut snapshot = empty_snapshot();
+        let mut observed = previous;
+        observed.interface_index = record.previous.as_ref().unwrap().interface_index;
+        observed.interface_luid = Some(0x0001_0000_0000_FFFF);
+        snapshot.routes.insert(
+            record.destination_prefix,
+            Observation::Present(observed),
+        );
+
+        let result = assess_recovery(&journal, &snapshot);
+        assert_eq!(result.routes[0].disposition, ResourceDisposition::Conflict);
+        assert!(!result.can_remove_journal);
+    }
+
+    #[test]
+    fn legacy_route_without_stable_interface_luid_blocks_recovery() {
+        let mut journal = RecoveryJournal::new(91);
+        let mut record = route_record();
+        record.applied.interface_luid = None;
+        journal.routes.push(record.clone());
+
+        let mut snapshot = empty_snapshot();
+        snapshot.routes.insert(
+            record.destination_prefix,
+            Observation::Present(record.applied),
+        );
+
+        let result = assess_recovery(&journal, &snapshot);
+        assert_eq!(result.routes[0].disposition, ResourceDisposition::Unknown);
+        assert!(!result.can_remove_journal);
+    }
+
+    #[test]
     fn dns_requires_exact_previous_configuration() {
         let mut journal = RecoveryJournal::new(7);
         let record = dns_record();
@@ -533,6 +591,22 @@ mod tests {
         );
 
         snapshot.firewall_filters = Observation::Present(Vec::new());
+        assert_eq!(
+            assess_recovery(&journal, &snapshot).firewall_filters,
+            ResourceDisposition::VerifiedClean
+        );
+    }
+
+    #[test]
+    fn complete_empty_wfp_inventory_clears_legacy_filter_records() {
+        let mut journal = RecoveryJournal::new(93);
+        let mut legacy = filter_record(77);
+        legacy.filter_key = None;
+        journal.firewall_filters.push(legacy);
+
+        let mut snapshot = empty_snapshot();
+        snapshot.firewall_filters = Observation::Present(Vec::new());
+
         assert_eq!(
             assess_recovery(&journal, &snapshot).firewall_filters,
             ResourceDisposition::VerifiedClean

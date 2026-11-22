@@ -498,6 +498,239 @@ impl WfpEngine {
         )
     }
 
+    /// Enumerate this provider's filters in one explicit read-only transaction.
+    ///
+    /// WFP enumeration handles are snapshots. Creating the handle and reading
+    /// every page within the same transaction prevents a mixed-time inventory.
+    /// This method never creates, deletes, or changes a filter.
+    pub fn enumerate_owned_filters(
+        &mut self,
+    ) -> Result<Vec<crate::recovery_journal::FirewallFilterRecord>, String> {
+        use std::collections::BTreeSet;
+        use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::{
+            FwpmFilterCreateEnumHandle0, FwpmFilterDestroyEnumHandle0, FwpmFilterEnum0,
+            FwpmFreeMemory0, FwpmProviderGetByKey0, FwpmSubLayerGetByKey0,
+            FwpmTransactionBegin0, FwpmTransactionCommit0, FWPM_FILTER0,
+            FWPM_FILTER_ENUM_TEMPLATE0, FWPM_PROVIDER_FLAG_PERSISTENT,
+            FWPM_SUBLAYER_FLAG_PERSISTENT, FWPM_TXN_READ_ONLY,
+        };
+
+        const MAX_OWNED_FILTERS: usize = 256;
+        const PAGE_SIZE: u32 = 32;
+
+        self.ensure_open()?;
+        let begin = unsafe { FwpmTransactionBegin0(self.handle, FWPM_TXN_READ_ONLY) };
+        if begin != 0 {
+            return Err(format!(
+                "Could not begin a read-only WFP inventory transaction (0x{begin:08X})."
+            ));
+        }
+
+        let operation = (|| -> Result<Vec<crate::recovery_journal::FirewallFilterRecord>, String> {
+            // An empty filter enumeration is meaningful only when the durable
+            // product provider and sublayer themselves are positively verified.
+            // If the namespace is missing or does not match this binary, return
+            // Unknown to the caller rather than inferring that no filters exist.
+            let mut provider_ptr = std::ptr::null_mut();
+            let provider_status = unsafe {
+                FwpmProviderGetByKey0(self.handle, &PROVIDER_KEY, &mut provider_ptr)
+            };
+            if provider_status != 0 {
+                if !provider_ptr.is_null() {
+                    let mut allocation = provider_ptr.cast();
+                    unsafe { FwpmFreeMemory0(&mut allocation) };
+                }
+                return Err(format!(
+                    "The product WFP provider could not be positively verified (0x{provider_status:08X})."
+                ));
+            }
+            if provider_ptr.is_null() {
+                return Err("WFP provider lookup succeeded without returning an object.".into());
+            }
+            let provider_valid = {
+                let provider = unsafe { &*provider_ptr };
+                guid_eq(&provider.providerKey, &PROVIDER_KEY)
+                    && provider.flags & FWPM_PROVIDER_FLAG_PERSISTENT != 0
+            };
+            let mut provider_allocation = provider_ptr.cast();
+            unsafe { FwpmFreeMemory0(&mut provider_allocation) };
+            if !provider_valid {
+                return Err("The product WFP provider is not the expected persistent namespace.".into());
+            }
+
+            let mut sublayer_ptr = std::ptr::null_mut();
+            let sublayer_status = unsafe {
+                FwpmSubLayerGetByKey0(self.handle, &SUBLAYER_KEY, &mut sublayer_ptr)
+            };
+            if sublayer_status != 0 {
+                if !sublayer_ptr.is_null() {
+                    let mut allocation = sublayer_ptr.cast();
+                    unsafe { FwpmFreeMemory0(&mut allocation) };
+                }
+                return Err(format!(
+                    "The product WFP sublayer could not be positively verified (0x{sublayer_status:08X})."
+                ));
+            }
+            if sublayer_ptr.is_null() {
+                return Err("WFP sublayer lookup succeeded without returning an object.".into());
+            }
+            let sublayer_valid = {
+                let sublayer = unsafe { &*sublayer_ptr };
+                let provider_matches = !sublayer.providerKey.is_null()
+                    && guid_eq(unsafe { &*sublayer.providerKey }, &PROVIDER_KEY);
+                guid_eq(&sublayer.subLayerKey, &SUBLAYER_KEY)
+                    && sublayer.flags & FWPM_SUBLAYER_FLAG_PERSISTENT != 0
+                    && provider_matches
+            };
+            let mut sublayer_allocation = sublayer_ptr.cast();
+            unsafe { FwpmFreeMemory0(&mut sublayer_allocation) };
+            if !sublayer_valid {
+                return Err("The product WFP sublayer is not owned by the expected persistent provider.".into());
+            }
+
+            let mut provider_key = PROVIDER_KEY;
+            let mut template: FWPM_FILTER_ENUM_TEMPLATE0 = unsafe { std::mem::zeroed() };
+            template.providerKey = &mut provider_key;
+
+            let mut enum_handle = std::ptr::null_mut();
+            let create = unsafe {
+                FwpmFilterCreateEnumHandle0(self.handle, &template, &mut enum_handle)
+            };
+            if create != 0 {
+                if !enum_handle.is_null() {
+                    let destroy = unsafe {
+                        FwpmFilterDestroyEnumHandle0(self.handle, enum_handle)
+                    };
+                    if destroy != 0 {
+                        return Err(format!(
+                            "WFP enumeration creation failed (0x{create:08X}) and its partial handle could not be destroyed (0x{destroy:08X})."
+                        ));
+                    }
+                }
+                return Err(format!(
+                    "FwpmFilterCreateEnumHandle0 failed with Windows status 0x{create:08X}."
+                ));
+            }
+            if enum_handle.is_null() {
+                return Err("WFP returned a null filter enumeration handle.".into());
+            }
+
+            let enumeration = (|| -> Result<Vec<crate::recovery_journal::FirewallFilterRecord>, String> {
+                let mut records = Vec::new();
+                let mut filter_keys = BTreeSet::new();
+                let mut runtime_ids = BTreeSet::new();
+
+                loop {
+                    // Request one extra item after reaching the journal bound so
+                    // that exactly 256 entries can be distinguished from truncation.
+                    let remaining_with_probe = MAX_OWNED_FILTERS + 1 - records.len();
+                    let requested = PAGE_SIZE.min(remaining_with_probe as u32);
+                    let mut entries: *mut *mut FWPM_FILTER0 = std::ptr::null_mut();
+                    let mut returned = 0u32;
+                    let status = unsafe {
+                        FwpmFilterEnum0(
+                            self.handle,
+                            enum_handle,
+                            requested,
+                            &mut entries,
+                            &mut returned,
+                        )
+                    };
+
+                    let page = (|| -> Result<bool, String> {
+                        if status != 0 {
+                            return Err(format!(
+                                "FwpmFilterEnum0 failed with Windows status 0x{status:08X}."
+                            ));
+                        }
+                        if returned > requested || (returned != 0 && entries.is_null()) {
+                            return Err("WFP returned an invalid filter enumeration page.".into());
+                        }
+                        if records.len().saturating_add(returned as usize) > MAX_OWNED_FILTERS {
+                            return Err(format!(
+                                "The product WFP provider exceeds the safe inventory limit of {MAX_OWNED_FILTERS} filters."
+                            ));
+                        }
+
+                        for index in 0..returned as usize {
+                            let filter_ptr = unsafe { *entries.add(index) };
+                            if filter_ptr.is_null() {
+                                return Err("WFP returned a null filter object in its inventory.".into());
+                            }
+                            let filter = unsafe { &*filter_ptr };
+                            let provider_matches = !filter.providerKey.is_null()
+                                && guid_eq(unsafe { &*filter.providerKey }, &PROVIDER_KEY);
+                            if !provider_matches {
+                                return Err("WFP provider-scoped enumeration returned a filter with a different or missing provider identity.".into());
+                            }
+
+                            let filter_key_value = guid_to_u128(&filter.filterKey);
+                            let layer_key_value = guid_to_u128(&filter.layerKey);
+                            if filter_key_value == 0
+                                || layer_key_value == 0
+                                || filter.filterId == 0
+                                || !filter_keys.insert(filter_key_value)
+                                || !runtime_ids.insert(filter.filterId)
+                            {
+                                return Err("WFP inventory contains an invalid or duplicate stable filter identity.".into());
+                            }
+
+                            records.push(crate::recovery_journal::FirewallFilterRecord {
+                                provider_key: uuid::Uuid::from_u128(guid_to_u128(&PROVIDER_KEY)).to_string(),
+                                filter_key: Some(uuid::Uuid::from_u128(filter_key_value).to_string()),
+                                layer_key: uuid::Uuid::from_u128(layer_key_value).to_string(),
+                                filter_id: filter.filterId,
+                            });
+                        }
+                        Ok(returned < requested)
+                    })();
+
+                    if !entries.is_null() {
+                        let mut allocation = entries.cast();
+                        unsafe { FwpmFreeMemory0(&mut allocation) };
+                    }
+
+                    if page? {
+                        break;
+                    }
+                }
+
+                Ok(records)
+            })();
+
+            let destroy = unsafe { FwpmFilterDestroyEnumHandle0(self.handle, enum_handle) };
+            if destroy != 0 {
+                return Err(format!(
+                    "FwpmFilterDestroyEnumHandle0 failed with Windows status 0x{destroy:08X}; the WFP inventory is not trusted."
+                ));
+            }
+            enumeration
+        })();
+
+        let records = match operation {
+            Ok(records) => records,
+            Err(error) => {
+                return match self.abort_transaction_or_poison() {
+                    Ok(()) => Err(error),
+                    Err(abort_error) => Err(format!("{error} {abort_error}")),
+                };
+            }
+        };
+
+        let commit = unsafe { FwpmTransactionCommit0(self.handle) };
+        if commit != 0 {
+            let error = format!(
+                "Read-only WFP inventory transaction could not be completed (0x{commit:08X})."
+            );
+            return match self.abort_transaction_or_poison() {
+                Ok(()) => Err(error),
+                Err(abort_error) => Err(format!("{error} {abort_error}")),
+            };
+        }
+
+        Ok(records)
+    }
+
     /// Remove only this product's WFP provider and sublayer after a separate
     /// reconciliation step has proved no owned filters remain. Never call this
     /// during ordinary disconnect before filters have been enumerated and removed.

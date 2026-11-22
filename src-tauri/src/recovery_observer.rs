@@ -283,8 +283,16 @@ pub fn observe_recorded_routes(
             Some(next_hop_address)
         };
 
+        // Interface indexes are reusable. Preserve the kernel NET_LUID so the
+        // assessment planner can reject a route that now points at another NIC.
+        let interface_luid = unsafe { row.InterfaceLuid.Value };
+        if interface_luid == 0 {
+            routes.insert(journal_keys[0].clone(), Observation::Unknown);
+            continue;
+        }
         let state = crate::recovery_journal::RouteState {
             interface_index: row.InterfaceIndex,
+            interface_luid: Some(interface_luid),
             next_hop,
             metric: row.Metric,
         };

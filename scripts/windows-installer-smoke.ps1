@@ -270,6 +270,9 @@ namespace BlacklistInevitable {
             $agentResponse.status -ne "ok") {
             throw "The Agent status response did not match the request or was not successful."
         }
+        $responseAck = [byte[]]@(0x06)
+        $agentPipe.Write($responseAck, 0, $responseAck.Length)
+        $agentPipe.Flush()
         Write-Host "Verified Agent named-pipe status response and request correlation."
     }
     catch {

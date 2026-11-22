@@ -189,12 +189,20 @@ fn handle_authenticated_connection(pipe: HANDLE, stop_event: HANDLE) -> Result<(
 
     let response = match request.operation {
         AgentOperation::GetStatus | AgentOperation::GetDiagnostics => {
-            let mut response = AgentResponse::ok(request.request_id, None);
-            response.detail = Some(
-                "The privileged Agent IPC host is running; VPN connection operations are not enabled yet."
-                    .to_string(),
-            );
-            response
+            match crate::agent_service::startup_recovery_status() {
+                Ok(()) => {
+                    let mut response = AgentResponse::ok(request.request_id, None);
+                    response.detail = Some(
+                        "The privileged Agent IPC host is running; startup recovery is clean. VPN connection operations are not enabled yet."
+                            .to_string(),
+                    );
+                    response
+                }
+                Err(error) => AgentResponse::rejected(
+                    request.request_id,
+                    format!("The Agent is blocked by startup recovery: {error}"),
+                ),
+            }
         }
         AgentOperation::Connect { .. }
         | AgentOperation::Disconnect { .. }

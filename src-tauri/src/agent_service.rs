@@ -4,6 +4,88 @@
 //! WFP, TUN, route and DNS operations remain disabled until the recovery runtime
 //! and packet-capture release gates are implemented.
 
+use std::path::PathBuf;
+use std::sync::OnceLock;
+
+use crate::recovery_journal::{RecoveryJournal, RecoveryJournalStore};
+
+static STARTUP_RECOVERY_STATUS: OnceLock<Result<(), String>> = OnceLock::new();
+
+fn validate_startup_journals(journals: &[RecoveryJournal]) -> Result<(), String> {
+    if journals.is_empty() {
+        return Ok(());
+    }
+
+    let phases = journals
+        .iter()
+        .map(|journal| format!("{:?}", journal.phase))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(format!(
+        "{} unresolved recovery journal(s) were found (phases: {}). The Agent is fail-closed until every previous session is reconciled against actual Windows process, tunnel, route, DNS, and WFP state.",
+        journals.len(),
+        phases
+    ))
+}
+
+fn inspect_startup_recovery_journal() -> Result<(), String> {
+    let program_data = std::env::var_os("ProgramData")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
+    let journal_root = program_data
+        .join("BlacklistInevitable")
+        .join("Agent");
+    let store = RecoveryJournalStore::open(journal_root)?;
+    let unresolved = store.load_unresolved()?;
+    validate_startup_journals(&unresolved)
+}
+
+/// Called exactly once for each Agent service process before its pipe listener
+/// is marked RUNNING. The service still exposes read-only status when blocked,
+/// but never treats unresolved/corrupt recovery state as a clean startup.
+pub(crate) fn initialize_startup_recovery() -> Result<(), String> {
+    STARTUP_RECOVERY_STATUS
+        .get_or_init(inspect_startup_recovery_journal)
+        .clone()
+}
+
+/// The status endpoint can report clean only after the service startup gate has
+/// loaded and validated the protected journal directory in this process.
+pub(crate) fn startup_recovery_status() -> Result<(), String> {
+    STARTUP_RECOVERY_STATUS
+        .get()
+        .cloned()
+        .unwrap_or_else(|| Err("Agent startup recovery validation has not completed.".to_string()))
+}
+
+#[cfg(test)]
+mod startup_recovery_tests {
+    use super::*;
+    use crate::recovery_journal::{JournalPhase, RecoveryJournal};
+
+    #[test]
+    fn empty_journal_set_allows_clean_startup() {
+        assert!(validate_startup_journals(&[]).is_ok());
+    }
+
+    #[test]
+    fn any_unresolved_session_blocks_clean_startup() {
+        let mut journal = RecoveryJournal::new(41);
+        journal.phase = JournalPhase::RecoveryRequired;
+        let error = validate_startup_journals(&[journal]).unwrap_err();
+        assert!(error.contains("1 unresolved recovery journal"));
+        assert!(error.contains("RecoveryRequired"));
+        assert!(error.contains("fail-closed"));
+    }
+
+    #[test]
+    fn multiple_unresolved_sessions_are_all_reported_as_blocking() {
+        let journals = [RecoveryJournal::new(41), RecoveryJournal::new(42)];
+        let error = validate_startup_journals(&journals).unwrap_err();
+        assert!(error.contains("2 unresolved recovery journal"));
+    }
+}
+
 #[cfg(windows)]
 mod windows_service {
     use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
@@ -127,6 +209,14 @@ mod windows_service {
             let _guard = EVENT_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             STOP_EVENT.store(stop_event as isize, Ordering::Release);
         }
+
+        // Load every committed checkpoint before exposing the pipe as RUNNING.
+        // A missing, unsafe, corrupt, or unresolved journal leaves the service
+        // available for read-only diagnostics but its status endpoint is rejected.
+        if let Err(error) = crate::agent_service::initialize_startup_recovery() {
+            eprintln!("Agent startup recovery is blocked: {error}");
+        }
+
         // The service is not reported as RUNNING until its protected, local-only
         // pipe endpoint exists. A missing/invalid ACL therefore fails startup.
         let pipe = match crate::agent_pipe::create_listener() {

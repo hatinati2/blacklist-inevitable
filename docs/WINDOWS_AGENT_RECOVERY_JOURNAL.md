@@ -2,7 +2,7 @@
 
 ## Implemented foundation
 
-`src-tauri/src/recovery_journal.rs` defines a versioned, bounded, non-secret checkpoint format and a file store for the future privileged Windows Agent. It is a persistence primitive only: it does not start sing-box, create a TUN adapter, change routes or DNS, install WFP filters, or run a Windows service.
+`src-tauri/src/recovery_journal.rs` defines a versioned, bounded, non-secret checkpoint format and a file store used by the privileged Windows Agent at service startup. The service now opens the pre-provisioned protected directory and loads every committed checkpoint before it exposes clean status. This is a fail-closed startup gate, not yet an OS reconciler: it does not start sing-box, create a TUN adapter, change routes or DNS, or install WFP filters.
 
 A journal records only the resource identities and exact previous settings needed for recovery:
 
@@ -30,11 +30,11 @@ For each checkpoint, the store validates the full record, creates a unique pendi
 
 The journal is not an authentication or integrity mechanism. Its trust depends on the service-owned directory ACL and the service's validation of every record. The service must not open a user-writable directory as its journal root. Reparse-point entries are rejected, and files are never selected using a caller-supplied path.
 
-The current code is not yet connected to `ConnectionCoordinator` or a Windows service. The following are still release-blocking work:
+The service now loads the journal at startup and fails closed when the directory is missing/unsafe, a committed record is corrupt, or any prior session remains unresolved. It deliberately does not guess that recorded resources are gone, delete journals, or mutate networking during this gate. The following are still release-blocking work:
 
-- Provision and verify the service-owned directory DACL during agent installation.
+- Independently verify the service-owned directory DACL when opening it; installation currently provisions and smoke-tests the protected ACL.
 - Wire a checkpoint before each OS mutation and after each successful mutation.
-- Implement startup reconciliation against actual process, TUN, route, DNS, and WFP state.
+- Implement startup reconciliation against actual process, TUN, route, DNS, and WFP state, then remove a journal only after each recorded resource is confirmed absent/restored.
 - Implement rollback in reverse order and only remove journal files after verified cleanup.
 - Exercise process/agent crash, forced termination, restart, tampered journal, ACL, and reparse-point cases on real Windows 10/11 machines.
 

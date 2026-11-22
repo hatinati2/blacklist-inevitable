@@ -5,6 +5,34 @@ $installerLog = Join-Path $env:TEMP "blacklist-inevitable-nsis-install.log"
 $uninstallerLog = Join-Path $env:TEMP "blacklist-inevitable-nsis-uninstall.log"
 $uninstallHookLog = Join-Path $env:TEMP "BlacklistInevitableAgent-uninstall-hook.log"
 $agentIpcDiagnostic = Join-Path $env:ProgramData "BlacklistInevitable\Agent\last-ipc-error.txt"
+
+function Wait-AgentServiceState([string] $ExpectedState, [int] $TimeoutSeconds = 30) {
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        $service = Get-Service -Name "BlacklistInevitableAgent" -ErrorAction SilentlyContinue
+        if ($service -and $service.Status.ToString() -eq $ExpectedState) { return }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $deadline)
+    $actual = Get-Service -Name "BlacklistInevitableAgent" -ErrorAction SilentlyContinue
+    throw "Timed out waiting for Agent service state $ExpectedState (actual: $(if ($actual) { $actual.Status } else { 'absent' }))."
+}
+
+function Invoke-RustAgentStatusProbe([string] $ExecutablePath, [string] $WorkingDirectory, [string] $ResultPath) {
+    Remove-Item -LiteralPath $ResultPath -Force -ErrorAction SilentlyContinue
+    $env:BLACKLIST_AGENT_STATUS_SMOKE_RESULT = $ResultPath
+    try {
+        $process = Start-Process -FilePath $ExecutablePath -ArgumentList @("--agent-status-smoke-test") -WorkingDirectory $WorkingDirectory -WindowStyle Hidden -Wait -PassThru
+    } finally {
+        Remove-Item Env:\BLACKLIST_AGENT_STATUS_SMOKE_RESULT -ErrorAction SilentlyContinue
+    }
+    $detail = if (Test-Path -LiteralPath $ResultPath -PathType Leaf) {
+        Get-Content -LiteralPath $ResultPath -Raw
+    } else {
+        "The Rust desktop client did not write its smoke-test result."
+    }
+    return [pscustomobject]@{ ExitCode = $process.ExitCode; Detail = $detail }
+}
+
 Remove-Item -LiteralPath $agentServiceLog -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $installerLog -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $uninstallerLog -Force -ErrorAction SilentlyContinue
@@ -296,29 +324,63 @@ namespace BlacklistInevitable {
     # Exercise the production Rust desktop client, including its SCM PID and
     # process-image checks, against the just-installed Windows service.
     $statusClientResult = Join-Path $env:RUNNER_TEMP "BlacklistInevitableAgent-rust-client-smoke.txt"
-    Remove-Item -LiteralPath $statusClientResult -Force -ErrorAction SilentlyContinue
-    $env:BLACKLIST_AGENT_STATUS_SMOKE_RESULT = $statusClientResult
+    $statusProbe = Invoke-RustAgentStatusProbe $appPath $installDirectory $statusClientResult
+    if ($statusProbe.ExitCode -ne 0 -or $statusProbe.Detail -notmatch "^success:") {
+        throw "The production Rust Agent client rejected the clean installed service: $($statusProbe.Detail)"
+    }
+    Write-Host "Verified production Rust Agent client identity and clean startup status: $($statusProbe.Detail.Trim())"
+
+    # Restart with a valid but unresolved journal. Startup must block the status
+    # endpoint rather than silently treating an old session as clean. Always
+    # remove the probe and restart cleanly, even when an assertion fails.
+    $journalDirectory = Join-Path $env:ProgramData "BlacklistInevitable\Agent"
+    $recoveryProbePath = Join-Path $journalDirectory "session-00000000c0ffee01-revision-0000000000000001.json"
+    $recoveryProbeJson = '{"version":1,"sessionId":3237998081,"revision":1,"phase":"preparing","engine":null,"tunnel":null,"routes":[],"dns":[],"firewallFilters":[]}'
     try {
-        $statusClientProcess = Start-Process -FilePath $appPath -ArgumentList @("--agent-status-smoke-test") -WorkingDirectory $installDirectory -WindowStyle Hidden -Wait -PassThru
-    } finally {
-        Remove-Item Env:\BLACKLIST_AGENT_STATUS_SMOKE_RESULT -ErrorAction SilentlyContinue
-    }
-    if ($statusClientProcess.ExitCode -ne 0) {
-        $resultDetail = if (Test-Path -LiteralPath $statusClientResult) {
-            Get-Content -LiteralPath $statusClientResult -Raw
-        } else {
-            "The Rust desktop client did not write its smoke-test result."
+        $null = & "$env:SystemRoot\System32\sc.exe" stop "BlacklistInevitableAgent" 2>&1
+        $stopExit = $LASTEXITCODE
+        $currentService = Get-Service -Name "BlacklistInevitableAgent"
+        if ($stopExit -ne 0 -and $currentService.Status -ne "Stopped") {
+            throw "Could not stop Agent before the startup-recovery probe (sc.exe exit $stopExit)."
         }
-        throw "The production Rust Agent client rejected the installed service identity or status response: $resultDetail"
+        Wait-AgentServiceState "Stopped"
+        [IO.File]::WriteAllText($recoveryProbePath, $recoveryProbeJson, [Text.UTF8Encoding]::new($false))
+
+        $null = & "$env:SystemRoot\System32\sc.exe" start "BlacklistInevitableAgent" 2>&1
+        $startExit = $LASTEXITCODE
+        $currentService = Get-Service -Name "BlacklistInevitableAgent"
+        if ($startExit -ne 0 -and $currentService.Status -ne "Running") {
+            throw "Could not start Agent with the unresolved journal probe (sc.exe exit $startExit)."
+        }
+        Wait-AgentServiceState "Running"
+
+        $blockedProbe = Invoke-RustAgentStatusProbe $appPath $installDirectory $statusClientResult
+        if ($blockedProbe.ExitCode -eq 0 -or
+            $blockedProbe.Detail -notmatch "failure:.*startup recovery" -or
+            $blockedProbe.Detail -notmatch "unresolved recovery journal") {
+            throw "The Agent did not fail closed for an unresolved startup journal: $($blockedProbe.Detail)"
+        }
+        Write-Host "Verified unresolved startup journal blocks the production Rust status client: $($blockedProbe.Detail.Trim())"
+    } finally {
+        $currentService = Get-Service -Name "BlacklistInevitableAgent" -ErrorAction SilentlyContinue
+        if ($currentService -and $currentService.Status -ne "Stopped") {
+            $null = & "$env:SystemRoot\System32\sc.exe" stop "BlacklistInevitableAgent" 2>&1
+            Wait-AgentServiceState "Stopped"
+        }
+        Remove-Item -LiteralPath $recoveryProbePath -Force -ErrorAction SilentlyContinue
+        $null = & "$env:SystemRoot\System32\sc.exe" start "BlacklistInevitableAgent" 2>&1
+        $currentService = Get-Service -Name "BlacklistInevitableAgent" -ErrorAction SilentlyContinue
+        if ($LASTEXITCODE -ne 0 -and $currentService.Status -ne "Running") {
+            throw "Could not restart Agent after clearing the startup-recovery probe."
+        }
+        Wait-AgentServiceState "Running"
     }
-    if (-not (Test-Path -LiteralPath $statusClientResult -PathType Leaf)) {
-        throw "The production Rust Agent client did not produce a smoke-test result."
+
+    $cleanRestartProbe = Invoke-RustAgentStatusProbe $appPath $installDirectory $statusClientResult
+    if ($cleanRestartProbe.ExitCode -ne 0 -or $cleanRestartProbe.Detail -notmatch "^success:") {
+        throw "The Agent did not return to clean read-only status after the probe journal was removed: $($cleanRestartProbe.Detail)"
     }
-    $statusClientDetail = Get-Content -LiteralPath $statusClientResult -Raw
-    if ($statusClientDetail -notmatch "^success:") {
-        throw "The production Rust Agent client returned an invalid smoke-test result: $statusClientDetail"
-    }
-    Write-Host "Verified production Rust Agent client identity and correlated status response: $($statusClientDetail.Trim())"
+    Write-Host "Verified clean Agent restart after removing the test journal: $($cleanRestartProbe.Detail.Trim())"
 } elseif ($agentSignature.Status -eq "NotSigned" -and $desktopSignature.Status -eq "NotSigned") {
     if ($service) {
         throw "An unsigned package must not register a privileged Agent service."

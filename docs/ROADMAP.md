@@ -65,7 +65,7 @@ Naive import/config mapping is implemented for a bounded subset; remote authenti
 
 ## M4 — Normal connection lifecycle
 
-- [x] Add bounded length-prefixed Agent IPC, per-connection replay protection, a local-only Windows named-pipe listener with a protected DACL and caller SID/session checks, and a read-only desktop status client; server-image verification is still required before sending credentials.
+- [x] Add bounded length-prefixed Agent IPC, per-connection replay protection, a local-only Windows named-pipe listener with a protected DACL and caller SID/session checks, a read-only desktop status client, and fail-closed SCM PID plus installed-image-path verification before sending requests. A pinned production publisher thumbprint remains required before credential handoff.
 - [x] Add a versioned, bounded, non-secret Windows Agent recovery journal with monotonic checkpoints; load it at service startup and fail closed on missing/unsafe/corrupt or unresolved state. Actual OS resource reconciliation and rollback remain open.
 - [ ] Add an explicit Rust-owned Connect / Disconnect state machine.
 - [ ] Add Windows platform integration only for the normal connection path.

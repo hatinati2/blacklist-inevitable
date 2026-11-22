@@ -90,20 +90,38 @@ pub struct AgentServiceStatus {
 
 /// Query only the Agent's non-mutating status endpoint. No profile data or
 /// credentials cross this boundary; all network-mutating RPCs remain disabled.
-#[tauri::command]
-pub async fn get_agent_service_status() -> AgentServiceStatus {
-    match crate::agent_client::query_status().await {
+const AGENT_RECOVERY_BLOCKED_PREFIX: &str = "The Agent is blocked by startup recovery:";
+
+fn agent_service_status_from_result(
+    result: Result<String, String>,
+    windows_build: bool,
+) -> AgentServiceStatus {
+    match result {
         Ok(detail) => AgentServiceStatus {
             available: true,
             state: "running".to_string(),
             detail,
         },
-        Err(detail) => AgentServiceStatus {
-            available: false,
-            state: if cfg!(windows) { "unavailable" } else { "unsupported" }.to_string(),
-            detail,
-        },
+        Err(detail) => {
+            let state = if !windows_build {
+                "unsupported"
+            } else if detail.starts_with(AGENT_RECOVERY_BLOCKED_PREFIX) {
+                "recoveryRequired"
+            } else {
+                "unavailable"
+            };
+            AgentServiceStatus {
+                available: false,
+                state: state.to_string(),
+                detail,
+            }
+        }
     }
+}
+
+#[tauri::command]
+pub async fn get_agent_service_status() -> AgentServiceStatus {
+    agent_service_status_from_result(crate::agent_client::query_status().await, cfg!(windows))
 }
 
 #[tauri::command]
@@ -410,4 +428,40 @@ pub async fn test_all_profile_real_delays(
         }
     });
     Ok(results)
+}
+
+
+#[cfg(test)]
+mod agent_status_tests {
+    use super::*;
+
+    #[test]
+    fn reports_a_distinct_recovery_required_state() {
+        let status = agent_service_status_from_result(
+            Err("The Agent is blocked by startup recovery: 1 unresolved recovery journal.".into()),
+            true,
+        );
+        assert!(!status.available);
+        assert_eq!(status.state, "recoveryRequired");
+    }
+
+    #[test]
+    fn keeps_an_unreachable_service_distinct_from_recovery_required() {
+        let status = agent_service_status_from_result(
+            Err("The privileged Agent service is not installed or running.".into()),
+            true,
+        );
+        assert!(!status.available);
+        assert_eq!(status.state, "unavailable");
+    }
+
+    #[test]
+    fn reports_non_windows_status_as_unsupported() {
+        let status = agent_service_status_from_result(
+            Err("The privileged Agent service is available only in the Windows desktop build.".into()),
+            false,
+        );
+        assert!(!status.available);
+        assert_eq!(status.state, "unsupported");
+    }
 }

@@ -22,7 +22,7 @@ type AppStatus = {
 
 type AgentServiceStatus = {
   available: boolean;
-  state: "running" | "unavailable" | "unsupported";
+  state: "running" | "unavailable" | "unsupported" | "recoveryRequired";
   detail: string;
 };
 
@@ -343,14 +343,24 @@ export default function App() {
             <p className="eyebrow">WINDOWS PRIVILEGED AGENT</p>
             <h2>Agent service status</h2>
           </div>
-          <span className={agentStatus?.available ? "result-pill success" : "result-pill neutral"}>
+          <span
+            className={
+              agentStatus?.state === "recoveryRequired"
+                ? "result-pill failure"
+                : agentStatus?.available
+                  ? "result-pill success"
+                  : "result-pill neutral"
+            }
+          >
             {agentStatusLoading && !agentStatus
               ? "Checking…"
               : agentStatus?.available
                 ? "Responding"
-                : agentStatus?.state === "unsupported"
-                  ? "Windows only"
-                  : "Unavailable"}
+                : agentStatus?.state === "recoveryRequired"
+                  ? "Recovery required"
+                  : agentStatus?.state === "unsupported"
+                    ? "Windows only"
+                    : "Unavailable"}
           </span>
         </div>
         <p className="panel-copy" aria-live="polite">

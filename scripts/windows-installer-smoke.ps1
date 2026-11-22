@@ -239,7 +239,9 @@ namespace BlacklistInevitable {
     )
     try {
         $agentPipe.Connect(10000)
-        $statusRequest = [Text.Encoding]::UTF8.GetBytes('{"version":1,"requestId":"ci-status-01","operation":"getStatus"}')
+        $statusJson = '{"version":1,"requestId":"ci-status-01","operation":"getStatus"}'
+        $null = $statusJson | ConvertFrom-Json -ErrorAction Stop
+        $statusRequest = [Text.Encoding]::UTF8.GetBytes($statusJson)
         $statusHeader = [BitConverter]::GetBytes([uint32]$statusRequest.Length)
         $agentPipe.Write($statusHeader, 0, $statusHeader.Length)
         $agentPipe.Write($statusRequest, 0, $statusRequest.Length)

@@ -509,8 +509,10 @@ impl WfpEngine {
         use std::collections::BTreeSet;
         use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::{
             FwpmFilterCreateEnumHandle0, FwpmFilterDestroyEnumHandle0, FwpmFilterEnum0,
-            FwpmFreeMemory0, FwpmTransactionBegin0, FwpmTransactionCommit0,
-            FWPM_FILTER0, FWPM_FILTER_ENUM_TEMPLATE0, FWPM_TXN_READ_ONLY,
+            FwpmFreeMemory0, FwpmProviderGetByKey0, FwpmSubLayerGetByKey0,
+            FwpmTransactionBegin0, FwpmTransactionCommit0, FWPM_FILTER0,
+            FWPM_FILTER_ENUM_TEMPLATE0, FWPM_PROVIDER_FLAG_PERSISTENT,
+            FWPM_SUBLAYER_FLAG_PERSISTENT, FWPM_TXN_READ_ONLY,
         };
 
         const MAX_OWNED_FILTERS: usize = 256;
@@ -525,6 +527,59 @@ impl WfpEngine {
         }
 
         let operation = (|| -> Result<Vec<crate::recovery_journal::FirewallFilterRecord>, String> {
+            // An empty filter enumeration is meaningful only when the durable
+            // product provider and sublayer themselves are positively verified.
+            // If the namespace is missing or does not match this binary, return
+            // Unknown to the caller rather than inferring that no filters exist.
+            let mut provider_ptr = std::ptr::null_mut();
+            let provider_status = unsafe {
+                FwpmProviderGetByKey0(self.handle, &PROVIDER_KEY, &mut provider_ptr)
+            };
+            if provider_status != 0 {
+                return Err(format!(
+                    "The product WFP provider could not be positively verified (0x{provider_status:08X})."
+                ));
+            }
+            if provider_ptr.is_null() {
+                return Err("WFP provider lookup succeeded without returning an object.".into());
+            }
+            let provider_valid = {
+                let provider = unsafe { &*provider_ptr };
+                guid_eq(&provider.providerKey, &PROVIDER_KEY)
+                    && provider.flags & FWPM_PROVIDER_FLAG_PERSISTENT != 0
+            };
+            let mut provider_allocation = provider_ptr.cast();
+            unsafe { FwpmFreeMemory0(&mut provider_allocation) };
+            if !provider_valid {
+                return Err("The product WFP provider is not the expected persistent namespace.".into());
+            }
+
+            let mut sublayer_ptr = std::ptr::null_mut();
+            let sublayer_status = unsafe {
+                FwpmSubLayerGetByKey0(self.handle, &SUBLAYER_KEY, &mut sublayer_ptr)
+            };
+            if sublayer_status != 0 {
+                return Err(format!(
+                    "The product WFP sublayer could not be positively verified (0x{sublayer_status:08X})."
+                ));
+            }
+            if sublayer_ptr.is_null() {
+                return Err("WFP sublayer lookup succeeded without returning an object.".into());
+            }
+            let sublayer_valid = {
+                let sublayer = unsafe { &*sublayer_ptr };
+                let provider_matches = !sublayer.providerKey.is_null()
+                    && guid_eq(unsafe { &*sublayer.providerKey }, &PROVIDER_KEY);
+                guid_eq(&sublayer.subLayerKey, &SUBLAYER_KEY)
+                    && sublayer.flags & FWPM_SUBLAYER_FLAG_PERSISTENT != 0
+                    && provider_matches
+            };
+            let mut sublayer_allocation = sublayer_ptr.cast();
+            unsafe { FwpmFreeMemory0(&mut sublayer_allocation) };
+            if !sublayer_valid {
+                return Err("The product WFP sublayer is not owned by the expected persistent provider.".into());
+            }
+
             let mut provider_key = PROVIDER_KEY;
             let mut template: FWPM_FILTER_ENUM_TEMPLATE0 = unsafe { std::mem::zeroed() };
             template.providerKey = &mut provider_key;

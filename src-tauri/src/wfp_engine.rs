@@ -536,6 +536,10 @@ impl WfpEngine {
                 FwpmProviderGetByKey0(self.handle, &PROVIDER_KEY, &mut provider_ptr)
             };
             if provider_status != 0 {
+                if !provider_ptr.is_null() {
+                    let mut allocation = provider_ptr.cast();
+                    unsafe { FwpmFreeMemory0(&mut allocation) };
+                }
                 return Err(format!(
                     "The product WFP provider could not be positively verified (0x{provider_status:08X})."
                 ));
@@ -559,6 +563,10 @@ impl WfpEngine {
                 FwpmSubLayerGetByKey0(self.handle, &SUBLAYER_KEY, &mut sublayer_ptr)
             };
             if sublayer_status != 0 {
+                if !sublayer_ptr.is_null() {
+                    let mut allocation = sublayer_ptr.cast();
+                    unsafe { FwpmFreeMemory0(&mut allocation) };
+                }
                 return Err(format!(
                     "The product WFP sublayer could not be positively verified (0x{sublayer_status:08X})."
                 ));

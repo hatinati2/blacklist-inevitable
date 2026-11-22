@@ -1187,6 +1187,42 @@ mod tests {
     }
 
     #[test]
+    fn dns_version_four_preserves_encrypted_adapter_flags() {
+        let mut journal = RecoveryJournal::new(81);
+        let mut configuration = match complete_dns_configuration() {
+            DnsConfiguration::Interface(config) => config,
+            _ => unreachable!(),
+        };
+        configuration.ipv4.as_mut().unwrap().settings_version = 4;
+        configuration.ipv4.as_mut().unwrap().encrypted_dns_adapter_flags = Some(0x0000_0003);
+        journal.dns.push(DnsMutationRecord {
+            interface_index: 12,
+            interface_guid: Some(configuration.interface_guid.clone()),
+            applied: DnsConfiguration::Interface(configuration.clone()),
+            previous: DnsConfiguration::Interface(configuration),
+        });
+        journal.validate().unwrap();
+    }
+
+    #[test]
+    fn doh_enabled_without_custom_server_property_is_preserved() {
+        let mut journal = RecoveryJournal::new(82);
+        let mut configuration = match complete_dns_configuration() {
+            DnsConfiguration::Interface(config) => config,
+            _ => unreachable!(),
+        };
+        configuration.ipv4.as_mut().unwrap().settings_flags |= 0x1000;
+        configuration.ipv4.as_mut().unwrap().server_properties.clear();
+        journal.dns.push(DnsMutationRecord {
+            interface_index: 12,
+            interface_guid: Some(configuration.interface_guid.clone()),
+            applied: DnsConfiguration::Interface(configuration.clone()),
+            previous: DnsConfiguration::Interface(configuration),
+        });
+        journal.validate().unwrap();
+    }
+
+    #[test]
     fn legacy_dns_record_without_stable_guid_remains_readable() {
         let mut legacy = serde_json::to_value(example_journal(80, 1)).unwrap();
         legacy["dns"][0]

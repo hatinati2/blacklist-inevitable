@@ -443,7 +443,7 @@ mod tests {
             enable_llmnr: 0,
             query_adapter_name: 0,
             disable_unconstrained_queries: 1,
-            settings_flags: if ipv6 { 0x0001 | 0x0002 | 0x0004 | 0x0020 } else { 0x0002 | 0x0004 | 0x0020 },
+            settings_flags: if ipv6 { 0x0001 | 0x0002 | 0x0004 | 0x0020 | 0x0800 } else { 0x0002 | 0x0004 | 0x0020 | 0x0800 },
             server_properties: vec![],
             profile_server_properties: vec![],
         }

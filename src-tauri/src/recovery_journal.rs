@@ -1039,7 +1039,7 @@ mod tests {
             interface_index: 12,
             interface_guid: Some("4d36e972-e325-11ce-bfc1-08002be10318".into()),
             applied: complete_dns_configuration(),
-            previous: DnsConfiguration::Dhcp,
+            previous: complete_dns_configuration(),
         });
 
         journal.validate().unwrap();
@@ -1060,7 +1060,7 @@ mod tests {
             interface_index: 12,
             interface_guid: Some(incomplete.interface_guid.clone()),
             applied: DnsConfiguration::Interface(incomplete),
-            previous: DnsConfiguration::Dhcp,
+            previous: complete_dns_configuration(),
         });
         assert!(journal.validate().is_err());
 
@@ -1075,7 +1075,7 @@ mod tests {
             interface_index: 12,
             interface_guid: Some(mismatched.interface_guid.clone()),
             applied: DnsConfiguration::Interface(mismatched),
-            previous: DnsConfiguration::Dhcp,
+            previous: complete_dns_configuration(),
         });
         assert!(journal.validate().is_err());
     }
@@ -1098,7 +1098,7 @@ mod tests {
             interface_index: 12,
             interface_guid: Some(configuration.interface_guid.clone()),
             applied: DnsConfiguration::Interface(configuration.clone()),
-            previous: DnsConfiguration::Dhcp,
+            previous: complete_dns_configuration(),
         });
         journal.validate().unwrap();
 

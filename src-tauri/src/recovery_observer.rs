@@ -996,4 +996,89 @@ mod tests {
         assert!(super::canonicalize_ip_prefix("203.0.113.1".parse().unwrap(), 33).is_err());
         assert!(super::canonicalize_ip_prefix("2001:db8::1".parse().unwrap(), 129).is_err());
     }
+    /// This test is intentionally read-only. It exercises the native DNS APIs
+    /// on a real Windows runner and asserts that the current probe never
+    /// mislabels its one-family response as a complete dual-stack snapshot.
+    #[cfg(windows)]
+    #[test]
+    fn live_dns_observer_reports_only_the_family_identified_by_windows() {
+        use crate::recovery_journal::{DnsConfiguration, DnsMutationRecord};
+        use windows_sys::Win32::NetworkManagement::IpHelper::{
+            GetIfTable2, MIB_IF_ROW2, MIB_IF_TABLE2,
+        };
+
+        let mut table: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
+        let status = unsafe { GetIfTable2(&mut table) };
+        assert_eq!(status, 0, "GetIfTable2 failed with Windows error {status}");
+        assert!(!table.is_null(), "GetIfTable2 returned a null interface table");
+        let _table = super::OwnedIpHelperTable(table.cast());
+
+        let count = unsafe { (*table).NumEntries as usize };
+        assert!(count <= 2048, "Windows returned an oversized interface inventory");
+        let rows = unsafe {
+            std::slice::from_raw_parts(
+                std::ptr::addr_of!((*table).Table).cast::<MIB_IF_ROW2>(),
+                count,
+            )
+        };
+
+        let mut eligible = 0usize;
+        let mut observed = false;
+        let mut errors = Vec::new();
+        for row in rows {
+            let luid = unsafe { row.InterfaceLuid.Value };
+            if row.InterfaceIndex == 0 || luid == 0 {
+                continue;
+            }
+
+            let effective = match super::observe_effective_dns_servers(luid) {
+                Ok(value) if !value.ipv4.is_empty() || !value.ipv6.is_empty() => value,
+                _ => continue,
+            };
+            let _ = effective;
+            eligible += 1;
+
+            let interface_guid =
+                uuid::Uuid::from_u128(super::guid_to_u128(&row.InterfaceGuid)).to_string();
+            let record = DnsMutationRecord {
+                interface_index: row.InterfaceIndex,
+                interface_guid: Some(interface_guid.clone()),
+                applied: DnsConfiguration::Dhcp,
+                previous: DnsConfiguration::Dhcp,
+            };
+
+            match super::observe_recorded_dns(&record) {
+                Ok(super::Observation::Present(DnsConfiguration::Interface(interface))) => {
+                    assert_eq!(interface.interface_guid, interface_guid);
+                    assert_ne!(
+                        interface.ipv4.is_some(),
+                        interface.ipv6.is_some(),
+                        "The current GetInterfaceDnsSettings observer must expose exactly one stack"
+                    );
+                    observed = true;
+                    break;
+                }
+                Ok(super::Observation::Present(_)) => {
+                    panic!("The DNS observer returned an unexpected configuration variant")
+                }
+                Ok(super::Observation::Absent | super::Observation::Unknown) => {}
+                Err(error) if errors.len() < 8 => errors.push(error),
+                Err(_) => {}
+            }
+        }
+
+        if eligible == 0 {
+            eprintln!(
+                "Skipping live DNS API assertion: this Windows runner exposed no adapter with an effective DNS server."
+            );
+            return;
+        }
+
+        assert!(
+            observed,
+            "No eligible Windows interface produced a readable v3 DNS snapshot; errors: {}",
+            errors.join(" | ")
+        );
+    }
+
 }

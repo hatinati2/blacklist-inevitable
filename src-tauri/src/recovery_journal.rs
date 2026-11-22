@@ -364,12 +364,14 @@ fn validate_dns_configuration(configuration: &DnsConfiguration) -> Result<(), St
         }
         DnsConfiguration::Interface(snapshot) => {
             validate_guid(&snapshot.interface_guid)?;
-            if let Some(ipv4) = &snapshot.ipv4 {
-                validate_dns_stack(ipv4, false)?;
-            }
-            if let Some(ipv6) = &snapshot.ipv6 {
-                validate_dns_stack(ipv6, true)?;
-            }
+            let ipv4 = snapshot.ipv4.as_ref().ok_or_else(|| {
+                "The recovery journal is missing the IPv4 DNS snapshot.".to_string()
+            })?;
+            let ipv6 = snapshot.ipv6.as_ref().ok_or_else(|| {
+                "The recovery journal is missing the IPv6 DNS snapshot.".to_string()
+            })?;
+            validate_dns_stack(ipv4, false)?;
+            validate_dns_stack(ipv6, true)?;
             Ok(())
         }
     }
@@ -971,6 +973,33 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    fn dns_stack(ipv6: bool, nameserver: &str) -> DnsStackConfiguration {
+        DnsStackConfiguration {
+            name_servers: Some(vec![nameserver.parse().unwrap()]),
+            profile_name_servers: None,
+            effective_name_servers: vec![nameserver.parse().unwrap()],
+            domain: Some("vpn.example.test".into()),
+            search_list: Some(vec!["example.test".into()]),
+            supplemental_search_list: Some(vec!["internal.example.test".into()]),
+            registration_enabled: false,
+            register_adapter_name: false,
+            enable_llmnr: false,
+            query_adapter_name: false,
+            settings_flags: if ipv6 { 0x0001 | 0x0002 | 0x0004 | 0x0020 } else { 0x0002 | 0x0004 | 0x0020 },
+            server_properties: vec![],
+            profile_server_properties: vec![],
+        }
+    }
+
+    fn complete_dns_configuration() -> DnsConfiguration {
+        DnsConfiguration::Interface(DnsInterfaceConfiguration {
+            interface_guid: "4d36e972-e325-11ce-bfc1-08002be10318".into(),
+            ipv4: Some(dns_stack(false, "192.0.2.53")),
+            ipv6: Some(dns_stack(true, "2001:db8::53")),
+            disable_unconstrained_queries: Some(true),
+        })
+    }
+
     #[test]
     fn validates_route_dns_tunnel_and_filter_resource_identities() {
         let mut journal = example_journal(1, 1);
@@ -1002,6 +1031,108 @@ mod tests {
         let mut journal = example_journal(1, 1);
         journal.firewall_filters[0].filter_id = 0;
         assert!(journal.validate().is_err());
+    }
+
+    #[test]
+    fn complete_dual_stack_dns_configuration_round_trips() {
+        let mut journal = RecoveryJournal::new(76);
+        journal.dns.push(DnsMutationRecord {
+            interface_index: 12,
+            interface_guid: Some("4d36e972-e325-11ce-bfc1-08002be10318".into()),
+            applied: complete_dns_configuration(),
+            previous: DnsConfiguration::Dhcp,
+        });
+
+        journal.validate().unwrap();
+        let encoded = serde_json::to_vec(&journal).unwrap();
+        let decoded: RecoveryJournal = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded, journal);
+    }
+
+    #[test]
+    fn rejects_incomplete_or_family_mismatched_dual_stack_dns_journals() {
+        let mut journal = RecoveryJournal::new(77);
+        let mut incomplete = match complete_dns_configuration() {
+            DnsConfiguration::Interface(config) => config,
+            _ => unreachable!(),
+        };
+        incomplete.ipv6 = None;
+        journal.dns.push(DnsMutationRecord {
+            interface_index: 12,
+            interface_guid: Some(incomplete.interface_guid.clone()),
+            applied: DnsConfiguration::Interface(incomplete),
+            previous: DnsConfiguration::Dhcp,
+        });
+        assert!(journal.validate().is_err());
+
+        let mut journal = RecoveryJournal::new(78);
+        let mut mismatched = match complete_dns_configuration() {
+            DnsConfiguration::Interface(config) => config,
+            _ => unreachable!(),
+        };
+        mismatched.ipv6.as_mut().unwrap().name_servers =
+            Some(vec!["192.0.2.53".parse().unwrap()]);
+        journal.dns.push(DnsMutationRecord {
+            interface_index: 12,
+            interface_guid: Some(mismatched.interface_guid.clone()),
+            applied: DnsConfiguration::Interface(mismatched),
+            previous: DnsConfiguration::Dhcp,
+        });
+        assert!(journal.validate().is_err());
+    }
+
+    #[test]
+    fn validates_doh_server_property_index_and_template_mode() {
+        let mut journal = RecoveryJournal::new(79);
+        let mut configuration = match complete_dns_configuration() {
+            DnsConfiguration::Interface(config) => config,
+            _ => unreachable!(),
+        };
+        configuration.ipv4.as_mut().unwrap().server_properties.push(
+            DnsDohServerProperty {
+                server_index: 0,
+                flags: 0x0002,
+                template: Some("https://dns.example.test/dns-query{?dns}".into()),
+            },
+        );
+        journal.dns.push(DnsMutationRecord {
+            interface_index: 12,
+            interface_guid: Some(configuration.interface_guid.clone()),
+            applied: DnsConfiguration::Interface(configuration.clone()),
+            previous: DnsConfiguration::Dhcp,
+        });
+        journal.validate().unwrap();
+
+        let mut invalid = configuration;
+        invalid.ipv4.as_mut().unwrap().server_properties[0].server_index = 1;
+        journal.dns[0].applied = DnsConfiguration::Interface(invalid);
+        assert!(journal.validate().is_err());
+
+        let mut invalid = match complete_dns_configuration() {
+            DnsConfiguration::Interface(config) => config,
+            _ => unreachable!(),
+        };
+        invalid.ipv4.as_mut().unwrap().server_properties.push(
+            DnsDohServerProperty {
+                server_index: 0,
+                flags: 0x0003,
+                template: Some("https://dns.example.test/dns-query".into()),
+            },
+        );
+        journal.dns[0].applied = DnsConfiguration::Interface(invalid);
+        assert!(journal.validate().is_err());
+    }
+
+    #[test]
+    fn legacy_dns_record_without_stable_guid_remains_readable() {
+        let mut legacy = serde_json::to_value(example_journal(80, 1)).unwrap();
+        legacy["dns"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("interfaceGuid");
+        let decoded: RecoveryJournal = serde_json::from_value(legacy).unwrap();
+        assert_eq!(decoded.dns[0].interface_guid, None);
+        decoded.validate().unwrap();
     }
 
     #[test]

@@ -449,6 +449,33 @@ mod tests {
     }
 
     #[test]
+    fn status_request_uses_the_nested_operation_tag_on_the_wire() {
+        let request = AgentRequest {
+            version: AGENT_PROTOCOL_VERSION,
+            request_id: "status-1".to_string(),
+            operation: AgentOperation::GetStatus,
+        };
+        let encoded = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            encoded,
+            serde_json::json!({
+                "version": 1,
+                "requestId": "status-1",
+                "operation": {
+                    "operation": "getStatus"
+                }
+            })
+        );
+
+        let decoded = decode_agent_request(&serde_json::to_vec(&encoded).unwrap()).unwrap();
+        assert!(matches!(decoded.operation, AgentOperation::GetStatus));
+
+        let old_flat_shape =
+            br#"{"version":1,"requestId":"status-1","operation":"getStatus"}"#;
+        assert!(decode_agent_request(old_flat_shape).is_err());
+    }
+
+    #[test]
     fn decodes_a_valid_connect_request_without_putting_secrets_in_profile_metadata() {
         let bytes = serde_json::to_vec(&connect_request()).unwrap();
         let request = decode_agent_request(&bytes).unwrap();

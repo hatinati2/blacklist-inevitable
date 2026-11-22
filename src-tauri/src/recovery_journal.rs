@@ -455,9 +455,47 @@ fn validate_dns_stack(
     ipv6: bool,
 ) -> Result<(), String> {
     const DNS_SETTING_IPV6: u64 = 0x0001;
+    const DNS_SETTING_NAMESERVER: u64 = 0x0002;
+    const DNS_SETTING_SEARCHLIST: u64 = 0x0004;
+    const DNS_SETTING_REGISTRATION_ENABLED: u64 = 0x0008;
+    const DNS_SETTING_DOMAIN: u64 = 0x0020;
+    const DNS_SETTINGS_ENABLE_LLMNR: u64 = 0x0080;
+    const DNS_SETTINGS_QUERY_ADAPTER_NAME: u64 = 0x0100;
+    const DNS_SETTING_PROFILE_NAMESERVER: u64 = 0x0200;
+    const DNS_SETTING_SUPPLEMENTAL_SEARCH_LIST: u64 = 0x0800;
+    const DNS_SETTING_DOH: u64 = 0x1000;
+    const DNS_SETTING_DOH_PROFILE: u64 = 0x2000;
+    const KNOWN_FLAGS: u64 = DNS_SETTING_IPV6
+        | DNS_SETTING_NAMESERVER
+        | DNS_SETTING_SEARCHLIST
+        | DNS_SETTING_REGISTRATION_ENABLED
+        | DNS_SETTING_DOMAIN
+        | DNS_SETTINGS_ENABLE_LLMNR
+        | DNS_SETTINGS_QUERY_ADAPTER_NAME
+        | DNS_SETTING_PROFILE_NAMESERVER
+        | DNS_SETTING_SUPPLEMENTAL_SEARCH_LIST
+        | DNS_SETTING_DOH
+        | DNS_SETTING_DOH_PROFILE;
 
-    if (stack.settings_flags & DNS_SETTING_IPV6 != 0) != ipv6 {
-        return Err("The DNS stack settings flags do not match the recorded IP family.".to_string());
+    let flags = stack.settings_flags;
+    if flags & !KNOWN_FLAGS != 0
+        || (flags & DNS_SETTING_IPV6 != 0) != ipv6
+        || (flags & DNS_SETTING_NAMESERVER != 0) != stack.name_servers.is_some()
+        || (flags & DNS_SETTING_PROFILE_NAMESERVER != 0)
+            != stack.profile_name_servers.is_some()
+        || (flags & DNS_SETTING_DOMAIN != 0) != stack.domain.is_some()
+        || (flags & DNS_SETTING_SEARCHLIST != 0) != stack.search_list.is_some()
+        || (flags & DNS_SETTING_SUPPLEMENTAL_SEARCH_LIST != 0)
+            != stack.supplemental_search_list.is_some()
+        || (flags & DNS_SETTING_DOH != 0) != !stack.server_properties.is_empty()
+        || (flags & DNS_SETTING_DOH_PROFILE != 0)
+            != !stack.profile_server_properties.is_empty()
+        || stack.registration_enabled > 1
+        || stack.register_adapter_name > 1
+        || stack.enable_llmnr > 1
+        || stack.query_adapter_name > 1
+    {
+        return Err("The DNS stack flags and returned fields are inconsistent.".to_string());
     }
     if let Some(servers) = &stack.name_servers {
         validate_dns_servers(servers, Some(ipv6), false)?;

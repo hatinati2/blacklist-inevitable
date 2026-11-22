@@ -40,6 +40,15 @@ The planner uses process creation time with PID, stable tunnel GUID, exact route
 
 The `can_remove_journal` result is true only when every recorded resource is positively clean and the complete provider-scoped WFP inventory confirms no product-owned filters remain. A future Windows reconciler must gather authoritative snapshots, perform cleanup/restoration using exact ownership checks, take a fresh snapshot, and only then act on this result. This planner does not itself authorize or execute destructive operations.
 
+## Windows read-only resource observers
+
+`src-tauri/src/recovery_observer.rs` now contains the first real Windows observation calls:
+
+- The engine-process probe opens the journaled PID with only query and synchronize rights, checks its wait state, reads the kernel FILETIME creation value, and checks liveness again. A PID that no longer exists is reported absent; access denied, API failures, and inconclusive states are errors and must become `Unknown`. The creation timestamp is compared by the assessment planner, so PID reuse is a conflict rather than permission to terminate another process.
+- The WFP probe calls `WfpEngine::enumerate_owned_filters`. It begins an explicit read-only BFE transaction, creates a provider-key-scoped enumeration handle, reads every bounded page, verifies each returned provider and stable filter GUID, destroys the enumeration handle, and commits the read-only transaction. It returns `Present(empty)` only after a complete successful enumeration. Any error or inventory above the 256-filter journal bound is inconclusive and must remain `Unknown`.
+
+These probes do not stop processes, create/delete filters, alter WFP policy, change routes or DNS, touch TUN adapters, or remove journal files. They are not yet wired into the Agent startup gate; that gate remains fail-closed. Route, DNS, and TUN observers are still required before a complete recovery snapshot can be trusted.
+
 ## Security boundary and remaining work
 
 The journal is not an authentication or integrity mechanism. Its trust depends on the service-owned directory ACL and the service's validation of every record. The service must not open a user-writable directory as its journal root. Reparse-point entries are rejected, and files are never selected using a caller-supplied path.

@@ -26,6 +26,7 @@
 - The signed deployment explicitly registers the service as LocalSystem because the current authentication path uses `WTSQueryUserToken` and needs `SE_TCB_NAME`. It applies a restricted service SID, a SYSTEM/Administrators-only service-control DACL, SCM restart-on-failure actions, and a protected `%ProgramData%\\blacklist-inevitable\\Agent` journal directory whose write access includes only SYSTEM, Administrators, and the service SID.
 - The installer workflow can sign the Agent and final NSIS setup binary when `AGENT_SIGNER_THUMBPRINT`, `WINDOWS_SIGNING_PFX_BASE64`, and `WINDOWS_SIGNING_PFX_PASSWORD` are configured. Without all three, the workflow builds an unsigned desktop installer, pins `UNCONFIGURED`, and the smoke test verifies that no LocalSystem Agent service was registered.
 - Uninstallation preserves the ProgramData recovery-journal directory for later reconciliation; it does not silently delete potentially important network-recovery state.
+- SCM restart-on-failure actions only restart the status-only service process. They do not reconcile tunnel, route, DNS, WFP, or recovery-journal state and must not be presented as VPN crash recovery.
 
 The signed positive deployment path still requires a trusted release certificate and clean Windows 10/11 validation. The ordinary CI workflow without signing secrets validates resource packaging and the fail-closed unsigned path only; it does not prove a signed service was installed or exercised.
 

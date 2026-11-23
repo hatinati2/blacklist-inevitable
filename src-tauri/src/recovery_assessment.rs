@@ -1140,6 +1140,39 @@ mod tests {
     }
 
     #[test]
+    fn cross_session_resource_ownership_collisions_block_every_intent() {
+        let (journal, snapshot) = ready_plan_fixture();
+        let assessment = assess_recovery(&journal, &snapshot);
+
+        let mut other = RecoveryJournal::new(26);
+        let mut reused_pid = journal.engine.clone().unwrap();
+        reused_pid.creation_time_100ns += 1;
+        other.engine = Some(reused_pid);
+        other.tunnel = journal.tunnel.clone();
+        other.routes = journal.routes.clone();
+        other.dns = journal.dns.clone();
+        other.firewall_filters = journal.firewall_filters.clone();
+
+        let unresolved = vec![journal.clone(), other];
+        let plan = build_recovery_intent_plan(&journal, &unresolved, &assessment).unwrap();
+        assert_eq!(plan.state, RecoveryPlanState::Blocked);
+        assert!(plan.intents.is_empty());
+        assert!(!plan.journal_removal_authorized);
+        for resource in [
+            RecoveryPlanResource::Engine,
+            RecoveryPlanResource::Tunnel,
+            RecoveryPlanResource::Route(journal.routes[0].destination_prefix.clone()),
+            RecoveryPlanResource::Dns(journal.dns[0].interface_index),
+            RecoveryPlanResource::Wfp,
+        ] {
+            assert!(plan.blockers.iter().any(|blocker| {
+                blocker.resource == resource
+                    && blocker.disposition == ResourceDisposition::Conflict
+            }));
+        }
+    }
+
+    #[test]
     fn created_routes_produce_sorted_remove_intents_only_with_stable_luids() {
         let mut journal = RecoveryJournal::new(24);
         let mut first = route_record();

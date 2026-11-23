@@ -192,7 +192,7 @@ fn verify_system_service_peer(
     // revision=1, one sub-authority, NT authority=5, sub-authority=18.
     let sid = unsafe { std::slice::from_raw_parts(token_user.User.Sid.cast::<u8>(), 12) };
     if unsafe { windows_sys::Win32::Security::GetLengthSid(token_user.User.Sid) } != 12
-        || sid != [1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0]
+        || !is_local_system_sid(sid)
     {
         return Err("The named-pipe server is not running as the required LocalSystem service identity.".to_string());
     }
@@ -215,6 +215,10 @@ fn verify_system_service_peer(
     }
 
     Ok(())
+}
+
+fn is_local_system_sid(sid: &[u8]) -> bool {
+    sid == [1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0]
 }
 
 #[cfg(windows)]
@@ -244,8 +248,7 @@ fn verify_local_system_pipe_owner(pipe_handle: windows_sys::Win32::Foundation::H
 
     let is_system_owner = !owner_sid.is_null()
         && unsafe { GetLengthSid(owner_sid) } == 12
-        && unsafe { std::slice::from_raw_parts(owner_sid.cast::<u8>(), 12) }
-            == [1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0];
+        && is_local_system_sid(unsafe { std::slice::from_raw_parts(owner_sid.cast::<u8>(), 12) });
     if !security_descriptor.is_null() {
         unsafe { LocalFree(security_descriptor) };
     }
@@ -259,6 +262,13 @@ fn verify_local_system_pipe_owner(pipe_handle: windows_sys::Win32::Foundation::H
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recognizes_only_the_exact_local_system_sid() {
+        assert!(is_local_system_sid(&[1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0]));
+        assert!(!is_local_system_sid(&[1, 1, 0, 0, 0, 0, 0, 5, 19, 0, 0, 0]));
+        assert!(!is_local_system_sid(&[1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0]));
+    }
 
     #[test]
     fn pipe_endpoint_is_local_and_versioned() {

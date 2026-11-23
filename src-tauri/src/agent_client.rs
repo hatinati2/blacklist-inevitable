@@ -56,16 +56,24 @@ async fn request_status() -> Result<AgentResponse, String> {
 async fn request_status_windows() -> Result<AgentResponse, String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::windows::named_pipe::ClientOptions;
-    use tokio::time::timeout;
-
-    let mut pipe = ClientOptions::new()
-        .open(PIPE_NAME)
-        .map_err(|_| "The privileged Agent service is not installed or is not accepting connections.".to_string())?;
+    use tokio::time::{sleep, timeout};
+    use windows_sys::Win32::Foundation::ERROR_PIPE_BUSY;
 
     timeout(CLIENT_TIMEOUT, async {
-        pipe.connect()
-            .await
-            .map_err(|_| "The privileged Agent pipe connection could not be established.".to_string())?;
+        // ClientOptions::open returns an already-connected client. Retry only
+        // the transient busy condition while the single-instance Agent pipe is
+        // serving another request; all other errors fail closed.
+        let mut pipe = loop {
+            match ClientOptions::new().open(PIPE_NAME) {
+                Ok(pipe) => break pipe,
+                Err(error) if error.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) => {
+                    sleep(Duration::from_millis(50)).await;
+                }
+                Err(_) => {
+                    return Err("The privileged Agent service is not installed or is not accepting connections.".to_string());
+                }
+            }
+        };
 
         verify_system_service_peer(&pipe)?;
 
@@ -120,12 +128,14 @@ fn verify_system_service_peer(
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
     use windows_sys::Win32::Security::{
-        GetTokenInformation, OpenProcessToken, TokenSessionId, TokenUser, TOKEN_QUERY, TOKEN_USER,
+        GetTokenInformation, TokenSessionId, TokenUser, TOKEN_QUERY, TOKEN_USER,
     };
     use windows_sys::Win32::System::Pipes::{
         GetNamedPipeServerProcessId, GetNamedPipeServerSessionId,
     };
-    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
 
     struct Handle(HANDLE);
     impl Drop for Handle {
@@ -198,10 +208,14 @@ fn verify_system_service_peer(
     }
     // LocalSystem is the well-known SID S-1-5-18:
     // revision=1, one sub-authority, NT authority=5, sub-authority=18.
-    let sid = unsafe { std::slice::from_raw_parts(token_user.User.Sid.cast::<u8>(), 12) };
-    if unsafe { windows_sys::Win32::Security::GetLengthSid(token_user.User.Sid) } != 12
-        || !is_local_system_sid(sid)
-    {
+    let sid_length = unsafe { windows_sys::Win32::Security::GetLengthSid(token_user.User.Sid) };
+    if sid_length != 12 {
+        return Err("The named-pipe server is not running as the required LocalSystem service identity.".to_string());
+    }
+    let sid = unsafe {
+        std::slice::from_raw_parts(token_user.User.Sid.cast::<u8>(), sid_length as usize)
+    };
+    if !is_local_system_sid(sid) {
         return Err("The named-pipe server is not running as the required LocalSystem service identity.".to_string());
     }
 

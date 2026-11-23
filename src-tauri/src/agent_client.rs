@@ -122,7 +122,9 @@ fn verify_system_service_peer(
     use windows_sys::Win32::Security::{
         GetTokenInformation, OpenProcessToken, TokenSessionId, TokenUser, TOKEN_QUERY, TOKEN_USER,
     };
-    use windows_sys::Win32::System::Pipes::GetNamedPipeServerProcessId;
+    use windows_sys::Win32::System::Pipes::{
+        GetNamedPipeServerProcessId, GetNamedPipeServerSessionId,
+    };
     use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 
     struct Handle(HANDLE);
@@ -138,6 +140,12 @@ fn verify_system_service_peer(
     let mut server_pid = 0u32;
     if unsafe { GetNamedPipeServerProcessId(pipe_handle, &mut server_pid) } == 0 || server_pid == 0 {
         return Err("The Agent pipe server identity could not be verified.".to_string());
+    }
+    let mut server_session = u32::MAX;
+    if unsafe { GetNamedPipeServerSessionId(pipe_handle, &mut server_session) } == 0
+        || server_session != 0
+    {
+        return Err("The Agent pipe server is not running in Windows service session 0.".to_string());
     }
 
     let process = unsafe {

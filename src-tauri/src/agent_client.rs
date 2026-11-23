@@ -118,9 +118,10 @@ fn verify_system_service_peer(
     pipe: &tokio::net::windows::named_pipe::NamedPipeClient,
 ) -> Result<(), String> {
     use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, HANDLE};
     use windows_sys::Win32::Security::{
-        GetTokenInformation, OpenProcessToken, TokenSessionId, TokenUser, TOKEN_QUERY, TOKEN_USER,
+        GetTokenInformation, GetLengthSid, GetSecurityInfo, OpenProcessToken, TokenSessionId,
+        TokenUser, OWNER_SECURITY_INFORMATION, SE_FILE_OBJECT, TOKEN_QUERY, TOKEN_USER,
     };
     use windows_sys::Win32::System::Pipes::GetNamedPipeServerProcessId;
     use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
@@ -144,13 +145,16 @@ fn verify_system_service_peer(
         OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, server_pid)
     };
     if process.is_null() {
-        return Err("The Agent service process could not be inspected.".to_string());
+        // Medium-integrity desktop processes can be denied access to a
+        // LocalSystem process token. In that case verify the named-pipe
+        // object's owner SID instead, matching the Windows IPC broker pattern.
+        return verify_local_system_pipe_owner(pipe_handle);
     }
     let process = Handle(process);
 
     let mut token = std::ptr::null_mut();
     if unsafe { OpenProcessToken(process.0, TOKEN_QUERY, &mut token) } == 0 || token.is_null() {
-        return Err("The Agent service security token could not be verified.".to_string());
+        return verify_local_system_pipe_owner(pipe_handle);
     }
     let token = Handle(token);
 
@@ -212,6 +216,45 @@ fn verify_system_service_peer(
     }
 
     Ok(())
+}
+
+#[cfg(windows)]
+fn verify_local_system_pipe_owner(pipe_handle: windows_sys::Win32::Foundation::HANDLE) -> Result<(), String> {
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::{
+        GetLengthSid, GetSecurityInfo, OWNER_SECURITY_INFORMATION, SE_FILE_OBJECT,
+    };
+
+    let mut owner_sid = std::ptr::null_mut();
+    let mut security_descriptor = std::ptr::null_mut();
+    let status = unsafe {
+        GetSecurityInfo(
+            pipe_handle,
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            &mut owner_sid,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut security_descriptor,
+        )
+    };
+    if status != 0 {
+        return Err("The Agent pipe owner could not be verified.".to_string());
+    }
+
+    let is_system_owner = !owner_sid.is_null()
+        && unsafe { GetLengthSid(owner_sid) } == 12
+        && unsafe { std::slice::from_raw_parts(owner_sid.cast::<u8>(), 12) }
+            == [1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0];
+    if !security_descriptor.is_null() {
+        unsafe { LocalFree(security_descriptor) };
+    }
+    if is_system_owner {
+        Ok(())
+    } else {
+        Err("The named-pipe object is not owned by the required LocalSystem identity.".to_string())
+    }
 }
 
 #[cfg(test)]

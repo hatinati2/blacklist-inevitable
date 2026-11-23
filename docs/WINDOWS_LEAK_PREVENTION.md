@@ -47,10 +47,11 @@ Therefore:
 
 The WFP backend now has a narrowly scoped cleanup primitive for persistent filters:
 - It accepts only stable filter GUIDs recorded in the recovery journal.
-- It first requires a complete provider-scoped inventory and a positively verified persistent provider/sublayer.
-- Each current filter must still match the journaled provider and layer, plus the live BFE identity read from the inventory; a changed identity aborts the transaction.
-- It deletes only the requested keys, verifies absence after commit, and verifies the original identities remain present if the deletion transaction aborts.
-- A missing key is treated as already absent only after the complete provider inventory is verified. Legacy records without stable filter GUIDs are not deleted automatically.
+- It verifies the persistent provider and sublayer through read-only BFE lookups; missing or mismatched namespace state is an error, never proof of cleanup.
+- It looks up each exact journaled filter GUID directly and verifies provider, sublayer, layer, persistent flag, and live BFE filter ID before deletion. It does not enumerate or select unrelated filters.
+- Inside one WFP transaction, it re-reads each exact GUID and re-verifies the complete ownership identity before deleting by GUID.
+- After commit, it independently verifies every requested GUID is absent; after abort, it verifies the original live identities remain present.
+- A key is treated as already absent only when the ownership namespace is verified and the exact GUID lookup returns the documented filter-not-found status. Legacy records without stable filter GUIDs are not deleted automatically.
 - The operation does not remove the provider/sublayer and is not called by startup recovery, Connect, Disconnect or Recover.
 
 This is a cleanup building block, not an active kill switch. No physical-egress filters are installed by this method during normal application operation, and it does not establish crash/reboot protection or packet-level leak prevention.

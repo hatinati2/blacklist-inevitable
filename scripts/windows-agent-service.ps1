@@ -45,6 +45,8 @@ function Stop-AgentService {
                 throw "The Agent service did not reach the Stopped state."
             }
         }
+        # Keep a stopped service from auto-starting against files being replaced.
+        Set-Service -Name $ServiceName -StartupType Disabled -ErrorAction Stop
     }
     finally {
         $service.Dispose()
@@ -94,48 +96,53 @@ function Assert-PinnedAuthenticodePublisher {
 }
 
 function Set-AgentJournalDirectoryAcl {
-    $journalDirectory = Join-Path $env:ProgramData "blacklist-inevitable\Agent"
-    New-Item -ItemType Directory -Path $journalDirectory -Force | Out-Null
-    $directory = Get-Item -LiteralPath $journalDirectory -Force
-    if (($directory.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw "The Agent recovery-journal directory must not be a reparse point."
-    }
+    $rootDirectory = Join-Path $env:ProgramData "blacklist-inevitable"
+    $journalDirectory = Join-Path $rootDirectory "Agent"
+    New-Item -ItemType Directory -Path $rootDirectory -Force | Out-Null
 
     $systemSid = [System.Security.Principal.SecurityIdentifier]::new("S-1-5-18")
     $administratorsSid = [System.Security.Principal.SecurityIdentifier]::new("S-1-5-32-544")
     $serviceAccount = [System.Security.Principal.NTAccount]::new("NT SERVICE\$ServiceName")
     $serviceSid = $serviceAccount.Translate([System.Security.Principal.SecurityIdentifier])
 
-    $acl = [System.Security.AccessControl.DirectorySecurity]::new()
-    $acl.SetAccessRuleProtection($true, $false)
-    $acl.SetOwner($administratorsSid)
-    $inheritance = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
-        [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
-    $propagation = [System.Security.AccessControl.PropagationFlags]::None
-    $allow = [System.Security.AccessControl.AccessControlType]::Allow
+    function Set-TrustedDirectoryAcl {
+        param([Parameter(Mandatory = $true)][string]$Path)
 
-    $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
-        $systemSid,
-        [System.Security.AccessControl.FileSystemRights]::FullControl,
-        $inheritance,
-        $propagation,
-        $allow
-    ))
-    $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
-        $administratorsSid,
-        [System.Security.AccessControl.FileSystemRights]::FullControl,
-        $inheritance,
-        $propagation,
-        $allow
-    ))
-    $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
-        $serviceSid,
-        [System.Security.AccessControl.FileSystemRights]::Modify,
-        $inheritance,
-        $propagation,
-        $allow
-    ))
-    Set-Acl -LiteralPath $journalDirectory -AclObject $acl
+        $directory = Get-Item -LiteralPath $Path -Force
+        if (($directory.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "The Agent state directory must not be a reparse point: $Path"
+        }
+
+        $acl = [System.Security.AccessControl.DirectorySecurity]::new()
+        $acl.SetAccessRuleProtection($true, $false)
+        $acl.SetOwner($administratorsSid)
+        $inheritance = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+            [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
+        $propagation = [System.Security.AccessControl.PropagationFlags]::None
+        $allow = [System.Security.AccessControl.AccessControlType]::Allow
+        $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
+            $systemSid,
+            [System.Security.AccessControl.FileSystemRights]::FullControl,
+            $inheritance, $propagation, $allow
+        ))
+        $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
+            $administratorsSid,
+            [System.Security.AccessControl.FileSystemRights]::FullControl,
+            $inheritance, $propagation, $allow
+        ))
+        $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
+            $serviceSid,
+            [System.Security.AccessControl.FileSystemRights]::Modify,
+            $inheritance, $propagation, $allow
+        ))
+        Set-Acl -LiteralPath $Path -AclObject $acl
+    }
+
+    # Secure the parent before creating the child to avoid following a
+    # user-planted reparse point beneath ProgramData.
+    Set-TrustedDirectoryAcl -Path $rootDirectory
+    New-Item -ItemType Directory -Path $journalDirectory -Force | Out-Null
+    Set-TrustedDirectoryAcl -Path $journalDirectory
 }
 
 function Install-AgentService {
@@ -154,7 +161,7 @@ function Install-AgentService {
     $expectedThumbprint = (Get-Content -LiteralPath $SignerThumbprintFile -Raw -Encoding ascii).Trim()
     $expectedThumbprint = ($expectedThumbprint -replace '\s', '').ToUpperInvariant()
     if ($expectedThumbprint -notmatch '^[A-F0-9]{40}$') {
-        Write-Warning "The LocalSystem Agent was not installed because this build has no configured publisher thumbprint."
+        Write-Warning "The LocalSystem Agent was not installed or started because this build has no configured publisher thumbprint."
         return 10
     }
 

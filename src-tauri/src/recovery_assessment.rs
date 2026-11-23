@@ -1008,6 +1008,79 @@ mod tests {
     }
 
     #[test]
+    fn created_routes_produce_sorted_remove_intents_only_with_stable_luids() {
+        let mut journal = RecoveryJournal::new(24);
+        let mut first = route_record();
+        first.destination_prefix = "203.0.113.0/24".into();
+        first.previous = None;
+        let mut second = route_record();
+        second.destination_prefix = "198.18.0.0/24".into();
+        second.previous = None;
+        journal.routes = vec![first.clone(), second.clone()];
+
+        let mut snapshot = empty_snapshot();
+        snapshot.routes.insert(
+            first.destination_prefix.clone(),
+            Observation::Present(first.applied.clone()),
+        );
+        snapshot.routes.insert(
+            second.destination_prefix.clone(),
+            Observation::Present(second.applied.clone()),
+        );
+        let assessment = assess_recovery(&journal, &snapshot);
+        assert!(assessment.routes.iter().all(|item| {
+            item.disposition == ResourceDisposition::NeedsCleanup
+        }));
+
+        let plan = build_recovery_intent_plan(&journal, &assessment).unwrap();
+        assert_eq!(plan.state, RecoveryPlanState::ReadyForReview);
+        assert_eq!(plan.intents.len(), 2);
+        assert!(matches!(
+            &plan.intents[0],
+            RecoveryIntent::RemoveAppliedRoute { destination_prefix, .. }
+                if destination_prefix == "198.18.0.0/24"
+        ));
+        assert!(matches!(
+            &plan.intents[1],
+            RecoveryIntent::RemoveAppliedRoute { destination_prefix, .. }
+                if destination_prefix == "203.0.113.0/24"
+        ));
+    }
+
+    #[test]
+    fn duplicate_assessment_keys_and_legacy_wfp_keys_block_planning() {
+        let (journal, snapshot) = ready_plan_fixture();
+        let mut assessment = assess_recovery(&journal, &snapshot);
+        assessment.routes.push(assessment.routes[0].clone());
+        let duplicate = build_recovery_intent_plan(&journal, &assessment).unwrap();
+        assert_eq!(duplicate.state, RecoveryPlanState::Blocked);
+        assert!(duplicate.intents.is_empty());
+        assert!(duplicate.blockers.iter().any(|item| {
+            item.disposition == ResourceDisposition::Conflict
+                && item.resource == RecoveryPlanResource::Route(
+                    journal.routes[0].destination_prefix.clone()
+                )
+        }));
+
+        let mut journal = RecoveryJournal::new(25);
+        let mut legacy = filter_record(77);
+        legacy.filter_key = None;
+        journal.firewall_filters.push(legacy);
+        let mut snapshot = empty_snapshot();
+        snapshot.firewall_filters =
+            Observation::Present(vec![filter_record(999)]);
+        let assessment = assess_recovery(&journal, &snapshot);
+        assert_eq!(assessment.firewall_filters, ResourceDisposition::Unknown);
+        let plan = build_recovery_intent_plan(&journal, &assessment).unwrap();
+        assert_eq!(plan.state, RecoveryPlanState::Blocked);
+        assert!(plan.intents.is_empty());
+        assert!(plan.blockers.iter().any(|item| {
+            item.resource == RecoveryPlanResource::Wfp
+                && item.disposition == ResourceDisposition::Unknown
+        }));
+    }
+
+    #[test]
     fn partial_dual_stack_dns_never_creates_a_restore_intent() {
         let (journal, mut snapshot) = ready_plan_fixture();
         let DnsConfiguration::Interface(mut partial) = journal.dns[0].applied.clone() else {

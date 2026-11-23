@@ -9,7 +9,7 @@
 //! This module never changes ACLs, system networking, DNS, routes, WFP, or
 //! process state.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -239,7 +239,7 @@ pub(crate) async fn ensure_current() -> Result<RuleSetCacheFiles, String> {
 
     let program_data = std::env::var_os("ProgramData")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\\ProgramData"));
+        .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
     let directory = cache_directory(&program_data)?;
 
     let client = reqwest::Client::builder()
@@ -290,7 +290,7 @@ mod tests {
 
     #[test]
     fn validates_srs_header_exact_size_and_sha256() {
-        let bytes = b"SRS\\x01fixture-payload";
+        let bytes = b"SRS\x01fixture-payload";
         let asset = fixture_asset(bytes);
         assert!(validate_asset_bytes(&asset, bytes).is_ok());
 
@@ -303,14 +303,14 @@ mod tests {
     fn writes_once_atomically_and_rejects_a_tampered_cache_file() {
         let root = std::env::temp_dir().join(format!("blacklist-ruleset-cache-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).expect("create isolated cache directory");
-        let bytes = b"SRS\\x01fixture-payload";
+        let bytes = b"SRS\x01fixture-payload";
         let asset = fixture_asset(bytes);
 
         let path = write_verified_asset(&root, &asset, bytes).expect("store verified SRS");
         assert_eq!(fs::read(&path).unwrap(), bytes);
         assert_eq!(write_verified_asset(&root, &asset, bytes).unwrap(), path);
 
-        fs::write(&path, b"SRS\\x01tampered").expect("tamper isolated fixture");
+        fs::write(&path, b"SRS\x01tampered").expect("tamper isolated fixture");
         assert!(verify_cached_file(&path, &asset).is_err());
         assert!(write_verified_asset(&root, &asset, bytes).is_err());
 

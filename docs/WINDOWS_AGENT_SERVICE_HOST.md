@@ -33,7 +33,7 @@ The signed positive deployment path still requires a trusted release certificate
 
 The current listener targets the active physical-console session. It deliberately rejects other sessions, including RDP sessions, until a tested multi-session policy is implemented.
 
-The active user's reference token is queried with `WTSQueryUserToken`. Microsoft documents that this API requires the caller to run as LocalSystem with `SE_TCB_NAME`; it is intended for highly trusted services and token handles must be closed. The eventual service installer must therefore define and verify this service account/privilege model instead of assuming any service identity will work.
+The active user's reference token is queried with `WTSQueryUserToken`. Microsoft documents that this API requires the caller to run as LocalSystem with `SE_TCB_NAME`; it is intended for highly trusted services and token handles must be closed. The signed deployment therefore uses LocalSystem and adds a restricted service SID. Because a restricted token is subject to its restricted-SID access check, the installer grants that exact service SID read/execute access to the Program Files path and Agent executable, and modify access only to the protected ProgramData journal directory. The restricted-token filesystem access still needs clean-machine Windows 10/11 validation.
 
 The named-pipe DACL is only the first access gate. Authorization also compares the actual impersonated client SID and session ID; it does not trust the DACL alone. The thread is reverted before response dispatch. No privileged filesystem or networking operation is performed while impersonating the client.
 
@@ -53,10 +53,10 @@ The desktop process does not launch the Agent directly. The per-machine NSIS ins
 
 ## Required next slices
 
-2. Add authenticated profile/credential handoff with one-shot memory handling and no secret logging/persistence.
-3. Integrate the recovery journal and WFP transaction backend. Persist exact state before OS mutations and verify it during startup recovery.
-4. Add the Agent-owned connection runtime only after authorization and crash recovery are tested.
-5. Add Windows 10/11 integration tests for user logon/logoff, session switching, remote-client rejection, unauthorized SID rejection, malformed/oversized/replayed frames, stop during blocked pipe connect/read, service crash/reboot, and packet-capture leak acceptance.
+1. Add authenticated profile/credential handoff with one-shot memory handling and no secret logging/persistence.
+2. Integrate the recovery journal and WFP transaction backend. Persist exact state before OS mutations and verify it during startup recovery.
+3. Add the Agent-owned connection runtime only after authorization and crash recovery are tested.
+4. Add Windows 10/11 integration tests for user logon/logoff, session switching, remote-client rejection, unauthorized SID rejection, malformed/oversized/replayed frames, stop during blocked pipe connect/read, service crash/reboot, and packet-capture leak acceptance.
 
 A green service-host build proves only that the Windows binary compiles and its automated checks pass. It is not evidence of a registered service, a connected desktop client, an active kill switch, or leak prevention.
 

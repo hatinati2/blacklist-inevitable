@@ -502,27 +502,10 @@ pub fn build_recovery_intent_plan(
 
     match assessment.firewall_filters {
         ResourceDisposition::VerifiedClean => {}
-        ResourceDisposition::NeedsCleanup => {
-            let crate::recovery_assessment::Observation::Present(observed_filters) =
-                &snapshot.firewall_filters
-            else {
-                push_recovery_plan_blocker(
-                    &mut blockers,
-                    RecoveryPlanResource::Wfp,
-                    ResourceDisposition::Unknown,
-                );
-                // The complete provider snapshot is required to identify which
-                // stable filter keys are actually present at planning time.
-                Vec::new()
-            };
-
-            if let crate::recovery_assessment::Observation::Present(observed_filters) =
-                &snapshot.firewall_filters
-            {
-                let mut expected_by_key = BTreeMap::<
-                    String,
-                    (String, String),
-                >::new();
+        ResourceDisposition::NeedsCleanup => match &snapshot.firewall_filters {
+            Observation::Present(observed_filters) => {
+                let mut expected_by_key =
+                    BTreeMap::<String, (String, String)>::new();
                 let mut invalid_expected = false;
                 for record in &journal.firewall_filters {
                     match (
@@ -590,8 +573,19 @@ pub fn build_recovery_intent_plan(
                     );
                 }
             }
-        }
-        disposition => push_recovery_plan_blocker(&mut blockers, RecoveryPlanResource::Wfp, disposition),
+            Observation::Unknown | Observation::Absent => {
+                push_recovery_plan_blocker(
+                    &mut blockers,
+                    RecoveryPlanResource::Wfp,
+                    ResourceDisposition::Unknown,
+                );
+            }
+        },
+        disposition => push_recovery_plan_blocker(
+            &mut blockers,
+            RecoveryPlanResource::Wfp,
+            disposition,
+        ),
     }
 
     // Make the plan stable for serialization and review. This is not an
@@ -1138,7 +1132,7 @@ mod tests {
         assert_eq!(assessment.dns[0].disposition, ResourceDisposition::NeedsRestore);
         assert_eq!(assessment.firewall_filters, ResourceDisposition::NeedsCleanup);
 
-        let plan = build_recovery_intent_plan(&journal, std::slice::from_ref(&journal), &assessment).unwrap();
+        let plan = build_recovery_intent_plan(&journal, std::slice::from_ref(&journal), &snapshot, &assessment).unwrap();
         assert_eq!(plan.state, RecoveryPlanState::ReadyForReview);
         assert!(!plan.is_blocked());
         assert_eq!(plan.intents.len(), 5);
@@ -1264,7 +1258,7 @@ mod tests {
             item.disposition == ResourceDisposition::NeedsCleanup
         }));
 
-        let plan = build_recovery_intent_plan(&journal, std::slice::from_ref(&journal), &assessment).unwrap();
+        let plan = build_recovery_intent_plan(&journal, std::slice::from_ref(&journal), &snapshot, &assessment).unwrap();
         assert_eq!(plan.state, RecoveryPlanState::ReadyForReview);
         assert_eq!(plan.intents.len(), 2);
         assert!(matches!(
@@ -1284,7 +1278,7 @@ mod tests {
         let (journal, snapshot) = ready_plan_fixture();
         let mut assessment = assess_recovery(&journal, &snapshot);
         assessment.routes.push(assessment.routes[0].clone());
-        let duplicate = build_recovery_intent_plan(&journal, std::slice::from_ref(&journal), &assessment).unwrap();
+        let duplicate = build_recovery_intent_plan(&journal, std::slice::from_ref(&journal), &snapshot, &assessment).unwrap();
         assert_eq!(duplicate.state, RecoveryPlanState::Blocked);
         assert!(duplicate.intents.is_empty());
         assert!(duplicate.blockers.iter().any(|item| {
@@ -1303,7 +1297,7 @@ mod tests {
             Observation::Present(vec![filter_record(999)]);
         let assessment = assess_recovery(&journal, &snapshot);
         assert_eq!(assessment.firewall_filters, ResourceDisposition::Unknown);
-        let plan = build_recovery_intent_plan(&journal, std::slice::from_ref(&journal), &assessment).unwrap();
+        let plan = build_recovery_intent_plan(&journal, std::slice::from_ref(&journal), &snapshot, &assessment).unwrap();
         assert_eq!(plan.state, RecoveryPlanState::Blocked);
         assert!(plan.intents.is_empty());
         assert!(plan.blockers.iter().any(|item| {
@@ -1326,7 +1320,7 @@ mod tests {
         let assessment = assess_recovery(&journal, &snapshot);
         assert_eq!(assessment.dns[0].disposition, ResourceDisposition::Unknown);
 
-        let plan = build_recovery_intent_plan(&journal, std::slice::from_ref(&journal), &assessment).unwrap();
+        let plan = build_recovery_intent_plan(&journal, std::slice::from_ref(&journal), &snapshot, &assessment).unwrap();
         assert_eq!(plan.state, RecoveryPlanState::Blocked);
         assert!(plan.intents.is_empty());
         assert!(!plan.journal_removal_authorized);
@@ -1337,7 +1331,7 @@ mod tests {
         let (journal, snapshot) = ready_plan_fixture();
         let mut assessment = assess_recovery(&journal, &snapshot);
         assessment.routes.clear();
-        let plan = build_recovery_intent_plan(&journal, std::slice::from_ref(&journal), &assessment).unwrap();
+        let plan = build_recovery_intent_plan(&journal, std::slice::from_ref(&journal), &snapshot, &assessment).unwrap();
         assert_eq!(plan.state, RecoveryPlanState::Blocked);
         assert!(plan.intents.is_empty());
         assert!(plan.blockers.iter().any(|item| {
@@ -1357,7 +1351,7 @@ mod tests {
         );
         let assessment = assess_recovery(&journal, &snapshot);
         assert_eq!(assessment.routes[0].disposition, ResourceDisposition::Unknown);
-        let plan = build_recovery_intent_plan(&journal, std::slice::from_ref(&journal), &assessment).unwrap();
+        let plan = build_recovery_intent_plan(&journal, std::slice::from_ref(&journal), &snapshot, &assessment).unwrap();
         assert_eq!(plan.state, RecoveryPlanState::Blocked);
         assert!(plan.intents.is_empty());
     }

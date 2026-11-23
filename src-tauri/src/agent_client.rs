@@ -9,7 +9,8 @@ use std::time::Duration;
 use serde::Serialize;
 
 use crate::agent_protocol::{
-    encode_agent_frame, AgentOperation, AgentRequest, AgentResponse, AGENT_PROTOCOL_VERSION,
+    encode_agent_frame, AgentOperation, AgentRequest, AgentResponse, AgentResponseStatus,
+    AGENT_PROTOCOL_VERSION,
 };
 
 const PIPE_NAME: &str = r"\\.\pipe\BlacklistInevitable.Agent.v1";
@@ -101,6 +102,11 @@ async fn request_status_windows() -> Result<AgentResponse, String> {
         if response.version != AGENT_PROTOCOL_VERSION || response.request_id != request_id {
             return Err("The Agent status response does not match the active protocol request.".to_string());
         }
+        if response.status != AgentResponseStatus::Ok {
+            return Err(response
+                .detail
+                .unwrap_or_else(|| "The Agent rejected the status request.".to_string()));
+        }
         Ok(response)
     })
     .await
@@ -182,7 +188,9 @@ fn verify_system_service_peer(
     // LocalSystem is the well-known SID S-1-5-18:
     // revision=1, one sub-authority, NT authority=5, sub-authority=18.
     let sid = unsafe { std::slice::from_raw_parts(token_user.User.Sid.cast::<u8>(), 12) };
-    if sid != [1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0] {
+    if unsafe { windows_sys::Win32::Security::GetLengthSid(token_user.User.Sid) } != 12
+        || sid != [1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0]
+    {
         return Err("The named-pipe server is not running as the required LocalSystem service identity.".to_string());
     }
 

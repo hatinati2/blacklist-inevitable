@@ -187,6 +187,10 @@ function Grant-AgentExecutableReadAccess {
         Set-Acl -LiteralPath $directoryPath -AclObject $acl
     }
 
+    $agentFile = Get-Item -LiteralPath $agentFullPath -Force
+    if (($agentFile.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "The Agent executable must not be a reparse point: $agentFullPath"
+    }
     $fileAcl = Get-Acl -LiteralPath $agentFullPath
     $fileAcl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
         $serviceSid,

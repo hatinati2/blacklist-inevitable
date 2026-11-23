@@ -1173,6 +1173,63 @@ mod tests {
     }
 
     #[test]
+    fn wfp_cleanup_intents_include_only_filters_present_in_the_verified_snapshot() {
+        let mut journal = RecoveryJournal::new(27);
+        let present = filter_record(77);
+        let mut already_absent = filter_record(88);
+        already_absent.filter_key =
+            Some("d3c2a1b0-1111-4222-8333-444455556666".into());
+        already_absent.layer_key =
+            "e4d3c2b1-2222-4333-8444-555566667777".into();
+        journal.firewall_filters = vec![present.clone(), already_absent];
+
+        let mut snapshot = empty_snapshot();
+        let mut live_present = present.clone();
+        live_present.filter_id = 999;
+        snapshot.firewall_filters = Observation::Present(vec![live_present]);
+
+        let assessment = assess_recovery(&journal, &snapshot);
+        assert_eq!(assessment.firewall_filters, ResourceDisposition::NeedsCleanup);
+        let plan = build_recovery_intent_plan(
+            &journal,
+            std::slice::from_ref(&journal),
+            &snapshot,
+            &assessment,
+        ).unwrap();
+
+        assert_eq!(plan.state, RecoveryPlanState::ReadyForReview);
+        assert_eq!(plan.intents.len(), 1);
+        assert!(matches!(
+            &plan.intents[0],
+            RecoveryIntent::RemoveWfpFilter { identity }
+                if identity.filter_key == present.filter_key.clone().unwrap()
+        ));
+    }
+
+    #[test]
+    fn planner_rejects_an_assessment_or_journal_that_does_not_match_its_inputs() {
+        let (journal, snapshot) = ready_plan_fixture();
+        let assessment = assess_recovery(&journal, &snapshot);
+        let mut mismatched_assessment = assessment.clone();
+        mismatched_assessment.engine = ResourceDisposition::VerifiedClean;
+        assert!(build_recovery_intent_plan(
+            &journal,
+            std::slice::from_ref(&journal),
+            &snapshot,
+            &mismatched_assessment,
+        ).is_err());
+
+        let mut different_checkpoint = journal.clone();
+        different_checkpoint.revision += 1;
+        assert!(build_recovery_intent_plan(
+            &journal,
+            std::slice::from_ref(&different_checkpoint),
+            &snapshot,
+            &assessment,
+        ).is_err());
+    }
+
+    #[test]
     fn unknown_or_conflicting_resource_blocks_the_entire_plan() {
         let (journal, mut snapshot) = ready_plan_fixture();
         snapshot.dns.insert(journal.dns[0].interface_index, Observation::Unknown);

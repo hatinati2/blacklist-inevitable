@@ -1128,7 +1128,8 @@ mod tests {
     #[test]
     fn empty_assessment_produces_retained_clean_plan_without_journal_authority() {
         let journal = RecoveryJournal::new(21);
-        let assessment = assess_recovery(&journal, &empty_snapshot());
+        let snapshot = empty_snapshot();
+        let assessment = assess_recovery(&journal, &snapshot);
         assert!(assessment.can_remove_journal);
 
         let plan = build_recovery_intent_plan(&journal, std::slice::from_ref(&journal), &snapshot, &assessment).unwrap();

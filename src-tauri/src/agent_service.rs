@@ -4,6 +4,7 @@
 //! process, mutates routes/DNS/WFP, restores configuration, or removes journals.
 //! VPN connection operations remain separately disabled.
 
+#[cfg(windows)]
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -53,6 +54,7 @@ fn inspect_startup_recovery_journal() -> AgentRecoveryStatus {
     assess_startup_journals(&unresolved)
 }
 
+#[cfg(windows)]
 fn add_bounded_diagnostic(diagnostics: &mut Vec<String>, message: impl Into<String>) {
     const MAX_DIAGNOSTICS: usize = 2;
     if diagnostics.len() >= MAX_DIAGNOSTICS {
@@ -67,6 +69,7 @@ fn add_bounded_diagnostic(diagnostics: &mut Vec<String>, message: impl Into<Stri
     diagnostics.push(safe);
 }
 
+#[cfg(windows)]
 fn disposition_counts(
     dispositions: impl IntoIterator<Item = ResourceDisposition>,
 ) -> AgentRecoveryDispositionCounts {
@@ -108,17 +111,13 @@ fn assess_startup_journals(journals: &[RecoveryJournal]) -> AgentRecoveryStatus 
     // WFP inventory is scoped to the product's stable provider/sublayer and is
     // read inside a read-only transaction. Failure remains Unknown for every
     // session; an absent/unverifiable provider is not treated as an empty set.
-    let mut wfp_engine = match crate::wfp_engine::WfpEngine::open_local() {
-        Ok(engine) => Some(engine),
-        Err(error) => {
-            let mut diagnostics = Vec::new();
-            add_bounded_diagnostic(&mut diagnostics, format!("WFP inventory unavailable: {error}"));
-            None
-        }
+    let (mut wfp_engine, wfp_open_error) = match crate::wfp_engine::WfpEngine::open_local() {
+        Ok(engine) => (Some(engine), None),
+        Err(error) => (None, Some(error)),
     };
     let mut diagnostics = Vec::new();
-    if wfp_engine.is_none() {
-        add_bounded_diagnostic(&mut diagnostics, "WFP provider inventory could not be opened; WFP state is Unknown.");
+    if let Some(error) = wfp_open_error {
+        add_bounded_diagnostic(&mut diagnostics, format!("WFP inventory unavailable: {error}"));
     }
 
     let mut verified_clean_sessions = 0u32;

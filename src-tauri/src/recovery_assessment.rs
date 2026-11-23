@@ -7,6 +7,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use serde::Serialize;
+
 use crate::recovery_journal::{
     DnsConfiguration, DnsMutationRecord, EngineProcessRecord, FirewallFilterRecord,
     RecoveryJournal, RouteMutationRecord, RouteState, TunnelInterfaceRecord,
@@ -22,7 +24,8 @@ pub enum Observation<T> {
     Present(T),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub enum ResourceDisposition {
     /// A fresh OS observation proves the recorded resource is already absent
     /// or the previous configuration has already been restored.
@@ -349,7 +352,9 @@ fn assess_firewall_filters(
         let Some(layer_key) = normalize_guid(&record.layer_key) else {
             return ResourceDisposition::Unknown;
         };
-        expected_by_key.insert(filter_key, (provider_key, layer_key));
+        if expected_by_key.insert(filter_key, (provider_key, layer_key)).is_some() {
+            return ResourceDisposition::Conflict;
+        }
     }
 
     let mut seen = BTreeSet::new();
@@ -388,6 +393,16 @@ fn assess_firewall_filters(
     } else {
         ResourceDisposition::VerifiedClean
     }
+}
+
+/// Assess the complete product-provider WFP inventory against the union of
+/// every unresolved session. Startup must use this once per snapshot before
+/// splitting the inventory into per-session diagnostics.
+pub fn assess_firewall_filter_inventory(
+    expected: &[FirewallFilterRecord],
+    observed: &Observation<Vec<FirewallFilterRecord>>,
+) -> ResourceDisposition {
+    assess_firewall_filters(expected, observed)
 }
 
 #[cfg(test)]
@@ -849,6 +864,33 @@ mod tests {
         assert_eq!(
             assess_recovery(&journal, &snapshot).firewall_filters,
             ResourceDisposition::VerifiedClean
+        );
+    }
+
+    #[test]
+    fn global_wfp_inventory_accepts_distinct_filters_owned_by_multiple_sessions() {
+        let first = filter_record(77);
+        let mut second = filter_record(88);
+        second.filter_key = Some("d3c2a1b0-1111-4222-8333-444455556666".into());
+        second.layer_key = "e4d3c2b1-2222-4333-8444-555566667777".into();
+        let expected = vec![first.clone(), second.clone()];
+        let observed = Observation::Present(vec![first, second]);
+
+        assert_eq!(
+            assess_firewall_filter_inventory(&expected, &observed),
+            ResourceDisposition::NeedsCleanup
+        );
+    }
+
+    #[test]
+    fn duplicate_stable_wfp_keys_across_sessions_are_a_conflict() {
+        let first = filter_record(77);
+        let mut expected = vec![first.clone(), first.clone()];
+        expected[1].filter_id = 88;
+        let observed = Observation::Present(vec![first]);
+        assert_eq!(
+            assess_firewall_filter_inventory(&expected, &observed),
+            ResourceDisposition::Conflict
         );
     }
 

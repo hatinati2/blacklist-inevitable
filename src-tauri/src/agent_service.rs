@@ -1,88 +1,498 @@
 //! Dedicated Windows Service Control Manager host for the privileged Agent.
 //!
-//! The service owns the local authenticated status-only named pipe. VPN engine,
-//! WFP, TUN, route and DNS operations remain disabled until the recovery runtime
-//! and packet-capture release gates are implemented.
+//! Startup recovery performs read-only observations only. It never stops a
+//! process, mutates routes/DNS/WFP, restores configuration, or removes journals.
+//! VPN connection operations remain separately disabled.
 
+#[cfg(windows)]
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
+use crate::agent_protocol::{
+    AgentRecoveryDispositionCounts, AgentRecoverySessionStatus, AgentRecoveryState,
+    AgentRecoveryStatus,
+};
+use crate::recovery_assessment::{Observation, ResourceDisposition};
 use crate::recovery_journal::{RecoveryJournal, RecoveryJournalStore};
 
-static STARTUP_RECOVERY_STATUS: OnceLock<Result<(), String>> = OnceLock::new();
+static STARTUP_RECOVERY_STATUS: OnceLock<AgentRecoveryStatus> = OnceLock::new();
 
-fn validate_startup_journals(journals: &[RecoveryJournal]) -> Result<(), String> {
-    if journals.is_empty() {
-        return Ok(());
+fn empty_blocked_status(diagnostic: String) -> AgentRecoveryStatus {
+    AgentRecoveryStatus {
+        state: AgentRecoveryState::Blocked,
+        journal_inventory_complete: false,
+        total_sessions: 0,
+        verified_clean_sessions: 0,
+        blocked_sessions: 1,
+        omitted_sessions: 0,
+        journal_retained: true,
+        sessions: Vec::new(),
+        diagnostics: vec![diagnostic.chars().take(120).collect()],
     }
-
-    let phases = journals
-        .iter()
-        .map(|journal| format!("{:?}", journal.phase))
-        .collect::<Vec<_>>()
-        .join(", ");
-    Err(format!(
-        "{} unresolved recovery journal(s) were found (phases: {}). The Agent is fail-closed until every previous session is reconciled against actual Windows process, tunnel, route, DNS, and WFP state.",
-        journals.len(),
-        phases
-    ))
 }
 
-fn inspect_startup_recovery_journal() -> Result<(), String> {
+fn inspect_startup_recovery_journal() -> AgentRecoveryStatus {
     let program_data = std::env::var_os("ProgramData")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
     let journal_root = program_data
         .join("BlacklistInevitable")
         .join("Agent");
-    let store = RecoveryJournalStore::open(journal_root)?;
-    let unresolved = store.load_unresolved()?;
-    validate_startup_journals(&unresolved)
+    let store = match RecoveryJournalStore::open(journal_root) {
+        Ok(store) => store,
+        Err(error) => {
+            return empty_blocked_status(format!("Recovery journal store unavailable: {error}"));
+        }
+    };
+    let unresolved = match store.load_unresolved() {
+        Ok(journals) => journals,
+        Err(error) => {
+            return empty_blocked_status(format!("Recovery journal inventory is unsafe or unreadable: {error}"));
+        }
+    };
+    assess_startup_journals(&unresolved)
 }
 
-/// Called exactly once for each Agent service process before its pipe listener
-/// is marked RUNNING. The service still exposes read-only status when blocked,
-/// but never treats unresolved/corrupt recovery state as a clean startup.
-pub(crate) fn initialize_startup_recovery() -> Result<(), String> {
+#[cfg(windows)]
+fn add_bounded_diagnostic(diagnostics: &mut Vec<String>, message: impl Into<String>) {
+    const MAX_DIAGNOSTICS: usize = 2;
+    if diagnostics.len() >= MAX_DIAGNOSTICS {
+        return;
+    }
+    let safe: String = message
+        .into()
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(120)
+        .collect();
+    diagnostics.push(safe);
+}
+
+#[cfg(windows)]
+fn disposition_counts(
+    dispositions: impl IntoIterator<Item = ResourceDisposition>,
+) -> AgentRecoveryDispositionCounts {
+    let mut counts = AgentRecoveryDispositionCounts::default();
+    for disposition in dispositions {
+        match disposition {
+            ResourceDisposition::VerifiedClean => counts.verified_clean = counts.verified_clean.saturating_add(1),
+            ResourceDisposition::NeedsCleanup => counts.needs_cleanup = counts.needs_cleanup.saturating_add(1),
+            ResourceDisposition::NeedsRestore => counts.needs_restore = counts.needs_restore.saturating_add(1),
+            ResourceDisposition::Conflict => counts.conflict = counts.conflict.saturating_add(1),
+            ResourceDisposition::Unknown => counts.unknown = counts.unknown.saturating_add(1),
+        }
+    }
+    counts
+}
+
+#[cfg(windows)]
+fn assess_startup_journals(journals: &[RecoveryJournal]) -> AgentRecoveryStatus {
+    use crate::recovery_assessment::{
+        assess_firewall_filter_inventory, assess_recovery, RecoverySnapshot,
+    };
+    use crate::recovery_observer::{
+        observe_agent_wfp_filters, observe_recorded_dns, observe_recorded_engine_process,
+        observe_recorded_routes, observe_recorded_tunnel_interface,
+    };
+    use std::collections::BTreeSet;
+
+    if journals.is_empty() {
+        return AgentRecoveryStatus {
+            state: AgentRecoveryState::Clear,
+            journal_inventory_complete: true,
+            total_sessions: 0,
+            verified_clean_sessions: 0,
+            blocked_sessions: 0,
+            omitted_sessions: 0,
+            journal_retained: false,
+            sessions: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+    }
+
+    // WFP inventory is scoped to the product's stable provider/sublayer and is
+    // read inside a read-only transaction. Failure remains Unknown for every
+    // session; an absent/unverifiable provider is not treated as an empty set.
+    let (mut wfp_engine, wfp_open_error) = match crate::wfp_engine::WfpEngine::open_local() {
+        Ok(engine) => (Some(engine), None),
+        Err(error) => (None, Some(error)),
+    };
+    let mut diagnostics = Vec::new();
+    if let Some(error) = wfp_open_error {
+        add_bounded_diagnostic(&mut diagnostics, format!("WFP inventory unavailable: {error}"));
+    }
+
+    // WFP's provider inventory is global to all unresolved sessions. Take
+    // exactly one complete read-only snapshot and validate it against the
+    // union of every session's stable filter keys. Assessing the full provider
+    // inventory independently against each journal would make filters owned
+    // by another unresolved session look unjournaled.
+    let wfp_inventory = match wfp_engine.as_mut() {
+        Some(engine) => match observe_agent_wfp_filters(engine) {
+            Ok(observed) => observed,
+            Err(error) => {
+                add_bounded_diagnostic(&mut diagnostics, format!("WFP observer: {error}"));
+                Observation::Unknown
+            }
+        },
+        None => Observation::Unknown,
+    };
+    let expected_wfp = journals
+        .iter()
+        .flat_map(|journal| journal.firewall_filters.iter().cloned())
+        .collect::<Vec<_>>();
+    let wfp_inventory_disposition =
+        assess_firewall_filter_inventory(&expected_wfp, &wfp_inventory);
+    if matches!(
+        wfp_inventory_disposition,
+        ResourceDisposition::Conflict | ResourceDisposition::Unknown
+    ) {
+        add_bounded_diagnostic(
+            &mut diagnostics,
+            format!("The complete product WFP inventory is {wfp_inventory_disposition:?}; every affected session remains blocked."),
+        );
+    }
+
+    // Overlapping journal identities are ambiguous: a shared destination
+    // prefix or DNS interface cannot be independently attributed to multiple
+    // sessions. Keep those observations Unknown rather than implying that
+    // either session can safely restore the shared resource.
+    let mut engine_identity_counts = BTreeMap::<(u32, u64), u32>::new();
+    let mut tunnel_guid_counts = BTreeMap::<String, u32>::new();
+    let mut route_key_counts = BTreeMap::<String, u32>::new();
+    let mut dns_index_counts = BTreeMap::<u32, u32>::new();
+    let mut dns_guid_counts = BTreeMap::<String, u32>::new();
+    for journal in journals {
+        if let Some(engine) = &journal.engine {
+            *engine_identity_counts
+                .entry((engine.process_id, engine.creation_time_100ns))
+                .or_default() += 1;
+        }
+        if let Some(tunnel) = &journal.tunnel {
+            *tunnel_guid_counts
+                .entry(tunnel.interface_guid.to_ascii_lowercase())
+                .or_default() += 1;
+        }
+        for record in &journal.routes {
+            let key = crate::recovery_observer::canonicalize_prefix(&record.destination_prefix)
+                .unwrap_or_else(|_| record.destination_prefix.clone());
+            *route_key_counts.entry(key).or_default() += 1;
+        }
+        for record in &journal.dns {
+            *dns_index_counts.entry(record.interface_index).or_default() += 1;
+            if let Some(guid) = record.interface_guid.as_deref() {
+                *dns_guid_counts.entry(guid.to_ascii_lowercase()).or_default() += 1;
+            }
+        }
+    }
+    let ambiguous_engine_identities = engine_identity_counts
+        .into_iter()
+        .filter_map(|(identity, count)| (count > 1).then_some(identity))
+        .collect::<BTreeSet<_>>();
+    let ambiguous_tunnel_guids = tunnel_guid_counts
+        .into_iter()
+        .filter_map(|(guid, count)| (count > 1).then_some(guid))
+        .collect::<BTreeSet<_>>();
+    let mut ambiguous_route_keys = BTreeSet::new();
+    let mut ambiguous_dns_interfaces = BTreeSet::new();
+    for journal in journals {
+        for record in &journal.routes {
+            let key = crate::recovery_observer::canonicalize_prefix(&record.destination_prefix)
+                .unwrap_or_else(|_| record.destination_prefix.clone());
+            if route_key_counts.get(&key).copied().unwrap_or(0) > 1 {
+                ambiguous_route_keys.insert(key);
+            }
+        }
+        for record in &journal.dns {
+            let duplicate_index = dns_index_counts.get(&record.interface_index).copied().unwrap_or(0) > 1;
+            let duplicate_guid = record.interface_guid.as_deref().is_some_and(|guid| {
+                dns_guid_counts.get(&guid.to_ascii_lowercase()).copied().unwrap_or(0) > 1
+            });
+            if duplicate_index || duplicate_guid {
+                ambiguous_dns_interfaces.insert(record.interface_index);
+            }
+        }
+    }
+
+    let mut verified_clean_sessions = 0u32;
+    let mut blocked_sessions = 0u32;
+    let mut session_summaries = Vec::new();
+
+    for journal in journals {
+        let engine = match journal.engine.as_ref() {
+            Some(expected)
+                if ambiguous_engine_identities
+                    .contains(&(expected.process_id, expected.creation_time_100ns)) =>
+            {
+                add_bounded_diagnostic(
+                    &mut diagnostics,
+                    "An engine process identity is referenced by multiple unresolved sessions.",
+                );
+                Observation::Unknown
+            }
+            Some(expected) => match observe_recorded_engine_process(expected) {
+                Ok(observed) => observed,
+                Err(error) => {
+                    add_bounded_diagnostic(&mut diagnostics, format!("Engine observer: {error}"));
+                    Observation::Unknown
+                }
+            },
+            None => Observation::Absent,
+        };
+
+        let tunnel = match journal.tunnel.as_ref() {
+            Some(expected)
+                if ambiguous_tunnel_guids.contains(&expected.interface_guid.to_ascii_lowercase()) =>
+            {
+                add_bounded_diagnostic(
+                    &mut diagnostics,
+                    "A tunnel interface GUID is referenced by multiple unresolved sessions.",
+                );
+                Observation::Unknown
+            }
+            Some(expected) => match observe_recorded_tunnel_interface(expected) {
+                Ok(observed) => observed,
+                Err(error) => {
+                    add_bounded_diagnostic(&mut diagnostics, format!("Tunnel observer: {error}"));
+                    Observation::Unknown
+                }
+            },
+            None => Observation::Absent,
+        };
+
+        let mut routes = match observe_recorded_routes(journal) {
+            Ok(observed) => observed,
+            Err(error) => {
+                add_bounded_diagnostic(&mut diagnostics, format!("Route observer: {error}"));
+                journal.routes.iter().map(|record| {
+                    (record.destination_prefix.clone(), Observation::Unknown)
+                }).collect::<BTreeMap<_, _>>()
+            }
+        };
+        // An omitted key is never equivalent to Absent, even if an observer
+        // implementation changes later to return a partial map.
+        for record in &journal.routes {
+            let key = crate::recovery_observer::canonicalize_prefix(&record.destination_prefix)
+                .unwrap_or_else(|_| record.destination_prefix.clone());
+            if ambiguous_route_keys.contains(&key) {
+                routes.insert(record.destination_prefix.clone(), Observation::Unknown);
+            } else {
+                routes.entry(record.destination_prefix.clone())
+                    .or_insert(Observation::Unknown);
+            }
+        }
+
+        let mut dns = BTreeMap::new();
+        for record in &journal.dns {
+            let observed = if ambiguous_dns_interfaces.contains(&record.interface_index) {
+                add_bounded_diagnostic(
+                    &mut diagnostics,
+                    format!("DNS interface {} is referenced by multiple unresolved sessions; its state is ambiguous.", record.interface_index),
+                );
+                Observation::Unknown
+            } else {
+                match observe_recorded_dns(record) {
+                    Ok(observed) => observed,
+                    Err(error) => {
+                        add_bounded_diagnostic(&mut diagnostics, format!("DNS observer: {error}"));
+                        Observation::Unknown
+                    }
+                }
+            };
+            dns.insert(record.interface_index, observed);
+        }
+
+        let firewall_filters = match wfp_inventory_disposition {
+            ResourceDisposition::Conflict | ResourceDisposition::Unknown => Observation::Unknown,
+            ResourceDisposition::VerifiedClean | ResourceDisposition::NeedsCleanup => {
+                match &wfp_inventory {
+                    Observation::Present(all_filters) => {
+                        let session_filter_keys = journal
+                            .firewall_filters
+                            .iter()
+                            .filter_map(|record| record.filter_key.as_deref())
+                            .map(str::to_ascii_lowercase)
+                            .collect::<BTreeSet<_>>();
+                        let session_filters = all_filters
+                            .iter()
+                            .filter(|record| {
+                                record.filter_key.as_deref().is_some_and(|key| {
+                                    session_filter_keys.contains(&key.to_ascii_lowercase())
+                                })
+                            })
+                            .cloned()
+                            .collect();
+                        Observation::Present(session_filters)
+                    }
+                    Observation::Absent | Observation::Unknown => Observation::Unknown,
+                }
+            }
+            ResourceDisposition::NeedsRestore => Observation::Unknown,
+        };
+
+        let snapshot = RecoverySnapshot {
+            engine,
+            tunnel,
+            routes,
+            dns,
+            firewall_filters,
+        };
+        let assessment = assess_recovery(journal, &snapshot);
+        let verified_clean = assessment.can_remove_journal;
+
+        if verified_clean {
+            verified_clean_sessions = verified_clean_sessions.saturating_add(1);
+        } else {
+            blocked_sessions = blocked_sessions.saturating_add(1);
+        }
+
+        // The full assessment is computed for every session. Only the first two
+        // compact summaries cross IPC; aggregate counts cover every journal.
+        if session_summaries.len() < 2 {
+            session_summaries.push(AgentRecoverySessionStatus {
+                session_id: journal.session_id,
+                revision: journal.revision,
+                phase: format!("{:?}", journal.phase),
+                engine: assessment.engine,
+                tunnel: assessment.tunnel,
+                routes: disposition_counts(assessment.routes.iter().map(|item| item.disposition)),
+                dns: disposition_counts(assessment.dns.iter().map(|item| item.disposition)),
+                firewall_filters: assessment.firewall_filters,
+                verified_clean,
+            });
+        }
+    }
+
+    let total_sessions = u32::try_from(journals.len()).unwrap_or(u32::MAX);
+    let omitted_sessions = total_sessions.saturating_sub(session_summaries.len() as u32);
+    let state = if blocked_sessions > 0 {
+        AgentRecoveryState::Blocked
+    } else {
+        AgentRecoveryState::VerifiedCleanRetained
+    };
+
+    AgentRecoveryStatus {
+        state,
+        journal_inventory_complete: true,
+        total_sessions,
+        verified_clean_sessions,
+        blocked_sessions,
+        omitted_sessions,
+        journal_retained: true,
+        sessions: session_summaries,
+        diagnostics,
+    }
+}
+
+#[cfg(not(windows))]
+fn assess_startup_journals(journals: &[RecoveryJournal]) -> AgentRecoveryStatus {
+    if journals.is_empty() {
+        return AgentRecoveryStatus {
+            state: AgentRecoveryState::Clear,
+            journal_inventory_complete: true,
+            total_sessions: 0,
+            verified_clean_sessions: 0,
+            blocked_sessions: 0,
+            omitted_sessions: 0,
+            journal_retained: false,
+            sessions: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+    }
+
+    let unknown_routes = |journal: &RecoveryJournal| AgentRecoveryDispositionCounts {
+        unknown: journal.routes.len() as u32,
+        ..AgentRecoveryDispositionCounts::default()
+    };
+    let unknown_dns = |journal: &RecoveryJournal| AgentRecoveryDispositionCounts {
+        unknown: journal.dns.len() as u32,
+        ..AgentRecoveryDispositionCounts::default()
+    };
+    let sessions = journals.iter().take(2).map(|journal| AgentRecoverySessionStatus {
+        session_id: journal.session_id,
+        revision: journal.revision,
+        phase: format!("{:?}", journal.phase),
+        engine: ResourceDisposition::Unknown,
+        tunnel: ResourceDisposition::Unknown,
+        routes: unknown_routes(journal),
+        dns: unknown_dns(journal),
+        firewall_filters: ResourceDisposition::Unknown,
+        verified_clean: false,
+    }).collect::<Vec<_>>();
+
+    AgentRecoveryStatus {
+        state: AgentRecoveryState::Blocked,
+        journal_inventory_complete: true,
+        total_sessions: u32::try_from(journals.len()).unwrap_or(u32::MAX),
+        verified_clean_sessions: 0,
+        blocked_sessions: u32::try_from(journals.len()).unwrap_or(u32::MAX),
+        omitted_sessions: u32::try_from(journals.len().saturating_sub(sessions.len())).unwrap_or(u32::MAX),
+        journal_retained: true,
+        sessions,
+        diagnostics: vec!["Live Windows recovery observers are unavailable on this platform.".to_string()],
+    }
+}
+
+/// Called exactly once per Agent service process, before the pipe listener is
+/// marked RUNNING. This method performs observation only and never mutates OS
+/// resources or removes a journal.
+pub(crate) fn initialize_startup_recovery() -> AgentRecoveryStatus {
     STARTUP_RECOVERY_STATUS
         .get_or_init(inspect_startup_recovery_journal)
         .clone()
 }
 
-/// The status endpoint can report clean only after the service startup gate has
-/// loaded and validated the protected journal directory in this process.
-pub(crate) fn startup_recovery_status() -> Result<(), String> {
+/// The status endpoint receives a compact structured copy of the read-only
+/// assessment. Even a verified-clean session keeps its journal for a separate,
+/// explicitly reviewed cleanup protocol.
+pub(crate) fn startup_recovery_status() -> AgentRecoveryStatus {
     STARTUP_RECOVERY_STATUS
         .get()
         .cloned()
-        .unwrap_or_else(|| Err("Agent startup recovery validation has not completed.".to_string()))
+        .unwrap_or_else(|| empty_blocked_status(
+            "Agent startup recovery assessment has not completed.".to_string()
+        ))
 }
 
 #[cfg(test)]
 mod startup_recovery_tests {
     use super::*;
-    use crate::recovery_journal::{JournalPhase, RecoveryJournal};
+    use crate::recovery_journal::JournalPhase;
 
     #[test]
-    fn empty_journal_set_allows_clean_startup() {
-        assert!(validate_startup_journals(&[]).is_ok());
+    fn empty_journal_set_reports_clear_inventory() {
+        let status = assess_startup_journals(&[]);
+        assert!(matches!(status.state, AgentRecoveryState::Clear));
+        assert_eq!(status.total_sessions, 0);
+        assert!(!status.journal_retained);
+        assert!(status.journal_inventory_complete);
     }
 
     #[test]
-    fn any_unresolved_session_blocks_clean_startup() {
+    fn unresolved_journals_are_never_assumed_clean_without_live_observers() {
         let mut journal = RecoveryJournal::new(41);
         journal.phase = JournalPhase::RecoveryRequired;
-        let error = validate_startup_journals(&[journal]).unwrap_err();
-        assert!(error.contains("1 unresolved recovery journal"));
-        assert!(error.contains("RecoveryRequired"));
-        assert!(error.contains("fail-closed"));
+        // Deliberately point at this still-running test process but use a
+        // mismatching creation time. This deterministically produces Conflict
+        // even on Windows runners where the product WFP namespace is present.
+        journal.engine = Some(crate::recovery_journal::EngineProcessRecord {
+            process_id: std::process::id(),
+            creation_time_100ns: 1,
+        });
+        let status = assess_startup_journals(&[journal]);
+        assert!(status.is_blocked());
+        assert_eq!(status.total_sessions, 1);
+        assert_eq!(status.blocked_sessions, 1);
+        assert!(status.journal_retained);
     }
 
     #[test]
-    fn multiple_unresolved_sessions_are_all_reported_as_blocking() {
-        let journals = [RecoveryJournal::new(41), RecoveryJournal::new(42)];
-        let error = validate_startup_journals(&journals).unwrap_err();
-        assert!(error.contains("2 unresolved recovery journal"));
+    fn diagnostic_output_is_bounded_and_does_not_change_status() {
+        let status = empty_blocked_status("x".repeat(512));
+        assert!(status.is_blocked());
+        assert!(status.diagnostics[0].len() <= 120);
+        assert!(status.detail_summary().len() <= 1100);
     }
 }
 
@@ -213,8 +623,9 @@ mod windows_service {
         // Load every committed checkpoint before exposing the pipe as RUNNING.
         // A missing, unsafe, corrupt, or unresolved journal leaves the service
         // available for read-only diagnostics but its status endpoint is rejected.
-        if let Err(error) = crate::agent_service::initialize_startup_recovery() {
-            eprintln!("Agent startup recovery is blocked: {error}");
+        let recovery = crate::agent_service::initialize_startup_recovery();
+        if recovery.is_blocked() {
+            eprintln!("Agent startup recovery is blocked: {}", recovery.detail_summary());
         }
 
         // The service is not reported as RUNNING until its protected, local-only

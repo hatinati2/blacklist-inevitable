@@ -881,7 +881,7 @@ fn sockaddr_address(
 }
 
 #[cfg(windows)]
-fn canonicalize_prefix(value: &str) -> Result<String, String> {
+pub(crate) fn canonicalize_prefix(value: &str) -> Result<String, String> {
     let (address, length) = value
         .split_once('/')
         .ok_or_else(|| "The journal contains an invalid route prefix.".to_string())?;
@@ -996,6 +996,236 @@ mod tests {
         assert!(super::canonicalize_ip_prefix("203.0.113.1".parse().unwrap(), 33).is_err());
         assert!(super::canonicalize_ip_prefix("2001:db8::1".parse().unwrap(), 129).is_err());
     }
+    #[cfg(windows)]
+    #[test]
+    fn live_engine_observer_matches_the_current_process_creation_identity() {
+        use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
+        use windows_sys::Win32::System::Threading::{
+            GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+
+        let pid = std::process::id();
+        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        assert!(!process.is_null(), "OpenProcess failed with {}", unsafe {
+            windows_sys::Win32::Foundation::GetLastError()
+        });
+
+        let mut creation = FILETIME::default();
+        let mut exit = FILETIME::default();
+        let mut kernel = FILETIME::default();
+        let mut user = FILETIME::default();
+        let ok = unsafe {
+            GetProcessTimes(process, &mut creation, &mut exit, &mut kernel, &mut user)
+        };
+        let error = unsafe { windows_sys::Win32::Foundation::GetLastError() };
+        unsafe { CloseHandle(process) };
+        assert_ne!(ok, 0, "GetProcessTimes failed with {error}");
+
+        let expected = crate::recovery_journal::EngineProcessRecord {
+            process_id: pid,
+            creation_time_100ns: super::filetime_to_ticks(
+                creation.dwLowDateTime,
+                creation.dwHighDateTime,
+            ),
+        };
+        assert_ne!(expected.creation_time_100ns, 0);
+        let observed = super::observe_recorded_engine_process(&expected)
+            .expect("the current process identity must be readable");
+        assert_eq!(observed, super::Observation::Present(expected));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn live_tunnel_observer_reads_stable_interface_and_unicast_inventory() {
+        use windows_sys::Win32::NetworkManagement::IpHelper::{
+            GetIfTable2, MIB_IF_ROW2, MIB_IF_TABLE2,
+        };
+
+        let mut table: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
+        let status = unsafe { GetIfTable2(&mut table) };
+        assert_eq!(status, 0, "GetIfTable2 failed with {status}");
+        assert!(!table.is_null(), "GetIfTable2 returned a null table");
+        let _table = super::OwnedIpHelperTable(table.cast());
+
+        let count = unsafe { (*table).NumEntries as usize };
+        assert!(count > 0 && count <= 2048, "invalid interface count {count}");
+        let rows = unsafe {
+            std::slice::from_raw_parts(
+                std::ptr::addr_of!((*table).Table).cast::<MIB_IF_ROW2>(),
+                count,
+            )
+        };
+
+        let mut observed = None;
+        let mut errors = Vec::new();
+        for row in rows {
+            let guid = uuid::Uuid::from_u128(super::guid_to_u128(&row.InterfaceGuid));
+            let interface_index = row.InterfaceIndex;
+            let interface_luid = unsafe { row.InterfaceLuid.Value };
+            if guid.is_nil() || interface_index == 0 || interface_luid == 0 {
+                continue;
+            }
+
+            // The observer selects only by the stable GUID. Other expected
+            // fields are intentionally placeholders; the returned live record
+            // is the OS snapshot and is checked for internal consistency below.
+            let expected = crate::recovery_journal::TunnelInterfaceRecord {
+                interface_guid: guid.to_string(),
+                interface_index,
+                alias: String::new(),
+                mtu: row.Mtu,
+                addresses: Vec::new(),
+                address_details: Vec::new(),
+            };
+            match super::observe_recorded_tunnel_interface(&expected) {
+                Ok(super::Observation::Present(actual)) => {
+                    assert_eq!(actual.interface_guid, expected.interface_guid);
+                    assert_eq!(actual.interface_index, interface_index);
+                    let address_set = actual.address_details.iter()
+                        .map(|detail| detail.address)
+                        .collect::<std::collections::BTreeSet<_>>();
+                    let compatibility_set = actual.addresses.iter().copied()
+                        .collect::<std::collections::BTreeSet<_>>();
+                    assert_eq!(address_set, compatibility_set);
+                    assert_eq!(address_set.len(), actual.address_details.len());
+                    observed = Some(actual);
+                    break;
+                }
+                Ok(super::Observation::Absent | super::Observation::Unknown) => {}
+                Err(error) if errors.len() < 8 => errors.push(error),
+                Err(_) => {}
+            }
+        }
+
+        assert!(
+            observed.is_some(),
+            "no live interface produced a stable GUID/LUID and unicast snapshot: {}",
+            errors.join(" | ")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn live_route_observer_matches_a_unique_current_ipv4_or_ipv6_route() {
+        use crate::recovery_journal::{RecoveryJournal, RouteMutationRecord, RouteState};
+        use windows_sys::Win32::NetworkManagement::IpHelper::{
+            GetIpForwardTable2, MIB_IPFORWARD_ROW2, MIB_IPFORWARD_TABLE2,
+        };
+        use windows_sys::Win32::Networking::WinSock::AF_UNSPEC;
+
+        let mut table: *mut MIB_IPFORWARD_TABLE2 = std::ptr::null_mut();
+        let status = unsafe { GetIpForwardTable2(AF_UNSPEC, &mut table) };
+        assert_eq!(status, 0, "GetIpForwardTable2 failed with {status}");
+        assert!(!table.is_null(), "GetIpForwardTable2 returned a null route table");
+        let _table = super::OwnedIpHelperTable(table.cast());
+
+        let count = unsafe { (*table).NumEntries as usize };
+        assert!(count > 0 && count <= 16_384, "invalid route count {count}");
+        let rows = unsafe {
+            std::slice::from_raw_parts(
+                std::ptr::addr_of!((*table).Table).cast::<MIB_IPFORWARD_ROW2>(),
+                count,
+            )
+        };
+
+        let mut candidates = Vec::new();
+        let mut prefix_counts = std::collections::BTreeMap::<String, usize>::new();
+        for row in rows {
+            let address = match super::sockaddr_address(&row.DestinationPrefix.Prefix) {
+                Ok(address) => address,
+                Err(_) => continue,
+            };
+            let prefix = match super::canonicalize_ip_prefix(
+                address,
+                row.DestinationPrefix.PrefixLength,
+            ) {
+                Ok(prefix) => prefix,
+                Err(_) => continue,
+            };
+            let next_hop_address = match super::sockaddr_address(&row.NextHop) {
+                Ok(next_hop) if next_hop.is_ipv4() == address.is_ipv4() => next_hop,
+                _ => continue,
+            };
+            if row.InterfaceIndex == 0 || unsafe { row.InterfaceLuid.Value } == 0 {
+                continue;
+            }
+            let next_hop = if next_hop_address.is_unspecified() {
+                None
+            } else {
+                Some(next_hop_address)
+            };
+            let state = RouteState {
+                interface_index: row.InterfaceIndex,
+                interface_luid: Some(unsafe { row.InterfaceLuid.Value }),
+                next_hop,
+                metric: row.Metric,
+            };
+            *prefix_counts.entry(prefix.clone()).or_default() += 1;
+            candidates.push((prefix, state));
+        }
+
+        let (destination_prefix, expected_state) = candidates
+            .into_iter()
+            .find(|(prefix, _)| prefix_counts.get(prefix).copied() == Some(1))
+            .expect("the Windows runner must expose a unique route prefix");
+
+        let mut journal = RecoveryJournal::new(0xA11CE);
+        journal.routes.push(RouteMutationRecord {
+            destination_prefix: destination_prefix.clone(),
+            applied: expected_state.clone(),
+            previous: None,
+        });
+        let observed = super::observe_recorded_routes(&journal)
+            .expect("the live route inventory must be readable");
+        assert_eq!(
+            observed.get(&destination_prefix),
+            Some(&super::Observation::Present(expected_state))
+        );
+    }
+
+    /// Open the real BFE engine and run the provider-scoped read-only
+    /// enumeration. On a fresh runner the product namespace may not exist;
+    /// that is an expected Unknown/error state, never an empty inventory.
+    /// This test deliberately does not call ensure_persistent_namespace.
+    #[cfg(windows)]
+    #[test]
+    fn live_wfp_observer_is_read_only_and_fails_closed_without_product_namespace() {
+        let mut engine = crate::wfp_engine::WfpEngine::open_local()
+            .expect("the Windows runner must allow a read-only BFE engine session");
+        let result = super::observe_agent_wfp_filters(&mut engine);
+        match result {
+            Ok(super::Observation::Present(filters)) => {
+                assert!(filters.len() <= 256, "WFP observer exceeded its journal bound");
+                let mut filter_keys = std::collections::BTreeSet::new();
+                let mut runtime_ids = std::collections::BTreeSet::new();
+                for filter in &filters {
+                    let provider = uuid::Uuid::parse_str(&filter.provider_key)
+                        .expect("WFP provider key must be a GUID");
+                    let layer = uuid::Uuid::parse_str(&filter.layer_key)
+                        .expect("WFP layer key must be a GUID");
+                    let key = uuid::Uuid::parse_str(
+                        filter.filter_key.as_deref().expect("live WFP filter needs a stable key")
+                    ).expect("WFP filter key must be a GUID");
+                    assert!(!provider.is_nil());
+                    assert!(!layer.is_nil());
+                    assert!(!key.is_nil());
+                    assert!(filter_keys.insert(key), "duplicate stable WFP filter key");
+                    assert_ne!(filter.filter_id, 0);
+                    assert!(runtime_ids.insert(filter.filter_id), "duplicate runtime WFP filter ID");
+                }
+            }
+            Ok(super::Observation::Unknown | super::Observation::Absent) => {
+                panic!("WFP observer must return a complete Present inventory or an error")
+            }
+            Err(error) => {
+                // Missing or inaccessible provider namespace is not interpreted
+                // as empty. Startup maps this error to Observation::Unknown.
+                assert!(!error.trim().is_empty());
+                eprintln!("Read-only WFP inventory is Unknown on this runner: {error}");
+            }
+        }
+    }
+
     /// This test is intentionally read-only. It exercises the native DNS APIs
     /// on a real Windows runner and asserts that the current probe never
     /// mislabels its one-family response as a complete dual-stack snapshot.

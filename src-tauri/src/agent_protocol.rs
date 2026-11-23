@@ -25,6 +25,97 @@ const MAX_CREDENTIALS: usize = 4;
 const MAX_CREDENTIAL_KEY_BYTES: usize = 32;
 const MAX_CREDENTIAL_VALUE_BYTES: usize = 8192;
 
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AgentRecoveryState {
+    Clear,
+    VerifiedCleanRetained,
+    Blocked,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentRecoveryDispositionCounts {
+    pub verified_clean: u32,
+    pub needs_cleanup: u32,
+    pub needs_restore: u32,
+    pub conflict: u32,
+    pub unknown: u32,
+}
+
+impl AgentRecoveryDispositionCounts {
+    pub fn compact(&self) -> String {
+        format!(
+            "clean:{},cleanup:{},restore:{},conflict:{},unknown:{}",
+            self.verified_clean, self.needs_cleanup, self.needs_restore,
+            self.conflict, self.unknown
+        )
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentRecoverySessionStatus {
+    pub session_id: u64,
+    pub revision: u64,
+    pub phase: String,
+    pub engine: crate::recovery_assessment::ResourceDisposition,
+    pub tunnel: crate::recovery_assessment::ResourceDisposition,
+    pub routes: AgentRecoveryDispositionCounts,
+    pub dns: AgentRecoveryDispositionCounts,
+    pub firewall_filters: crate::recovery_assessment::ResourceDisposition,
+    pub verified_clean: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentRecoveryStatus {
+    pub state: AgentRecoveryState,
+    pub journal_inventory_complete: bool,
+    pub total_sessions: u32,
+    pub verified_clean_sessions: u32,
+    pub blocked_sessions: u32,
+    pub omitted_sessions: u32,
+    pub journal_retained: bool,
+    pub sessions: Vec<AgentRecoverySessionStatus>,
+    pub diagnostics: Vec<String>,
+}
+
+impl AgentRecoveryStatus {
+    pub fn is_blocked(&self) -> bool {
+        // A journal is not considered reconciled merely because the current
+        // read-only snapshot looks clean. Until a separate reviewed cleanup
+        // protocol disposes of retained journals, startup remains blocked.
+        !matches!(self.state, AgentRecoveryState::Clear)
+    }
+
+    pub fn detail_summary(&self) -> String {
+        let state = match self.state {
+            AgentRecoveryState::Clear => "clear",
+            AgentRecoveryState::VerifiedCleanRetained => "verified-clean-journal-retained",
+            AgentRecoveryState::Blocked => "blocked",
+        };
+        let headline = match self.state {
+            AgentRecoveryState::Clear => "Agent startup recovery is clean.".to_string(),
+            AgentRecoveryState::VerifiedCleanRetained => {
+                "Agent startup recovery is blocked pending journal disposition: unresolved recovery journals are verified clean but retained.".to_string()
+            }
+            AgentRecoveryState::Blocked if self.total_sessions > 0 => format!(
+                "Agent startup recovery is blocked: {} unresolved recovery journal(s) require review.",
+                self.total_sessions
+            ),
+            AgentRecoveryState::Blocked => {
+                "Agent startup recovery is blocked: the unresolved recovery journal inventory is unavailable.".to_string()
+            }
+        };
+        format!(
+            "{headline} Read-only assessment: state={state}; sessions={}; verifiedClean={}; blocked={}; inventoryComplete={}; journalRetained={}. No cleanup, rollback, or journal deletion was performed; VPN operations remain disabled.",
+            self.total_sessions, self.verified_clean_sessions, self.blocked_sessions,
+            self.journal_inventory_complete, self.journal_retained
+        )
+    }
+}
+
 /// A strict, secret-free profile representation supplied by the unelevated UI.
 /// The agent re-validates this data and never accepts an arbitrary engine JSON,
 /// executable path, working directory, or shell command from the IPC client.
@@ -107,6 +198,8 @@ pub struct AgentResponse {
     /// Sanitized text only. Never include raw engine config, credentials, file
     /// paths containing secret material, or unfiltered child-process output.
     pub detail: Option<String>,
+    /// Bounded, secret-free read-only assessment. Never authorizes mutation by itself.
+    pub recovery: Option<AgentRecoveryStatus>,
 }
 
 impl AgentResponse {
@@ -117,6 +210,7 @@ impl AgentResponse {
             status: AgentResponseStatus::Ok,
             connection,
             detail: None,
+            recovery: None,
         }
     }
 
@@ -127,6 +221,7 @@ impl AgentResponse {
             status: AgentResponseStatus::Rejected,
             connection: None,
             detail: Some(sanitize_detail(detail.into(), &BTreeMap::new())),
+            recovery: None,
         }
     }
 
@@ -142,6 +237,7 @@ impl AgentResponse {
             status: AgentResponseStatus::Failed,
             connection,
             detail: Some(sanitize_detail(detail.into(), credentials)),
+            recovery: None,
         }
     }
 }
@@ -655,6 +751,89 @@ mod tests {
         let mut request = connect_request();
         request.version = AGENT_PROTOCOL_VERSION + 1;
         assert!(validate_agent_request(&request).is_err());
+    }
+
+    #[test]
+    fn verified_clean_but_retained_journals_still_block_startup_status() {
+        let status = AgentRecoveryStatus {
+            state: AgentRecoveryState::VerifiedCleanRetained,
+            journal_inventory_complete: true,
+            total_sessions: 1,
+            verified_clean_sessions: 1,
+            blocked_sessions: 0,
+            omitted_sessions: 0,
+            journal_retained: true,
+            sessions: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        assert!(status.is_blocked());
+        let detail = status.detail_summary();
+        assert!(detail.contains("startup recovery"));
+        assert!(detail.contains("unresolved recovery journal"));
+        assert!(detail.contains("verified clean but retained"));
+    }
+
+    #[test]
+    fn blocked_recovery_summary_preserves_installer_diagnostic_contract() {
+        let status = AgentRecoveryStatus {
+            state: AgentRecoveryState::Blocked,
+            journal_inventory_complete: true,
+            total_sessions: 1,
+            verified_clean_sessions: 0,
+            blocked_sessions: 1,
+            omitted_sessions: 0,
+            journal_retained: true,
+            sessions: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let detail = status.detail_summary();
+        assert!(detail.contains("startup recovery"));
+        assert!(detail.contains("unresolved recovery journal"));
+        assert!(detail.contains("No cleanup, rollback, or journal deletion was performed"));
+    }
+
+    #[test]
+    fn structured_recovery_status_fits_the_bounded_agent_response_frame() {
+        let counts = AgentRecoveryDispositionCounts {
+            verified_clean: u32::MAX,
+            needs_cleanup: u32::MAX,
+            needs_restore: u32::MAX,
+            conflict: u32::MAX,
+            unknown: u32::MAX,
+        };
+        let session = AgentRecoverySessionStatus {
+            session_id: u64::MAX,
+            revision: u64::MAX,
+            phase: "RecoveryRequired".to_string(),
+            engine: crate::recovery_assessment::ResourceDisposition::Unknown,
+            tunnel: crate::recovery_assessment::ResourceDisposition::Conflict,
+            routes: counts.clone(),
+            dns: counts,
+            firewall_filters: crate::recovery_assessment::ResourceDisposition::Unknown,
+            verified_clean: false,
+        };
+        let recovery = AgentRecoveryStatus {
+            state: AgentRecoveryState::Blocked,
+            journal_inventory_complete: false,
+            total_sessions: u32::MAX,
+            verified_clean_sessions: u32::MAX,
+            blocked_sessions: u32::MAX,
+            omitted_sessions: u32::MAX,
+            journal_retained: true,
+            sessions: vec![session.clone(), session],
+            diagnostics: vec!["x".repeat(120), "y".repeat(120)],
+        };
+        let mut response = AgentResponse::rejected(
+            "recovery-01".to_string(),
+            recovery.detail_summary(),
+        );
+        response.recovery = Some(recovery);
+        let encoded = serde_json::to_vec(&response).unwrap();
+        assert!(encoded.len() <= 2048, "response frame was {} bytes", encoded.len());
+
+        let value: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(value["recovery"]["state"], "blocked");
+        assert_eq!(value["recovery"]["sessions"][0]["routes"]["unknown"], u32::MAX);
     }
 
     #[test]

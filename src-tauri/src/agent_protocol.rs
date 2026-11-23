@@ -25,7 +25,7 @@ const MAX_CREDENTIALS: usize = 4;
 const MAX_CREDENTIAL_KEY_BYTES: usize = 32;
 const MAX_CREDENTIAL_VALUE_BYTES: usize = 8192;
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum AgentRecoveryState {
     Clear,
@@ -33,7 +33,7 @@ pub enum AgentRecoveryState {
     Blocked,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentRecoveryDispositionCounts {
     pub verified_clean: u32,
@@ -53,7 +53,7 @@ impl AgentRecoveryDispositionCounts {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentRecoverySessionStatus {
     pub session_id: u64,
@@ -67,7 +67,7 @@ pub struct AgentRecoverySessionStatus {
     pub verified_clean: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentRecoveryStatus {
     pub state: AgentRecoveryState,

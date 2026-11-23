@@ -1183,6 +1183,49 @@ mod tests {
         );
     }
 
+    /// Open the real BFE engine and run the provider-scoped read-only
+    /// enumeration. On a fresh runner the product namespace may not exist;
+    /// that is an expected Unknown/error state, never an empty inventory.
+    /// This test deliberately does not call ensure_persistent_namespace.
+    #[cfg(windows)]
+    #[test]
+    fn live_wfp_observer_is_read_only_and_fails_closed_without_product_namespace() {
+        let mut engine = crate::wfp_engine::WfpEngine::open_local()
+            .expect("the Windows runner must allow a read-only BFE engine session");
+        let result = super::observe_agent_wfp_filters(&mut engine);
+        match result {
+            Ok(super::Observation::Present(filters)) => {
+                assert!(filters.len() <= 256, "WFP observer exceeded its journal bound");
+                let mut filter_keys = std::collections::BTreeSet::new();
+                let mut runtime_ids = std::collections::BTreeSet::new();
+                for filter in &filters {
+                    let provider = uuid::Uuid::parse_str(&filter.provider_key)
+                        .expect("WFP provider key must be a GUID");
+                    let layer = uuid::Uuid::parse_str(&filter.layer_key)
+                        .expect("WFP layer key must be a GUID");
+                    let key = uuid::Uuid::parse_str(
+                        filter.filter_key.as_deref().expect("live WFP filter needs a stable key")
+                    ).expect("WFP filter key must be a GUID");
+                    assert!(!provider.is_nil());
+                    assert!(!layer.is_nil());
+                    assert!(!key.is_nil());
+                    assert!(filter_keys.insert(key), "duplicate stable WFP filter key");
+                    assert_ne!(filter.filter_id, 0);
+                    assert!(runtime_ids.insert(filter.filter_id), "duplicate runtime WFP filter ID");
+                }
+            }
+            Ok(super::Observation::Unknown | super::Observation::Absent) => {
+                panic!("WFP observer must return a complete Present inventory or an error")
+            }
+            Err(error) => {
+                // Missing or inaccessible provider namespace is not interpreted
+                // as empty. Startup maps this error to Observation::Unknown.
+                assert!(!error.trim().is_empty());
+                eprintln!("Read-only WFP inventory is Unknown on this runner: {error}");
+            }
+        }
+    }
+
     /// This test is intentionally read-only. It exercises the native DNS APIs
     /// on a real Windows runner and asserts that the current probe never
     /// mislabels its one-family response as a complete dual-stack snapshot.

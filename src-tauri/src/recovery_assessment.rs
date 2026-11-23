@@ -7,6 +7,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use serde::Serialize;
+
 use crate::recovery_journal::{
     DnsConfiguration, DnsMutationRecord, EngineProcessRecord, FirewallFilterRecord,
     RecoveryJournal, RouteMutationRecord, RouteState, TunnelInterfaceRecord,
@@ -22,7 +24,8 @@ pub enum Observation<T> {
     Present(T),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub enum ResourceDisposition {
     /// A fresh OS observation proves the recorded resource is already absent
     /// or the previous configuration has already been restored.

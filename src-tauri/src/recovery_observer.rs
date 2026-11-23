@@ -881,7 +881,7 @@ fn sockaddr_address(
 }
 
 #[cfg(windows)]
-fn canonicalize_prefix(value: &str) -> Result<String, String> {
+pub(crate) fn canonicalize_prefix(value: &str) -> Result<String, String> {
     let (address, length) = value
         .split_once('/')
         .ok_or_else(|| "The journal contains an invalid route prefix.".to_string())?;

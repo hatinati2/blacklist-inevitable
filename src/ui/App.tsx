@@ -117,6 +117,42 @@ type RealDelaySettings = {
   timeoutSeconds: number;
 };
 
+type DestinationAction = "direct" | "vpn" | "block";
+type TrafficRoutingMode = "global" | "rule";
+type DestinationRule = {
+  domains: string[];
+  domainSuffixes: string[];
+  ipCidrs: string[];
+  action: DestinationAction;
+};
+type DestinationRoutingPolicy = {
+  mode: TrafficRoutingMode;
+  bypassPrivate: boolean;
+  bypassIran: boolean;
+  customRules: DestinationRule[];
+};
+type ApplicationRoute = "vpn" | "direct" | "block";
+type SplitTunnelMode = "fullTunnel" | "directOnly" | "includeSelected" | "excludeSelected" | "custom";
+type SplitTunnelApplication = { executablePath: string; action: ApplicationRoute };
+type SplitTunnelPolicy = {
+  mode: SplitTunnelMode;
+  defaultRoute: ApplicationRoute;
+  applications: SplitTunnelApplication[];
+};
+type RoutingSettings = {
+  destination: DestinationRoutingPolicy;
+  splitTunnel: SplitTunnelPolicy;
+};
+
+const DEFAULT_ROUTING_SETTINGS: RoutingSettings = {
+  destination: { mode: "global", bypassPrivate: true, bypassIran: true, customRules: [] },
+  splitTunnel: { mode: "fullTunnel", defaultRoute: "vpn", applications: [] },
+};
+
+function splitRoutingValues(value: string): string[] {
+  return value.split(/[\r\n,;]/).map((item) => item.trim()).filter(Boolean);
+}
+
 type EndpointResult = {
   profileId: string;
   name: string;
@@ -186,6 +222,16 @@ function dispositionCountsLabel(counts: AgentRecoveryDispositionCounts): string 
   ].join(" · ");
 }
 
+function routingModeLabel(mode: SplitTunnelMode): string {
+  switch (mode) {
+    case "fullTunnel": return "Full Tunnel";
+    case "directOnly": return "Direct Only";
+    case "includeSelected": return "Include Selected";
+    case "excludeSelected": return "Exclude Selected";
+    case "custom": return "Custom per-app";
+  }
+}
+
 export default function App() {
   const [status, setStatus] = useState<AppStatus | null>(null);
   const [agentStatus, setAgentStatus] = useState<AgentServiceStatus | null>(null);
@@ -206,6 +252,19 @@ export default function App() {
   });
   const [settingsLoading, setSettingsLoading] = useState(true);
   const [settingsSaving, setSettingsSaving] = useState(false);
+  const [routingSettings, setRoutingSettings] = useState<RoutingSettings>(DEFAULT_ROUTING_SETTINGS);
+  const [routingSettingsLoading, setRoutingSettingsLoading] = useState(true);
+  const [routingSettingsSaving, setRoutingSettingsSaving] = useState(false);
+  const [ruleDraft, setRuleDraft] = useState({
+    domains: "",
+    domainSuffixes: "",
+    ipCidrs: "",
+    action: "direct" as DestinationAction,
+  });
+  const [applicationDraft, setApplicationDraft] = useState({
+    executablePath: "",
+    action: "vpn" as ApplicationRoute,
+  });
 
   const refreshStatus = useCallback(async () => {
     try {
@@ -282,12 +341,92 @@ export default function App() {
     }
   };
 
+  const refreshRoutingSettings = useCallback(async () => {
+    setRoutingSettingsLoading(true);
+    try {
+      const settings = await invoke<RoutingSettings>("get_routing_settings");
+      setRoutingSettings(settings);
+    } catch (error) {
+      setMessage(typeof error === "string" ? error : "Could not load routing settings.");
+    } finally {
+      setRoutingSettingsLoading(false);
+    }
+  }, []);
+
+  const saveRoutingSettings = async () => {
+    setRoutingSettingsSaving(true);
+    try {
+      const settings = await invoke<RoutingSettings>("save_routing_settings", { settings: routingSettings });
+      setRoutingSettings(settings);
+      setMessage("Routing policies saved locally. They are not active on Windows.");
+    } catch (error) {
+      setMessage(typeof error === "string" ? error : "Could not save routing settings.");
+    } finally {
+      setRoutingSettingsSaving(false);
+    }
+  };
+
+  const addDestinationRule = () => {
+    const rule: DestinationRule = {
+      domains: splitRoutingValues(ruleDraft.domains),
+      domainSuffixes: splitRoutingValues(ruleDraft.domainSuffixes),
+      ipCidrs: splitRoutingValues(ruleDraft.ipCidrs),
+      action: ruleDraft.action,
+    };
+    if (rule.domains.length + rule.domainSuffixes.length + rule.ipCidrs.length === 0) {
+      setMessage("Add at least one domain or IP/CIDR match before adding a rule.");
+      return;
+    }
+    setRoutingSettings((current) => ({
+      ...current,
+      destination: { ...current.destination, customRules: [...current.destination.customRules, rule] },
+    }));
+    setRuleDraft({ domains: "", domainSuffixes: "", ipCidrs: "", action: "direct" });
+  };
+
+  const removeDestinationRule = (index: number) => {
+    setRoutingSettings((current) => ({
+      ...current,
+      destination: {
+        ...current.destination,
+        customRules: current.destination.customRules.filter((_, itemIndex) => itemIndex !== index),
+      },
+    }));
+  };
+
+  const addSplitTunnelApplication = () => {
+    const executablePath = applicationDraft.executablePath.trim();
+    if (!executablePath) {
+      setMessage("Enter an absolute Windows .exe path before adding an application.");
+      return;
+    }
+    setRoutingSettings((current) => ({
+      ...current,
+      splitTunnel: {
+        ...current.splitTunnel,
+        applications: [...current.splitTunnel.applications, { executablePath, action: applicationDraft.action }],
+      },
+    }));
+    setApplicationDraft({ executablePath: "", action: "vpn" });
+  };
+
+  const removeSplitTunnelApplication = (index: number) => {
+    setRoutingSettings((current) => ({
+      ...current,
+      splitTunnel: {
+        ...current.splitTunnel,
+        applications: current.splitTunnel.applications.filter((_, itemIndex) => itemIndex !== index),
+      },
+    }));
+  };
+
   useEffect(() => {
     void refreshStatus();
     void refreshAgentStatus();
     void refreshProfiles();
     void refreshRealDelaySettings();
-  }, [refreshStatus, refreshAgentStatus, refreshProfiles, refreshRealDelaySettings]);
+    void refreshRoutingSettings();
+  }, [refreshStatus, refreshAgentStatus, refreshProfiles, refreshRealDelaySettings, refreshRoutingSettings]);
 
   const engines = status?.engines ?? [
     { kind: "sing-box", binaryName: "sing-box", integrationStage: "implemented · preflight only" },
@@ -734,6 +873,183 @@ export default function App() {
             disabled={previewMode || settingsLoading || settingsSaving}
           >
             {settingsSaving ? "Saving…" : "Save Real Delay settings"}
+          </button>
+        </div>
+      </section>
+
+
+      <section className="panel settings-panel routing-panel">
+        <div className="panel-heading">
+          <div>
+            <p className="eyebrow">ROUTING POLICY EDITOR</p>
+            <h2>Destination and application policies</h2>
+          </div>
+          <span className="count-tag">Saved locally only</span>
+        </div>
+        <p className="panel-copy">
+          These controls edit and validate saved preferences only. They are not sent to the Agent,
+          do not build or launch an engine configuration, and do not change Windows networking.
+        </p>
+
+        <div className="routing-grid">
+          <article className="routing-subpanel">
+            <div className="routing-subheading">
+              <h3>Destination routing</h3>
+              <span>{routingSettings.destination.customRules.length} custom rules</span>
+            </div>
+            <label className="setting-field routing-field">
+              <span>Routing mode</span>
+              <select
+                value={routingSettings.destination.mode}
+                onChange={(event) => setRoutingSettings((current) => ({
+                  ...current,
+                  destination: { ...current.destination, mode: event.target.value as TrafficRoutingMode },
+                }))}
+                disabled={previewMode || routingSettingsLoading || routingSettingsSaving}
+              >
+                <option value="global">Global · all destinations through VPN</option>
+                <option value="rule">Rule · destination exceptions</option>
+              </select>
+            </label>
+            <div className="routing-checks">
+              <label>
+                <input type="checkbox" checked={routingSettings.destination.bypassPrivate}
+                  onChange={(event) => setRoutingSettings((current) => ({
+                    ...current,
+                    destination: { ...current.destination, bypassPrivate: event.target.checked },
+                  }))}
+                  disabled={previewMode || routingSettingsLoading || routingSettingsSaving || routingSettings.destination.mode !== "rule"} />
+                Bypass private/local IP ranges
+              </label>
+              <label>
+                <input type="checkbox" checked={routingSettings.destination.bypassIran}
+                  onChange={(event) => setRoutingSettings((current) => ({
+                    ...current,
+                    destination: { ...current.destination, bypassIran: event.target.checked },
+                  }))}
+                  disabled={previewMode || routingSettingsLoading || routingSettingsSaving || routingSettings.destination.mode !== "rule"} />
+                Bypass built-in Iran domain/IP rules
+              </label>
+            </div>
+            <div className="routing-form">
+              <label className="setting-field routing-field">
+                <span>Exact domains (one per line)</span>
+                <textarea rows={2} value={ruleDraft.domains} onChange={(event) => setRuleDraft((current) => ({ ...current, domains: event.target.value }))} placeholder={"example.com"} disabled={previewMode || routingSettingsLoading || routingSettingsSaving} />
+              </label>
+              <label className="setting-field routing-field">
+                <span>Domain suffixes (one per line)</span>
+                <textarea rows={2} value={ruleDraft.domainSuffixes} onChange={(event) => setRuleDraft((current) => ({ ...current, domainSuffixes: event.target.value }))} placeholder={"*.trusted.example"} disabled={previewMode || routingSettingsLoading || routingSettingsSaving} />
+              </label>
+              <label className="setting-field routing-field">
+                <span>IP addresses / CIDRs (one per line)</span>
+                <textarea rows={2} value={ruleDraft.ipCidrs} onChange={(event) => setRuleDraft((current) => ({ ...current, ipCidrs: event.target.value }))} placeholder={"203.0.113.0/24"} disabled={previewMode || routingSettingsLoading || routingSettingsSaving} />
+              </label>
+              <div className="routing-add-row">
+                <label className="setting-field routing-field">
+                  <span>Action</span>
+                  <select value={ruleDraft.action} onChange={(event) => setRuleDraft((current) => ({ ...current, action: event.target.value as DestinationAction }))} disabled={previewMode || routingSettingsLoading || routingSettingsSaving}>
+                    <option value="direct">Direct</option>
+                    <option value="vpn">VPN</option>
+                    <option value="block">Block</option>
+                  </select>
+                </label>
+                <button className="quiet-button" onClick={addDestinationRule} disabled={previewMode || routingSettingsLoading || routingSettingsSaving}>Add rule</button>
+              </div>
+            </div>
+            <div className="routing-list">
+              {routingSettings.destination.customRules.length === 0 ? (
+                <p className="routing-empty">No custom destination rules saved.</p>
+              ) : routingSettings.destination.customRules.map((rule, index) => (
+                <div className="routing-list-row" key={index}>
+                  <div>
+                    <strong>{rule.action.toUpperCase()}</strong>
+                    <span>{[...rule.domains, ...rule.domainSuffixes, ...rule.ipCidrs].join(" · ")}</span>
+                  </div>
+                  <button className="remove-button" onClick={() => removeDestinationRule(index)} disabled={previewMode || routingSettingsLoading || routingSettingsSaving}>Remove</button>
+                </div>
+              ))}
+            </div>
+          </article>
+
+          <article className="routing-subpanel">
+            <div className="routing-subheading">
+              <h3>Split tunneling</h3>
+              <span>{routingSettings.splitTunnel.applications.length} applications</span>
+            </div>
+            <label className="setting-field routing-field">
+              <span>Split-tunnel mode</span>
+              <select
+                value={routingSettings.splitTunnel.mode}
+                onChange={(event) => setRoutingSettings((current) => ({
+                  ...current,
+                  splitTunnel: { ...current.splitTunnel, mode: event.target.value as SplitTunnelMode },
+                }))}
+                disabled={previewMode || routingSettingsLoading || routingSettingsSaving}
+              >
+                <option value="fullTunnel">Full Tunnel</option>
+                <option value="directOnly">Direct Only</option>
+                <option value="includeSelected">Include Selected</option>
+                <option value="excludeSelected">Exclude Selected</option>
+                <option value="custom">Custom per-app</option>
+              </select>
+            </label>
+            <label className="setting-field routing-field">
+              <span>Default for unlisted applications (Custom mode)</span>
+              <select
+                value={routingSettings.splitTunnel.defaultRoute}
+                onChange={(event) => setRoutingSettings((current) => ({
+                  ...current,
+                  splitTunnel: { ...current.splitTunnel, defaultRoute: event.target.value as ApplicationRoute },
+                }))}
+                disabled={previewMode || routingSettingsLoading || routingSettingsSaving || routingSettings.splitTunnel.mode !== "custom"}
+              >
+                <option value="vpn">VPN</option>
+                <option value="direct">Direct</option>
+              </select>
+            </label>
+            <div className="routing-form">
+              <label className="setting-field routing-field">
+                <span>Absolute Windows executable path</span>
+                <input type="text" value={applicationDraft.executablePath}
+                  onChange={(event) => setApplicationDraft((current) => ({ ...current, executablePath: event.target.value }))}
+                  placeholder={String.raw`C:\Program Files\App\App.exe`} spellCheck={false}
+                  disabled={previewMode || routingSettingsLoading || routingSettingsSaving} />
+              </label>
+              <div className="routing-add-row">
+                <label className="setting-field routing-field">
+                  <span>Application action</span>
+                  <select value={applicationDraft.action} onChange={(event) => setApplicationDraft((current) => ({ ...current, action: event.target.value as ApplicationRoute }))} disabled={previewMode || routingSettingsLoading || routingSettingsSaving}>
+                    <option value="vpn">VPN</option>
+                    <option value="direct">Direct</option>
+                    <option value="block">Block</option>
+                  </select>
+                </label>
+                <button className="quiet-button" onClick={addSplitTunnelApplication} disabled={previewMode || routingSettingsLoading || routingSettingsSaving}>Add app</button>
+              </div>
+            </div>
+            <div className="routing-list">
+              {routingSettings.splitTunnel.applications.length === 0 ? (
+                <p className="routing-empty">No application paths saved.</p>
+              ) : routingSettings.splitTunnel.applications.map((application, index) => (
+                <div className="routing-list-row" key={index}>
+                  <div>
+                    <strong>{application.action.toUpperCase()}</strong>
+                    <span>{application.executablePath}</span>
+                  </div>
+                  <button className="remove-button" onClick={() => removeSplitTunnelApplication(index)} disabled={previewMode || routingSettingsLoading || routingSettingsSaving}>Remove</button>
+                </div>
+              ))}
+            </div>
+            <p className="routing-footnote">{routingModeLabel(routingSettings.splitTunnel.mode)} is a saved preference; no process-path rule is active yet.</p>
+          </article>
+        </div>
+
+        <div className="settings-actions">
+          <span className="hint-text">
+            {routingSettingsLoading ? "Loading saved routing policies…" : "Limits: 256 rules/apps; 128 match values per rule; absolute .exe paths only."}
+          </span>
+          <button className="primary-button" onClick={() => void saveRoutingSettings()} disabled={previewMode || routingSettingsLoading || routingSettingsSaving}>
+            {routingSettingsSaving ? "Saving…" : "Save routing policies"}
           </button>
         </div>
       </section>

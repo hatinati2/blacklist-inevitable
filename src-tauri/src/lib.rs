@@ -20,6 +20,7 @@ mod process_supervisor;
 mod profile_store;
 mod profiles;
 mod real_delay_settings;
+mod routing_settings;
 
 pub fn run() {
     let app = tauri::Builder::default()
@@ -49,6 +50,8 @@ pub fn run() {
             commands::test_all_profile_endpoints,
             commands::get_real_delay_settings,
             commands::save_real_delay_settings,
+            commands::get_routing_settings,
+            commands::save_routing_settings,
             commands::install_sing_box_engine,
             commands::validate_profile_config,
             commands::test_all_profile_real_delays

@@ -156,3 +156,33 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   .recovery-overview { grid-template-columns: 1fr; }
   .recovery-resource-grid { grid-template-columns: 1fr; }
 }
+
+
+/* Saved-only routing policy editor; no live network controls are exposed here. */
+.routing-panel { margin-top: 16px; }
+.routing-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-top: 18px; }
+.routing-subpanel { min-width: 0; padding: 16px; border: 1px solid rgba(142, 164, 194, 0.12); border-radius: 13px; background: rgba(12, 17, 26, 0.24); }
+.routing-subheading { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 15px; }
+.routing-subheading h3 { margin: 0; font-size: 13px; }
+.routing-subheading span { color: #8292a8; font-size: 9px; }
+.routing-field { margin-top: 12px; }
+.routing-field input, .routing-field select { width: 100%; min-width: 0; padding: 10px 11px; border: 1px solid rgba(142, 164, 194, 0.17); border-radius: 9px; color: #e7eef8; background: rgba(12, 17, 26, 0.72); outline: none; font: inherit; font-size: 10px; }
+.routing-field select option { color: #e7eef8; background: #17202d; }
+.routing-field textarea { min-height: 52px; }
+.routing-field input:focus, .routing-field select:focus { border-color: rgba(119, 211, 180, 0.55); }
+.routing-checks { display: flex; flex-direction: column; gap: 9px; margin-top: 14px; color: #9eafc3; font-size: 10px; }
+.routing-checks label { display: flex; align-items: center; gap: 8px; }
+.routing-checks input { accent-color: #8cdec4; }
+.routing-add-row { display: flex; align-items: flex-end; gap: 10px; }
+.routing-add-row .routing-field { flex: 1; }
+.routing-add-row button { flex: 0 0 auto; margin-bottom: 1px; }
+.routing-list { display: flex; flex-direction: column; gap: 7px; margin-top: 14px; }
+.routing-list-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 10px; border: 1px solid rgba(142, 164, 194, 0.1); border-radius: 9px; background: rgba(111, 135, 169, 0.05); }
+.routing-list-row div { display: flex; min-width: 0; flex-direction: column; gap: 4px; }
+.routing-list-row strong { color: #9ce2c9; font-size: 9px; }
+.routing-list-row span { overflow-wrap: anywhere; color: #9aa9bc; font-size: 9px; line-height: 1.5; }
+.routing-list-row button { flex: 0 0 auto; }
+.routing-empty, .routing-footnote { margin: 0; color: #8292a8; font-size: 9px; line-height: 1.6; }
+.routing-footnote { margin-top: 12px; }
+@media (max-width: 850px) { .routing-grid { grid-template-columns: 1fr; } }
+@media (max-width: 560px) { .routing-add-row { align-items: stretch; flex-direction: column; } .routing-add-row button { width: 100%; } }

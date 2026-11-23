@@ -174,6 +174,11 @@ fn validated_rules(policy: &DestinationRoutingPolicy) -> Result<Vec<DestinationR
     Ok(result)
 }
 
+/// Validate a destination policy without generating or applying an engine configuration.
+pub fn validate_destination_routing_policy(policy: &DestinationRoutingPolicy) -> Result<(), String> {
+    validated_rules(policy).map(|_| ())
+}
+
 fn validate_cache_path(value: &str) -> Result<String, String> {
     if value.is_empty()
         || value.len() > MAX_CACHE_PATH_CHARS * 4

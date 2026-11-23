@@ -346,6 +346,21 @@ pub fn save_real_delay_settings(
 }
 
 #[tauri::command]
+pub fn get_routing_settings(
+    app: AppHandle,
+) -> Result<crate::routing_settings::RoutingSettings, String> {
+    crate::routing_settings::load(&app)
+}
+
+#[tauri::command]
+pub fn save_routing_settings(
+    app: AppHandle,
+    settings: crate::routing_settings::RoutingSettings,
+) -> Result<crate::routing_settings::RoutingSettings, String> {
+    crate::routing_settings::save(&app, settings)
+}
+
+#[tauri::command]
 pub async fn test_all_profile_real_delays(
     app: AppHandle,
 ) -> Result<Vec<RealDelayResult>, String> {

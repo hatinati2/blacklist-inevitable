@@ -148,6 +148,11 @@ fn validated_applications(
     Ok(applications)
 }
 
+/// Validate saved split-tunnel settings without generating or applying an engine configuration.
+pub fn validate_split_tunnel_policy(policy: &SplitTunnelPolicy) -> Result<(), String> {
+    validated_applications(policy).map(|_| ())
+}
+
 /// Apply an app-routing policy to a generated TUN configuration. This function
 /// only edits the sing-box JSON; the Windows agent still has to start the
 /// engine and own the actual network transaction.

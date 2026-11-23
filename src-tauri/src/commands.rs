@@ -8,6 +8,8 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio::time::timeout;
 
+use crate::agent_protocol::AgentRecoveryStatus;
+use crate::agent_client::AgentStatusResponse;
 use crate::engine::{EngineDescriptor, ENGINE_TARGETS};
 use crate::profile_store;
 use crate::process_supervisor::ProcessSupervisor;
@@ -86,26 +88,40 @@ pub struct AgentServiceStatus {
     available: bool,
     state: String,
     detail: String,
+    recovery: Option<AgentRecoveryStatus>,
 }
 
 /// Query only the Agent's non-mutating status endpoint. No profile data or
 /// credentials cross this boundary; all network-mutating RPCs remain disabled.
 const AGENT_RECOVERY_BLOCKED_PREFIX: &str = "The Agent is blocked by startup recovery:";
+const AGENT_STARTUP_RECOVERY_BLOCKED_PREFIX: &str = "Agent startup recovery is blocked";
 
 fn agent_service_status_from_result(
-    result: Result<String, String>,
+    result: Result<AgentStatusResponse, String>,
     windows_build: bool,
 ) -> AgentServiceStatus {
     match result {
-        Ok(detail) => AgentServiceStatus {
-            available: true,
-            state: "running".to_string(),
-            detail,
-        },
+        Ok(response) => {
+            let recovery_blocked = response.recovery.as_ref().is_some_and(|recovery| recovery.is_blocked());
+            let response_failed = response.status != "ok";
+            let state = if response_failed || recovery_blocked {
+                "recoveryRequired"
+            } else {
+                "running"
+            };
+            AgentServiceStatus {
+                available: !response_failed && !recovery_blocked,
+                state: state.to_string(),
+                detail: response.detail,
+                recovery: response.recovery,
+            }
+        }
         Err(detail) => {
             let state = if !windows_build {
                 "unsupported"
-            } else if detail.starts_with(AGENT_RECOVERY_BLOCKED_PREFIX) {
+            } else if detail.starts_with(AGENT_RECOVERY_BLOCKED_PREFIX)
+                || detail.starts_with(AGENT_STARTUP_RECOVERY_BLOCKED_PREFIX)
+            {
                 "recoveryRequired"
             } else {
                 "unavailable"
@@ -114,6 +130,7 @@ fn agent_service_status_from_result(
                 available: false,
                 state: state.to_string(),
                 detail,
+                recovery: None,
             }
         }
     }

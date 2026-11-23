@@ -81,6 +81,372 @@ pub struct RecoveryAssessment {
     pub can_remove_journal: bool,
 }
 
+/// Stable resource locator used by a pure recovery plan. This type is
+/// diagnostic only; it never grants permission to mutate an operating-system
+/// resource.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RecoveryPlanResource {
+    Assessment,
+    Engine,
+    Tunnel,
+    Route(String),
+    Dns(u32),
+    Wfp,
+}
+
+/// A reason why a session cannot yet produce a reviewed recovery intent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryPlanBlocker {
+    pub resource: RecoveryPlanResource,
+    pub disposition: ResourceDisposition,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryPlanState {
+    /// At least one resource is Unknown/Conflict or plan inputs are inconsistent.
+    Blocked,
+    /// All observations are sufficiently specific to describe intents.
+    /// This is not permission to execute them.
+    ReadyForReview,
+    /// Resources appear clean, but the journal is retained and not deletable.
+    VerifiedCleanRetained,
+}
+
+/// Stable WFP identity. Runtime filter IDs are deliberately excluded.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RecoveryWfpFilterIdentity {
+    pub provider_key: String,
+    pub filter_key: String,
+    pub layer_key: String,
+}
+
+/// An immutable description of a possible follow-up operation. The planner
+/// does not execute these intents. A future executor must re-observe the
+/// resource immediately before each individual mutation and assess it again
+/// immediately afterwards.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecoveryIntent {
+    StopEngine {
+        process: EngineProcessRecord,
+    },
+    RemoveTunnel {
+        interface: TunnelInterfaceRecord,
+    },
+    RemoveAppliedRoute {
+        destination_prefix: String,
+        applied: RouteState,
+    },
+    RestorePreviousRoute {
+        destination_prefix: String,
+        expected_applied: RouteState,
+        previous: RouteState,
+    },
+    RestorePreviousDns {
+        interface_index: u32,
+        interface_guid: String,
+        expected_applied: DnsConfiguration,
+        previous: DnsConfiguration,
+    },
+    RemoveWfpFilter {
+        identity: RecoveryWfpFilterIdentity,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryIntentPlan {
+    pub session_id: u64,
+    pub revision: u64,
+    pub state: RecoveryPlanState,
+    /// Empty whenever any resource is Unknown or Conflict.
+    pub intents: Vec<RecoveryIntent>,
+    pub blockers: Vec<RecoveryPlanBlocker>,
+    /// Always false in this milestone. Journal disposition is a separate review.
+    pub journal_removal_authorized: bool,
+}
+
+impl RecoveryIntentPlan {
+    pub fn is_blocked(&self) -> bool {
+        matches!(self.state, RecoveryPlanState::Blocked)
+    }
+}
+
+/// Convert an assessment into deterministic, review-only intents.
+///
+/// This function performs no Windows API calls, process control, filesystem
+/// writes, route/DNS/WFP changes, rollback, or journal deletion. Unknown or
+/// conflicting state blocks the entire session plan; it never emits a partial
+/// list that could tempt a caller to proceed with only some resources.
+pub fn build_recovery_intent_plan(
+    journal: &RecoveryJournal,
+    assessment: &RecoveryAssessment,
+) -> Result<RecoveryIntentPlan, String> {
+    journal.validate()?;
+
+    let mut intents = Vec::new();
+    let mut blockers = Vec::new();
+
+    let mut add_blocker = |resource: RecoveryPlanResource, disposition: ResourceDisposition| {
+        blockers.push(RecoveryPlanBlocker {
+            resource,
+            disposition,
+        });
+    };
+
+    match assessment.engine {
+        ResourceDisposition::VerifiedClean => {}
+        ResourceDisposition::NeedsCleanup => match journal.engine.clone() {
+            Some(process) if process.process_id != 0 && process.creation_time_100ns != 0 => {
+                intents.push(RecoveryIntent::StopEngine { process });
+            }
+            _ => add_blocker(RecoveryPlanResource::Engine, ResourceDisposition::Unknown),
+        },
+        disposition => add_blocker(RecoveryPlanResource::Engine, disposition),
+    }
+
+    match assessment.tunnel {
+        ResourceDisposition::VerifiedClean => {}
+        ResourceDisposition::NeedsCleanup => match journal.tunnel.clone() {
+            Some(interface)
+                if !interface.address_details.is_empty()
+                    && normalize_guid(&interface.interface_guid).is_some() =>
+            {
+                intents.push(RecoveryIntent::RemoveTunnel { interface });
+            }
+            _ => add_blocker(RecoveryPlanResource::Tunnel, ResourceDisposition::Unknown),
+        },
+        disposition => add_blocker(RecoveryPlanResource::Tunnel, disposition),
+    }
+
+    let mut route_assessments = BTreeMap::new();
+    let mut duplicate_route_assessments = BTreeSet::new();
+    for item in &assessment.routes {
+        if route_assessments
+            .insert(item.destination_prefix.clone(), item.disposition)
+            .is_some()
+        {
+            duplicate_route_assessments.insert(item.destination_prefix.clone());
+        }
+    }
+    for destination_prefix in duplicate_route_assessments {
+        add_blocker(
+            RecoveryPlanResource::Route(destination_prefix),
+            ResourceDisposition::Conflict,
+        );
+    }
+
+    let journal_route_keys = journal
+        .routes
+        .iter()
+        .map(|record| record.destination_prefix.clone())
+        .collect::<BTreeSet<_>>();
+    for record in &journal.routes {
+        let disposition = route_assessments
+            .get(&record.destination_prefix)
+            .copied()
+            .unwrap_or(ResourceDisposition::Unknown);
+        match disposition {
+            ResourceDisposition::VerifiedClean => {}
+            ResourceDisposition::NeedsCleanup => {
+                if record.previous.is_none() && record.applied.interface_luid.is_some() {
+                    intents.push(RecoveryIntent::RemoveAppliedRoute {
+                        destination_prefix: record.destination_prefix.clone(),
+                        applied: record.applied.clone(),
+                    });
+                } else {
+                    add_blocker(
+                        RecoveryPlanResource::Route(record.destination_prefix.clone()),
+                        ResourceDisposition::Unknown,
+                    );
+                }
+            }
+            ResourceDisposition::NeedsRestore => match record.previous.clone() {
+                Some(previous)
+                    if record.applied.interface_luid.is_some()
+                        && previous.interface_luid.is_some() =>
+                {
+                    intents.push(RecoveryIntent::RestorePreviousRoute {
+                        destination_prefix: record.destination_prefix.clone(),
+                        expected_applied: record.applied.clone(),
+                        previous,
+                    });
+                }
+                _ => add_blocker(
+                    RecoveryPlanResource::Route(record.destination_prefix.clone()),
+                    ResourceDisposition::Unknown,
+                ),
+            },
+            other => add_blocker(
+                RecoveryPlanResource::Route(record.destination_prefix.clone()),
+                other,
+            ),
+        }
+    }
+    for extra in route_assessments.keys() {
+        if !journal_route_keys.contains(extra) {
+            add_blocker(
+                RecoveryPlanResource::Route(extra.clone()),
+                ResourceDisposition::Conflict,
+            );
+        }
+    }
+
+    let mut dns_assessments = BTreeMap::new();
+    let mut duplicate_dns_assessments = BTreeSet::new();
+    for item in &assessment.dns {
+        if dns_assessments
+            .insert(item.interface_index, item.disposition)
+            .is_some()
+        {
+            duplicate_dns_assessments.insert(item.interface_index);
+        }
+    }
+    for interface_index in duplicate_dns_assessments {
+        add_blocker(
+            RecoveryPlanResource::Dns(interface_index),
+            ResourceDisposition::Conflict,
+        );
+    }
+
+    let journal_dns_indexes = journal
+        .dns
+        .iter()
+        .map(|record| record.interface_index)
+        .collect::<BTreeSet<_>>();
+    for record in &journal.dns {
+        let disposition = dns_assessments
+            .get(&record.interface_index)
+            .copied()
+            .unwrap_or(ResourceDisposition::Unknown);
+        match disposition {
+            ResourceDisposition::VerifiedClean => {}
+            ResourceDisposition::NeedsRestore => {
+                let expected_guid = record.interface_guid.as_deref().and_then(normalize_guid);
+                let complete = expected_guid.as_deref().is_some_and(|guid| {
+                    complete_dns_interface(&record.applied, guid).is_some()
+                        && complete_dns_interface(&record.previous, guid).is_some()
+                });
+                if let (Some(interface_guid), true) =
+                    (expected_guid, complete)
+                {
+                    intents.push(RecoveryIntent::RestorePreviousDns {
+                        interface_index: record.interface_index,
+                        interface_guid,
+                        expected_applied: record.applied.clone(),
+                        previous: record.previous.clone(),
+                    });
+                } else {
+                    add_blocker(
+                        RecoveryPlanResource::Dns(record.interface_index),
+                        ResourceDisposition::Unknown,
+                    );
+                }
+            }
+            ResourceDisposition::NeedsCleanup
+            | ResourceDisposition::Conflict
+            | ResourceDisposition::Unknown => {
+                add_blocker(
+                    RecoveryPlanResource::Dns(record.interface_index),
+                    disposition,
+                );
+            }
+        }
+    }
+    for extra in dns_assessments.keys() {
+        if !journal_dns_indexes.contains(extra) {
+            add_blocker(
+                RecoveryPlanResource::Dns(*extra),
+                ResourceDisposition::Conflict,
+            );
+        }
+    }
+
+    match assessment.firewall_filters {
+        ResourceDisposition::VerifiedClean => {}
+        ResourceDisposition::NeedsCleanup => {
+            if journal.firewall_filters.is_empty() {
+                add_blocker(RecoveryPlanResource::Wfp, ResourceDisposition::Unknown);
+            } else {
+                for record in &journal.firewall_filters {
+                    let identity = match (
+                        normalize_guid(&record.provider_key),
+                        record.filter_key.as_deref().and_then(normalize_guid),
+                        normalize_guid(&record.layer_key),
+                    ) {
+                        (Some(provider_key), Some(filter_key), Some(layer_key)) => {
+                            RecoveryWfpFilterIdentity {
+                                provider_key,
+                                filter_key,
+                                layer_key,
+                            }
+                        }
+                        _ => {
+                            add_blocker(RecoveryPlanResource::Wfp, ResourceDisposition::Unknown);
+                            continue;
+                        }
+                    };
+                    intents.push(RecoveryIntent::RemoveWfpFilter { identity });
+                }
+            }
+        }
+        disposition => add_blocker(RecoveryPlanResource::Wfp, disposition),
+    }
+
+    // Make the plan stable for serialization and review. This is not an
+    // execution order; a future executor must define and validate dependencies.
+    intents.sort_by_key(|intent| match intent {
+        RecoveryIntent::StopEngine { .. } => (0u8, String::new()),
+        RecoveryIntent::RemoveTunnel { interface } => {
+            (1, interface.interface_guid.to_ascii_lowercase())
+        }
+        RecoveryIntent::RemoveAppliedRoute { destination_prefix, .. } => {
+            (2, destination_prefix.clone())
+        }
+        RecoveryIntent::RestorePreviousRoute { destination_prefix, .. } => {
+            (2, destination_prefix.clone())
+        }
+        RecoveryIntent::RestorePreviousDns { interface_index, .. } => {
+            (3, format!("{interface_index:010}"))
+        }
+        RecoveryIntent::RemoveWfpFilter { identity } => (4, identity.filter_key.clone()),
+    });
+    blockers.sort_by_key(|blocker| blocker.resource.clone());
+
+    let state = if !blockers.is_empty() {
+        intents.clear();
+        RecoveryPlanState::Blocked
+    } else if assessment.can_remove_journal {
+        if !intents.is_empty() {
+            intents.clear();
+            add_blocker(
+                RecoveryPlanResource::Assessment,
+                ResourceDisposition::Conflict,
+            );
+            RecoveryPlanState::Blocked
+        } else {
+            RecoveryPlanState::VerifiedCleanRetained
+        }
+    } else if !intents.is_empty() {
+        RecoveryPlanState::ReadyForReview
+    } else {
+        add_blocker(
+            RecoveryPlanResource::Assessment,
+            ResourceDisposition::Unknown,
+        );
+        RecoveryPlanState::Blocked
+    };
+
+    blockers.sort_by_key(|blocker| blocker.resource.clone());
+
+    Ok(RecoveryIntentPlan {
+        session_id: journal.session_id,
+        revision: journal.revision,
+        state,
+        intents,
+        blockers,
+        journal_removal_authorized: false,
+    })
+}
+
 pub fn assess_recovery(
     journal: &RecoveryJournal,
     snapshot: &RecoverySnapshot,

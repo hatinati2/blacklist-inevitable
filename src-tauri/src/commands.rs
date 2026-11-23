@@ -451,11 +451,107 @@ pub async fn test_all_profile_real_delays(
 #[cfg(test)]
 mod agent_status_tests {
     use super::*;
+    use crate::agent_protocol::{
+        AgentRecoveryDispositionCounts, AgentRecoverySessionStatus, AgentRecoveryState,
+    };
+    use crate::recovery_assessment::ResourceDisposition;
+
+    fn blocked_recovery_status(state: AgentRecoveryState) -> AgentRecoveryStatus {
+        AgentRecoveryStatus {
+            state,
+            journal_inventory_complete: true,
+            total_sessions: 1,
+            verified_clean_sessions: 0,
+            blocked_sessions: 1,
+            omitted_sessions: 0,
+            journal_retained: true,
+            sessions: vec![AgentRecoverySessionStatus {
+                session_id: 17,
+                revision: 2,
+                phase: "recoveryRequired".into(),
+                engine: ResourceDisposition::Unknown,
+                tunnel: ResourceDisposition::VerifiedClean,
+                routes: AgentRecoveryDispositionCounts {
+                    verified_clean: 1,
+                    ..AgentRecoveryDispositionCounts::default()
+                },
+                dns: AgentRecoveryDispositionCounts {
+                    unknown: 1,
+                    ..AgentRecoveryDispositionCounts::default()
+                },
+                firewall_filters: ResourceDisposition::VerifiedClean,
+                verified_clean: false,
+            }],
+            diagnostics: vec!["DNS observer returned a partial family snapshot.".into()],
+        }
+    }
 
     #[test]
-    fn reports_a_distinct_recovery_required_state() {
+    fn reports_rejected_recovery_payload_and_preserves_structured_details() {
         let status = agent_service_status_from_result(
-            Err("The Agent is blocked by startup recovery: 1 unresolved recovery journal.".into()),
+            Ok(AgentStatusResponse {
+                status: "rejected".into(),
+                detail: "Agent startup recovery is blocked: 1 unresolved recovery journal requires review.".into(),
+                recovery: Some(blocked_recovery_status(AgentRecoveryState::Blocked)),
+            }),
+            true,
+        );
+        assert!(!status.available);
+        assert_eq!(status.state, "recoveryRequired");
+        let recovery = status.recovery.expect("recovery payload must reach the UI");
+        assert_eq!(recovery.total_sessions, 1);
+        assert_eq!(recovery.sessions[0].dns.unknown, 1);
+        assert_eq!(recovery.diagnostics.len(), 1);
+        assert!(recovery.journal_retained);
+    }
+
+    #[test]
+    fn verified_clean_but_retained_journal_is_still_not_available() {
+        let status = agent_service_status_from_result(
+            Ok(AgentStatusResponse {
+                status: "rejected".into(),
+                detail: "Agent startup recovery is blocked pending journal disposition.".into(),
+                recovery: Some(blocked_recovery_status(
+                    AgentRecoveryState::VerifiedCleanRetained,
+                )),
+            }),
+            true,
+        );
+        assert!(!status.available);
+        assert_eq!(status.state, "recoveryRequired");
+        assert!(status.recovery.unwrap().is_blocked());
+    }
+
+    #[test]
+    fn clear_read_only_recovery_response_is_available() {
+        let recovery = AgentRecoveryStatus {
+            state: AgentRecoveryState::Clear,
+            journal_inventory_complete: true,
+            total_sessions: 0,
+            verified_clean_sessions: 0,
+            blocked_sessions: 0,
+            omitted_sessions: 0,
+            journal_retained: false,
+            sessions: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let status = agent_service_status_from_result(
+            Ok(AgentStatusResponse {
+                status: "ok".into(),
+                detail: "Agent startup recovery is clean.".into(),
+                recovery: Some(recovery),
+            }),
+            true,
+        );
+        assert!(status.available);
+        assert_eq!(status.state, "running");
+        assert!(matches!(status.recovery.unwrap().state, AgentRecoveryState::Clear));
+    }
+
+    #[test]
+    fn recognizes_current_startup_recovery_diagnostic_prefix() {
+        let status = agent_service_status_from_result(
+            Err("Agent startup recovery is blocked: journal inventory unavailable.".into()),
             true,
         );
         assert!(!status.available);

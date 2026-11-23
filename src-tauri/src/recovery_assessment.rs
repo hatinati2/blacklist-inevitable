@@ -1378,19 +1378,18 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_assessment_keys_and_legacy_wfp_keys_block_planning() {
+    fn rejects_inconsistent_duplicate_assessments_and_legacy_wfp_keys_block_planning() {
         let (journal, snapshot) = ready_plan_fixture();
         let mut assessment = assess_recovery(&journal, &snapshot);
         assessment.routes.push(assessment.routes[0].clone());
-        let duplicate = build_recovery_intent_plan(&journal, std::slice::from_ref(&journal), &snapshot, &assessment).unwrap();
-        assert_eq!(duplicate.state, RecoveryPlanState::Blocked);
-        assert!(duplicate.intents.is_empty());
-        assert!(duplicate.blockers.iter().any(|item| {
-            item.disposition == ResourceDisposition::Conflict
-                && item.resource == RecoveryPlanResource::Route(
-                    journal.routes[0].destination_prefix.clone()
-                )
-        }));
+        // The planner re-computes the assessor output from its inputs and
+        // rejects a duplicated/tampered assessment rather than planning from it.
+        assert!(build_recovery_intent_plan(
+            &journal,
+            std::slice::from_ref(&journal),
+            &snapshot,
+            &assessment,
+        ).is_err());
 
         let mut journal = RecoveryJournal::new(25);
         let mut legacy = filter_record(77);
@@ -1435,13 +1434,15 @@ mod tests {
         let (journal, snapshot) = ready_plan_fixture();
         let mut assessment = assess_recovery(&journal, &snapshot);
         assessment.routes.clear();
-        let plan = build_recovery_intent_plan(&journal, std::slice::from_ref(&journal), &snapshot, &assessment).unwrap();
-        assert_eq!(plan.state, RecoveryPlanState::Blocked);
-        assert!(plan.intents.is_empty());
-        assert!(plan.blockers.iter().any(|item| {
-            item.resource == RecoveryPlanResource::Route(journal.routes[0].destination_prefix.clone())
-                && item.disposition == ResourceDisposition::Unknown
-        }));
+        // A missing assessor entry is inconsistent with the full snapshot.
+        // Reject it rather than turning a caller-supplied partial assessment
+        // into a reviewable intent plan.
+        assert!(build_recovery_intent_plan(
+            &journal,
+            std::slice::from_ref(&journal),
+            &snapshot,
+            &assessment,
+        ).is_err());
 
         let mut journal = RecoveryJournal::new(23);
         let mut route = route_record();

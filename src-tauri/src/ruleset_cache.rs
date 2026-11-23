@@ -18,7 +18,7 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
 
-const SOURCE_REVISION: &str = "1597f121656f3e63f2624a471401002941d888c4";
+pub(crate) const SOURCE_REVISION: &str = "1597f121656f3e63f2624a471401002941d888c4";
 const MAX_RULE_SET_BYTES: usize = 512 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);

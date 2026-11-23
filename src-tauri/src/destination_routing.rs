@@ -5,6 +5,7 @@
 //! through the physical Direct outbound and cached in the protected agent data
 //! directory supplied by the caller.
 
+use crate::ruleset_cache::{RuleSetCacheFiles, SOURCE_REVISION};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashSet;
@@ -245,10 +246,51 @@ fn route_rule_for(
 /// The caller supplies a cache path owned by the elevated Agent under its
 /// protected ProgramData directory. This method does not download lists or
 /// change OS networking itself.
+#[derive(Debug)]
+struct RuleSetInitialPaths {
+    geoip_path: String,
+    geosite_path: String,
+}
+
+/// Apply the destination policy using previously verified, pinned seed files.
+///
+/// This is a pure configuration builder: it verifies the cache token's pinned
+/// revision and path shape, then supplies sing-box `initial_path` values.
+/// It does not download files, inspect OS networking, launch sing-box, or
+/// activate the resulting config.
+pub(crate) fn apply_destination_routing_policy_with_rule_set_cache(
+    config: &mut Value,
+    policy: &DestinationRoutingPolicy,
+    cache_file_path: &str,
+    cache_files: &RuleSetCacheFiles,
+) -> Result<(), String> {
+    if policy.mode == TrafficRoutingMode::Global {
+        return apply_destination_routing_policy(config, policy, cache_file_path);
+    }
+    if cache_files.source_revision != SOURCE_REVISION {
+        return Err("The supplied Iran rule-set cache uses an unsupported source revision.".to_string());
+    }
+
+    let initial_paths = RuleSetInitialPaths {
+        geoip_path: validate_cache_path(&cache_files.geoip_path.to_string_lossy())?,
+        geosite_path: validate_cache_path(&cache_files.geosite_path.to_string_lossy())?,
+    };
+    apply_destination_routing_policy_inner(config, policy, cache_file_path, Some(&initial_paths))
+}
+
 pub fn apply_destination_routing_policy(
     config: &mut Value,
     policy: &DestinationRoutingPolicy,
     cache_file_path: &str,
+) -> Result<(), String> {
+    apply_destination_routing_policy_inner(config, policy, cache_file_path, None)
+}
+
+fn apply_destination_routing_policy_inner(
+    config: &mut Value,
+    policy: &DestinationRoutingPolicy,
+    cache_file_path: &str,
+    initial_paths: Option<&RuleSetInitialPaths>,
 ) -> Result<(), String> {
     let custom_rules = validated_rules(policy)?;
     if policy.mode == TrafficRoutingMode::Global {
@@ -307,24 +349,30 @@ pub fn apply_destination_routing_policy(
             "outbound": DIRECT_OUTBOUND_TAG
         }));
 
-        route.insert("rule_set".to_string(), json!([
-            {
-                "type": "remote",
-                "tag": GEOSITE_IR_TAG,
-                "format": "binary",
-                "url": GEOSITE_IR_URL,
-                "http_client": RULESET_HTTP_CLIENT_TAG,
-                "update_interval": "24h"
-            },
-            {
-                "type": "remote",
-                "tag": GEOIP_IR_TAG,
-                "format": "binary",
-                "url": GEOIP_IR_URL,
-                "http_client": RULESET_HTTP_CLIENT_TAG,
-                "update_interval": "24h"
-            }
-        ]));
+        let mut geosite_rule_set = json!({
+            "type": "remote",
+            "tag": GEOSITE_IR_TAG,
+            "format": "binary",
+            "url": GEOSITE_IR_URL,
+            "http_client": RULESET_HTTP_CLIENT_TAG,
+            "update_interval": "24h"
+        });
+        let mut geoip_rule_set = json!({
+            "type": "remote",
+            "tag": GEOIP_IR_TAG,
+            "format": "binary",
+            "url": GEOIP_IR_URL,
+            "http_client": RULESET_HTTP_CLIENT_TAG,
+            "update_interval": "24h"
+        });
+        if let Some(initial_paths) = initial_paths {
+            geosite_rule_set["initial_path"] = json!(initial_paths.geosite_path.clone());
+            geoip_rule_set["initial_path"] = json!(initial_paths.geoip_path.clone());
+        }
+        route.insert(
+            "rule_set".to_string(),
+            json!([geosite_rule_set, geoip_rule_set]),
+        );
         route.insert("default_http_client".to_string(), json!(RULESET_HTTP_CLIENT_TAG));
     }
 
@@ -415,6 +463,84 @@ mod tests {
         assert_eq!(config["dns"]["reverse_mapping"], true);
         assert_eq!(config["experimental"]["cache_file"]["path"], CACHE_PATH);
         assert_eq!(config["experimental"]["cache_file"]["store_dns"], true);
+    }
+
+    #[test]
+    fn pinned_cache_paths_become_initial_path_for_remote_rulesets() {
+        let mut config = base_config();
+        let policy = DestinationRoutingPolicy {
+            mode: TrafficRoutingMode::Rule,
+            ..DestinationRoutingPolicy::default()
+        };
+        let cache_files = RuleSetCacheFiles {
+            geoip_path: std::path::PathBuf::from(
+                r"C:\ProgramData\BlacklistInevitable\Agent\RuleSets\geoip-ir.srs",
+            ),
+            geosite_path: std::path::PathBuf::from(
+                r"C:\ProgramData\BlacklistInevitable\Agent\RuleSets\geosite-ir.srs",
+            ),
+            source_revision: SOURCE_REVISION,
+        };
+
+        apply_destination_routing_policy_with_rule_set_cache(
+            &mut config,
+            &policy,
+            CACHE_PATH,
+            &cache_files,
+        )
+        .unwrap();
+
+        let rule_sets = config["route"]["rule_set"].as_array().unwrap();
+        assert_eq!(rule_sets.len(), 2);
+        assert_eq!(rule_sets[0]["tag"], GEOSITE_IR_TAG);
+        assert_eq!(
+            rule_sets[0]["initial_path"],
+            r"C:\ProgramData\BlacklistInevitable\Agent\RuleSets\geosite-ir.srs"
+        );
+        assert_eq!(rule_sets[1]["tag"], GEOIP_IR_TAG);
+        assert_eq!(
+            rule_sets[1]["initial_path"],
+            r"C:\ProgramData\BlacklistInevitable\Agent\RuleSets\geoip-ir.srs"
+        );
+        assert_eq!(rule_sets[0]["type"], "remote");
+        assert_eq!(rule_sets[0]["http_client"], RULESET_HTTP_CLIENT_TAG);
+        assert_eq!(config["route"]["default_http_client"], RULESET_HTTP_CLIENT_TAG);
+    }
+
+    #[test]
+    fn rejects_unpinned_or_relative_cache_paths_before_config_generation() {
+        let policy = DestinationRoutingPolicy {
+            mode: TrafficRoutingMode::Rule,
+            ..DestinationRoutingPolicy::default()
+        };
+
+        let wrong_revision = RuleSetCacheFiles {
+            geoip_path: std::path::PathBuf::from(r"C:\ProgramData\geoip-ir.srs"),
+            geosite_path: std::path::PathBuf::from(r"C:\ProgramData\geosite-ir.srs"),
+            source_revision: "unreviewed-revision",
+        };
+        let mut config = base_config();
+        assert!(apply_destination_routing_policy_with_rule_set_cache(
+            &mut config,
+            &policy,
+            CACHE_PATH,
+            &wrong_revision,
+        )
+        .unwrap_err()
+        .contains("unsupported source revision"));
+
+        let relative_path = RuleSetCacheFiles {
+            geoip_path: std::path::PathBuf::from("geoip-ir.srs"),
+            geosite_path: std::path::PathBuf::from(r"C:\ProgramData\geosite-ir.srs"),
+            source_revision: SOURCE_REVISION,
+        };
+        assert!(apply_destination_routing_policy_with_rule_set_cache(
+            &mut config,
+            &policy,
+            CACHE_PATH,
+            &relative_path,
+        )
+        .is_err());
     }
 
     #[test]

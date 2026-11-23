@@ -19,7 +19,9 @@ The Iranian rule-sets are maintained by the community project [Chocolate4U/Iran-
 
 The Agent now contains a bounded, redirect-disabled download/cache primitive. It accepts only the two hard-coded HTTPS URLs for that immutable commit, checks exact length, SRS header and SHA-256, and writes verified bytes through a same-directory temporary file followed by an atomic rename. Its cache directory is created only beneath the installer-provisioned `ProgramData\\BlacklistInevitable\\Agent` root, whose ACL is restricted to SYSTEM, Administrators and the Agent service SID. It refuses symlink/reparse-point directories and never changes ACLs itself.
 
-This cache primitive is not called by Agent startup, status IPC, or the desktop UI. It is not yet wired to the connection transaction or to sing-box `initial_path`; it therefore does not activate Rule mode or initiate downloads on an installed machine. The future Agent connection path must require both verified assets before building a Rule-mode config and must fail closed if either is unavailable.
+A crate-internal, pure configuration builder can now accept the verified cache result and place its two file paths in sing-box remote rule-set `initial_path` fields. It validates the pinned source revision and Windows absolute path shape. Existing callers that do not pass a verified cache result keep the previous remote-rule-set config without `initial_path`.
+
+Neither the cache download primitive nor this initial-path builder is called by Agent startup, status IPC, the desktop UI, or the connection transaction. They therefore do not activate Rule mode or initiate downloads on an installed machine. The future Agent connection path must explicitly call the bounded cache fetch, pass its returned token to the config builder, require both files, and fail closed if either is unavailable.
 
 DNS queries continue to use the encrypted HTTPS resolver configured for the selected profile; DNS reverse mapping is enabled so destination-domain information can be retained for subsequent route matching. Rule matching uses sing-box's route sniff action and process-independent destination matchers.
 
@@ -30,6 +32,6 @@ A user may add exact domains, suffixes (for example `*.example.com`), IPv4/IPv6 
 ## Important limitations and release gates
 
 - The desktop now has a locally persisted Global/Rule selector and editable destination rules, but these preferences are not sent to the Agent or applied to the network.
-- The Agent has a pinned, hash-verified cache primitive for the two SRS seed files, but it is not called by startup/IPC and is not yet connected to sing-box `initial_path` or the Connect transaction. Update/rollback diagnostics, cache recovery, and fail-safe connection gating remain open.
+- The Agent has a pinned, hash-verified cache primitive and a pure configuration helper that can set remote rule-set `initial_path` values from its verified files. Neither is called by startup/IPC or the Connect transaction. Update/rollback diagnostics, cache recovery, and fail-safe connection gating remain open.
 - Some apps use encrypted ClientHello/ECH or cached/shared system DNS, and some Iranian sites use foreign CDNs. Such destinations may not always be identified by domain or country IP rules. The custom domain/IP exception list is therefore required as an override mechanism.
 - Rule mode's JSON must pass the pinned sing-box 1.14.4 config checker and later be verified with real packet tests on Windows. A successful config check does not prove that `.ir` traffic is actually bypassed on a live machine.

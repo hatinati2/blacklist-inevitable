@@ -474,10 +474,10 @@ mod tests {
         };
         let cache_files = RuleSetCacheFiles {
             geoip_path: std::path::PathBuf::from(
-                r"C:\\ProgramData\\BlacklistInevitable\\Agent\\RuleSets\\geoip-ir.srs",
+                r"C:\ProgramData\BlacklistInevitable\Agent\RuleSets\geoip-ir.srs",
             ),
             geosite_path: std::path::PathBuf::from(
-                r"C:\\ProgramData\\BlacklistInevitable\\Agent\\RuleSets\\geosite-ir.srs",
+                r"C:\ProgramData\BlacklistInevitable\Agent\RuleSets\geosite-ir.srs",
             ),
             source_revision: SOURCE_REVISION,
         };
@@ -495,12 +495,12 @@ mod tests {
         assert_eq!(rule_sets[0]["tag"], GEOSITE_IR_TAG);
         assert_eq!(
             rule_sets[0]["initial_path"],
-            r"C:\\ProgramData\\BlacklistInevitable\\Agent\\RuleSets\\geosite-ir.srs"
+            r"C:\ProgramData\BlacklistInevitable\Agent\RuleSets\geosite-ir.srs"
         );
         assert_eq!(rule_sets[1]["tag"], GEOIP_IR_TAG);
         assert_eq!(
             rule_sets[1]["initial_path"],
-            r"C:\\ProgramData\\BlacklistInevitable\\Agent\\RuleSets\\geoip-ir.srs"
+            r"C:\ProgramData\BlacklistInevitable\Agent\RuleSets\geoip-ir.srs"
         );
         assert_eq!(rule_sets[0]["type"], "remote");
         assert_eq!(rule_sets[0]["http_client"], RULESET_HTTP_CLIENT_TAG);
@@ -515,8 +515,8 @@ mod tests {
         };
 
         let wrong_revision = RuleSetCacheFiles {
-            geoip_path: std::path::PathBuf::from(r"C:\\ProgramData\\geoip-ir.srs"),
-            geosite_path: std::path::PathBuf::from(r"C:\\ProgramData\\geosite-ir.srs"),
+            geoip_path: std::path::PathBuf::from(r"C:\ProgramData\geoip-ir.srs"),
+            geosite_path: std::path::PathBuf::from(r"C:\ProgramData\geosite-ir.srs"),
             source_revision: "unreviewed-revision",
         };
         let mut config = base_config();
@@ -531,7 +531,7 @@ mod tests {
 
         let relative_path = RuleSetCacheFiles {
             geoip_path: std::path::PathBuf::from("geoip-ir.srs"),
-            geosite_path: std::path::PathBuf::from(r"C:\\ProgramData\\geosite-ir.srs"),
+            geosite_path: std::path::PathBuf::from(r"C:\ProgramData\geosite-ir.srs"),
             source_revision: SOURCE_REVISION,
         };
         assert!(apply_destination_routing_policy_with_rule_set_cache(

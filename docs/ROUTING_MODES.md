@@ -32,6 +32,6 @@ A user may add exact domains, suffixes (for example `*.example.com`), IPv4/IPv6 
 ## Important limitations and release gates
 
 - The desktop now has a locally persisted Global/Rule selector and editable destination rules, but these preferences are not sent to the Agent or applied to the network.
-- The Agent has a pinned, hash-verified cache primitive for the two SRS seed files, but it is not called by startup/IPC and is not yet connected to sing-box `initial_path` or the Connect transaction. Update/rollback diagnostics, cache recovery, and fail-safe connection gating remain open.
+- The Agent has a pinned, hash-verified cache primitive and a pure configuration helper that can set remote rule-set `initial_path` values from its verified files. Neither is called by startup/IPC or the Connect transaction. Update/rollback diagnostics, cache recovery, and fail-safe connection gating remain open.
 - Some apps use encrypted ClientHello/ECH or cached/shared system DNS, and some Iranian sites use foreign CDNs. Such destinations may not always be identified by domain or country IP rules. The custom domain/IP exception list is therefore required as an override mechanism.
 - Rule mode's JSON must pass the pinned sing-box 1.14.4 config checker and later be verified with real packet tests on Windows. A successful config check does not prove that `.ir` traffic is actually bypassed on a live machine.

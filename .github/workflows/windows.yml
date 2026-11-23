@@ -81,9 +81,9 @@ jobs:
       - name: Sign Agent service when release signing is configured
         shell: pwsh
         env:
-          AGENT_SIGNER_THUMBPRINT: \${{ vars.AGENT_SIGNER_THUMBPRINT }}
-          WINDOWS_SIGNING_PFX_BASE64: \${{ secrets.WINDOWS_SIGNING_PFX_BASE64 }}
-          WINDOWS_SIGNING_PFX_PASSWORD: \${{ secrets.WINDOWS_SIGNING_PFX_PASSWORD }}
+          AGENT_SIGNER_THUMBPRINT: ${{ vars.AGENT_SIGNER_THUMBPRINT }}
+          WINDOWS_SIGNING_PFX_BASE64: ${{ secrets.WINDOWS_SIGNING_PFX_BASE64 }}
+          WINDOWS_SIGNING_PFX_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PFX_PASSWORD }}
         run: |
           $thumbprint = ($env:AGENT_SIGNER_THUMBPRINT -replace '\s', '').ToUpperInvariant()
           $pfxBase64 = $env:WINDOWS_SIGNING_PFX_BASE64
@@ -101,7 +101,7 @@ jobs:
         if: env.AGENT_SIGNING_CONFIGURED == 'true'
         shell: pwsh
         env:
-          AGENT_SIGNER_THUMBPRINT: \${{ vars.AGENT_SIGNER_THUMBPRINT }}
+          AGENT_SIGNER_THUMBPRINT: ${{ vars.AGENT_SIGNER_THUMBPRINT }}
         run: |
           $thumbprint = ($env:AGENT_SIGNER_THUMBPRINT -replace '\s', '').ToUpperInvariant()
           $kitsRoot = Join-Path ([Environment]::GetEnvironmentVariable("ProgramFiles(x86)")) "Windows Kits\10\bin"
@@ -171,7 +171,7 @@ jobs:
       - name: Prepare pinned Agent publisher identity
         shell: pwsh
         env:
-          AGENT_SIGNER_THUMBPRINT: \${{ vars.AGENT_SIGNER_THUMBPRINT }}
+          AGENT_SIGNER_THUMBPRINT: ${{ vars.AGENT_SIGNER_THUMBPRINT }}
         run: |
           $thumbprint = ($env:AGENT_SIGNER_THUMBPRINT -replace '\s', '').ToUpperInvariant()
           if ($env:AGENT_SIGNING_CONFIGURED -eq "true") {
@@ -289,7 +289,7 @@ jobs:
       - name: Prepare pinned Agent publisher identity
         shell: pwsh
         env:
-          AGENT_SIGNER_THUMBPRINT: \${{ vars.AGENT_SIGNER_THUMBPRINT }}
+          AGENT_SIGNER_THUMBPRINT: ${{ vars.AGENT_SIGNER_THUMBPRINT }}
         run: |
           $thumbprint = ($env:AGENT_SIGNER_THUMBPRINT -replace '\s', '').ToUpperInvariant()
           if ($env:AGENT_SIGNING_CONFIGURED -eq "true") {

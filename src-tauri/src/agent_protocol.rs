@@ -25,6 +25,95 @@ const MAX_CREDENTIALS: usize = 4;
 const MAX_CREDENTIAL_KEY_BYTES: usize = 32;
 const MAX_CREDENTIAL_VALUE_BYTES: usize = 8192;
 
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AgentRecoveryState {
+    Clear,
+    VerifiedCleanRetained,
+    Blocked,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentRecoveryDispositionCounts {
+    pub verified_clean: u32,
+    pub needs_cleanup: u32,
+    pub needs_restore: u32,
+    pub conflict: u32,
+    pub unknown: u32,
+}
+
+impl AgentRecoveryDispositionCounts {
+    pub fn compact(&self) -> String {
+        format!(
+            "clean:{},cleanup:{},restore:{},conflict:{},unknown:{}",
+            self.verified_clean, self.needs_cleanup, self.needs_restore,
+            self.conflict, self.unknown
+        )
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentRecoverySessionStatus {
+    pub session_id: u64,
+    pub revision: u64,
+    pub phase: String,
+    pub engine: crate::recovery_assessment::ResourceDisposition,
+    pub tunnel: crate::recovery_assessment::ResourceDisposition,
+    pub routes: AgentRecoveryDispositionCounts,
+    pub dns: AgentRecoveryDispositionCounts,
+    pub firewall_filters: crate::recovery_assessment::ResourceDisposition,
+    pub verified_clean: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentRecoveryStatus {
+    pub state: AgentRecoveryState,
+    pub journal_inventory_complete: bool,
+    pub total_sessions: u32,
+    pub verified_clean_sessions: u32,
+    pub blocked_sessions: u32,
+    pub omitted_sessions: u32,
+    pub journal_retained: bool,
+    pub sessions: Vec<AgentRecoverySessionStatus>,
+    pub diagnostics: Vec<String>,
+}
+
+impl AgentRecoveryStatus {
+    pub fn is_blocked(&self) -> bool {
+        matches!(self.state, AgentRecoveryState::Blocked)
+    }
+
+    pub fn detail_summary(&self) -> String {
+        let state = match self.state {
+            AgentRecoveryState::Clear => "clear",
+            AgentRecoveryState::VerifiedCleanRetained => "verified-clean-journal-retained",
+            AgentRecoveryState::Blocked => "blocked",
+        };
+        let mut detail = format!(
+            "Read-only recovery assessment: state={state}; sessions={}; verifiedClean={}; blocked={}; inventoryComplete={}; journalRetained={}.",
+            self.total_sessions, self.verified_clean_sessions, self.blocked_sessions,
+            self.journal_inventory_complete, self.journal_retained
+        );
+        for session in &self.sessions {
+            detail.push_str(&format!(
+                " Session {} r{} {:?}: engine={:?}, tunnel={:?}, routes[{}], dns[{}], WFP={:?}.",
+                session.session_id, session.revision, session.phase,
+                session.engine, session.tunnel, session.routes.compact(),
+                session.dns.compact(), session.firewall_filters
+            ));
+        }
+        for diagnostic in &self.diagnostics {
+            detail.push_str(" ");
+            detail.push_str(diagnostic);
+        }
+        detail.push_str(" No cleanup, rollback, or journal deletion was performed; VPN operations remain disabled.");
+        detail.chars().take(1100).collect()
+    }
+}
+
 /// A strict, secret-free profile representation supplied by the unelevated UI.
 /// The agent re-validates this data and never accepts an arbitrary engine JSON,
 /// executable path, working directory, or shell command from the IPC client.
@@ -107,6 +196,8 @@ pub struct AgentResponse {
     /// Sanitized text only. Never include raw engine config, credentials, file
     /// paths containing secret material, or unfiltered child-process output.
     pub detail: Option<String>,
+    /// Bounded, secret-free read-only assessment. Never authorizes mutation by itself.
+    pub recovery: Option<AgentRecoveryStatus>,
 }
 
 impl AgentResponse {
@@ -117,6 +208,7 @@ impl AgentResponse {
             status: AgentResponseStatus::Ok,
             connection,
             detail: None,
+            recovery: None,
         }
     }
 
@@ -127,6 +219,7 @@ impl AgentResponse {
             status: AgentResponseStatus::Rejected,
             connection: None,
             detail: Some(sanitize_detail(detail.into(), &BTreeMap::new())),
+            recovery: None,
         }
     }
 
@@ -142,6 +235,7 @@ impl AgentResponse {
             status: AgentResponseStatus::Failed,
             connection,
             detail: Some(sanitize_detail(detail.into(), credentials)),
+            recovery: None,
         }
     }
 }

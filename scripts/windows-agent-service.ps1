@@ -240,7 +240,7 @@ function Install-AgentService {
             $binaryPathArgument,
             "start= demand",
             "obj= LocalSystem",
-            ("DisplayName= " + $ServiceDisplayName)
+            ("DisplayName= `"$ServiceDisplayName`"")
         )
         Invoke-Sc @("sidtype", $ServiceName, "restricted")
         Invoke-Sc @(

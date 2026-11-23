@@ -58,7 +58,7 @@ pub struct FilterDeletionReport {
 }
 
 #[cfg(windows)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 struct ExpectedFilterIdentity {
     key: GUID,
     layer: GUID,
@@ -133,6 +133,70 @@ unsafe impl Send for WfpEngine {}
 
 #[cfg(windows)]
 impl WfpEngine {
+    /// Verify the durable provider and sublayer without creating or changing either.
+    ///
+    /// Cleanup must never call ensure_persistent_namespace(): recreating missing
+    /// ownership metadata would turn an unknown state into an apparent success.
+    fn verify_persistent_namespace(&self) -> Result<(), String> {
+        use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::{
+            FwpmFreeMemory0, FwpmProviderGetByKey0, FwpmSubLayerGetByKey0,
+            FWPM_PROVIDER_FLAG_PERSISTENT, FWPM_SUBLAYER_FLAG_PERSISTENT,
+        };
+
+        self.ensure_open()?;
+
+        let mut provider_ptr = std::ptr::null_mut();
+        let provider_status = unsafe {
+            FwpmProviderGetByKey0(self.handle, &PROVIDER_KEY, &mut provider_ptr)
+        };
+        if provider_status != 0 {
+            return Err(format!(
+                "Could not verify the Agent-owned WFP provider before cleanup (0x{provider_status:08X})."
+            ));
+        }
+        if provider_ptr.is_null() {
+            return Err("WFP provider lookup returned a null object during cleanup verification.".into());
+        }
+        let provider_valid = {
+            let provider = unsafe { &*provider_ptr };
+            guid_eq(&provider.providerKey, &PROVIDER_KEY)
+                && provider.flags & FWPM_PROVIDER_FLAG_PERSISTENT != 0
+        };
+        let mut allocation = provider_ptr.cast();
+        unsafe { FwpmFreeMemory0(&mut allocation) };
+        if !provider_valid {
+            return Err("The WFP provider is not the expected persistent Agent-owned provider.".into());
+        }
+
+        let mut sublayer_ptr = std::ptr::null_mut();
+        let sublayer_status = unsafe {
+            FwpmSubLayerGetByKey0(self.handle, &SUBLAYER_KEY, &mut sublayer_ptr)
+        };
+        if sublayer_status != 0 {
+            return Err(format!(
+                "Could not verify the Agent-owned WFP sublayer before cleanup (0x{sublayer_status:08X})."
+            ));
+        }
+        if sublayer_ptr.is_null() {
+            return Err("WFP sublayer lookup returned a null object during cleanup verification.".into());
+        }
+        let sublayer_valid = {
+            let sublayer = unsafe { &*sublayer_ptr };
+            let provider_matches = !sublayer.providerKey.is_null()
+                && guid_eq(unsafe { &*sublayer.providerKey }, &PROVIDER_KEY);
+            guid_eq(&sublayer.subLayerKey, &SUBLAYER_KEY)
+                && sublayer.flags & FWPM_SUBLAYER_FLAG_PERSISTENT != 0
+                && provider_matches
+        };
+        let mut allocation = sublayer_ptr.cast();
+        unsafe { FwpmFreeMemory0(&mut allocation) };
+        if !sublayer_valid {
+            return Err("The WFP sublayer is not persistently owned by the expected Agent provider.".into());
+        }
+
+        Ok(())
+    }
+
     /// Delete only persistent filters named by stable journal GUIDs.
     ///
     /// The provider-scoped inventory is verified first. Each requested key must
@@ -206,36 +270,20 @@ impl WfpEngine {
             });
         }
 
-        // This read-only snapshot also verifies that the persistent provider and
-        // sublayer still exist and are owned by this binary. Missing namespace
-        // state is Unknown, not proof that the requested filters are absent.
-        let inventory = self.enumerate_owned_filters()?;
+        // Verify the persistent ownership namespace read-only, then query
+        // each exact journal GUID. An unrelated filter is never enumerated or
+        // selected for deletion, and a missing namespace is an error, not
+        // evidence that a requested filter is already absent.
+        self.verify_persistent_namespace()?;
         let mut present = Vec::new();
         let mut already_absent = 0usize;
 
         for expected in &mut requested {
-            let key_text = uuid::Uuid::from_u128(guid_to_u128(&expected.key)).to_string();
-            let Some(current) = inventory.iter().find(|candidate| {
-                candidate.filter_key.as_deref().is_some_and(|value| {
-                    value.eq_ignore_ascii_case(&key_text)
-                })
-            }) else {
+            if lookup_owned_filter_identity(self.handle, expected)? {
+                present.push(*expected);
+            } else {
                 already_absent += 1;
-                continue;
-            };
-
-            if !current.provider_key.eq_ignore_ascii_case(&expected_provider) {
-                return Err("The current WFP filter inventory has an unexpected provider identity.".into());
             }
-            let current_layer = uuid::Uuid::parse_str(&current.layer_key)
-                .map_err(|_| "The current WFP filter inventory contains an invalid layer identity.".to_string())?;
-            if !guid_eq(&GUID::from_u128(current_layer.as_u128()), &expected.layer)
-                || current.filter_id == 0
-            {
-                return Err("The current WFP filter no longer matches the journaled provider/layer identity.".into());
-            }
-            expected.observed_filter_id = current.filter_id;
-            present.push(*expected);
         }
 
         if present.is_empty() {
@@ -726,6 +774,52 @@ impl WfpEngine {
         }
         Ok(())
     }
+}
+
+#[cfg(windows)]
+fn lookup_owned_filter_identity(
+    engine: windows_sys::Win32::Foundation::HANDLE,
+    expected: &mut ExpectedFilterIdentity,
+) -> Result<bool, String> {
+    use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::{
+        FwpmFilterGetByKey0, FwpmFreeMemory0, FWPM_FILTER_FLAG_PERSISTENT,
+    };
+
+    let mut filter_ptr = std::ptr::null_mut();
+    let status = unsafe { FwpmFilterGetByKey0(engine, &expected.key, &mut filter_ptr) };
+    if status == FWP_E_FILTER_NOT_FOUND {
+        return Ok(false);
+    }
+    if status != 0 {
+        return Err(format!(
+            "Could not look up the exact journaled WFP filter GUID (0x{status:08X})."
+        ));
+    }
+    if filter_ptr.is_null() {
+        return Err("WFP returned a null object for an existing journaled filter GUID.".into());
+    }
+
+    let verification = {
+        let filter = unsafe { &*filter_ptr };
+        let provider_matches = !filter.providerKey.is_null()
+            && guid_eq(unsafe { &*filter.providerKey }, &PROVIDER_KEY);
+        let valid = guid_eq(&filter.filterKey, &expected.key)
+            && guid_eq(&filter.layerKey, &expected.layer)
+            && guid_eq(&filter.subLayerKey, &SUBLAYER_KEY)
+            && provider_matches
+            && filter.flags & FWPM_FILTER_FLAG_PERSISTENT != 0
+            && filter.filterId != 0;
+        if valid {
+            expected.observed_filter_id = filter.filterId;
+            Ok(())
+        } else {
+            Err("The exact journaled WFP key is not a persistent filter owned by the expected provider and sublayer on the journaled layer.".to_string())
+        }
+    };
+    let mut allocation = filter_ptr.cast();
+    unsafe { FwpmFreeMemory0(&mut allocation) };
+    verification?;
+    Ok(true)
 }
 
 #[cfg(windows)]

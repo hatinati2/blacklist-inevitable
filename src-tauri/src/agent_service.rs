@@ -13,10 +13,29 @@ use crate::agent_protocol::{
     AgentRecoveryDispositionCounts, AgentRecoverySessionStatus, AgentRecoveryState,
     AgentRecoveryStatus,
 };
+use crate::connection_state::{ConnectionCoordinator, ConnectionPhase, ConnectionSnapshot};
 use crate::recovery_assessment::{Observation, ResourceDisposition};
 use crate::recovery_journal::{RecoveryJournal, RecoveryJournalStore};
 
 static STARTUP_RECOVERY_STATUS: OnceLock<AgentRecoveryStatus> = OnceLock::new();
+static CONNECTION_COORDINATOR: OnceLock<ConnectionCoordinator> = OnceLock::new();
+
+fn connection_coordinator_for_startup(recovery: &AgentRecoveryStatus) -> ConnectionCoordinator {
+    let coordinator = ConnectionCoordinator::new();
+    if recovery.is_blocked() {
+        if let Ok(recovery_id) = coordinator.begin_recovery() {
+            let _ = coordinator.finish_recovery(
+                recovery_id,
+                false,
+                Some(
+                    "Startup recovery remains blocked; no cleanup or journal disposition was performed."
+                        .to_string(),
+                ),
+            );
+        }
+    }
+    coordinator
+}
 
 fn empty_blocked_status(diagnostic: String) -> AgentRecoveryStatus {
     AgentRecoveryStatus {
@@ -438,9 +457,27 @@ fn assess_startup_journals(journals: &[RecoveryJournal]) -> AgentRecoveryStatus 
 /// marked RUNNING. This method performs observation only and never mutates OS
 /// resources or removes a journal.
 pub(crate) fn initialize_startup_recovery() -> AgentRecoveryStatus {
-    STARTUP_RECOVERY_STATUS
+    let recovery = STARTUP_RECOVERY_STATUS
         .get_or_init(inspect_startup_recovery_journal)
-        .clone()
+        .clone();
+    CONNECTION_COORDINATOR
+        .get_or_init(|| connection_coordinator_for_startup(&recovery));
+    recovery
+}
+
+/// Return the Agent-owned connection state for read-only status reporting.
+/// An uninitialized coordinator is represented as failed/unsafe, never as idle.
+pub(crate) fn connection_snapshot() -> ConnectionSnapshot {
+    CONNECTION_COORDINATOR
+        .get()
+        .map(ConnectionCoordinator::snapshot)
+        .unwrap_or_else(|| ConnectionSnapshot {
+            phase: ConnectionPhase::Failed,
+            session_id: None,
+            profile_id: None,
+            detail: Some("Agent connection state has not been initialized.".to_string()),
+            cleanup_healthy: false,
+        })
 }
 
 /// The status endpoint receives a compact structured copy of the read-only
@@ -459,6 +496,28 @@ pub(crate) fn startup_recovery_status() -> AgentRecoveryStatus {
 mod startup_recovery_tests {
     use super::*;
     use crate::recovery_journal::JournalPhase;
+
+    #[test]
+    fn clear_startup_assessment_maps_to_disconnected_connection_state() {
+        let coordinator = connection_coordinator_for_startup(&assess_startup_journals(&[]));
+        let snapshot = coordinator.snapshot();
+        assert_eq!(snapshot.phase, ConnectionPhase::Disconnected);
+        assert!(snapshot.cleanup_healthy);
+        assert!(snapshot.session_id.is_none());
+    }
+
+    #[test]
+    fn blocked_startup_assessment_maps_to_failed_connection_state_and_blocks_connect() {
+        let mut journal = RecoveryJournal::new(42);
+        journal.phase = JournalPhase::RecoveryRequired;
+        let recovery = assess_startup_journals(&[journal]);
+        let coordinator = connection_coordinator_for_startup(&recovery);
+        let snapshot = coordinator.snapshot();
+        assert_eq!(snapshot.phase, ConnectionPhase::Failed);
+        assert!(!snapshot.cleanup_healthy);
+        assert!(snapshot.session_id.is_some());
+        assert!(coordinator.begin_connect("profile-1").is_err());
+    }
 
     #[test]
     fn empty_journal_set_reports_clear_inventory() {

@@ -239,6 +239,11 @@ impl WfpEngine {
         }
 
         if present.is_empty() {
+            // Confirm every requested key is still absent after the complete
+            // provider inventory; an inventory omission alone is not enough.
+            for expected in &requested {
+                verify_filter_absent(self.handle, &expected.key)?;
+            }
             return Ok(FilterDeletionReport {
                 requested_filter_count: requested.len(),
                 deleted_filter_count: 0,
@@ -281,7 +286,9 @@ impl WfpEngine {
             return Err(error);
         }
 
-        for expected in &present {
+        // Recheck every requested key, including keys absent in the first
+        // inventory, so a concurrent replacement cannot be mistaken for success.
+        for expected in &requested {
             verify_filter_absent(self.handle, &expected.key)?;
         }
 

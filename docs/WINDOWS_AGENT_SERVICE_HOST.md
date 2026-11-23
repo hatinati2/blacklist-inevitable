@@ -43,8 +43,8 @@ The desktop app does not launch or install this binary. The NSIS installer does 
 1. Add service installation/upgrade/removal with explicit UAC consent, signed-binary verification, LocalSystem/privilege provisioning, service SID hardening, protected journal directory ACLs, and tested rollback.
 2. Add authenticated profile/credential handoff with one-shot memory handling and no secret logging/persistence.
 3. Integrate the recovery journal and WFP transaction backend. Persist exact state before OS mutations and verify it during startup recovery.
-5. Add the Agent-owned connection runtime only after authorization and crash recovery are tested.
-6. Add Windows 10/11 integration tests for user logon/logoff, session switching, remote-client rejection, unauthorized SID rejection, malformed/oversized/replayed frames, stop during blocked pipe connect/read, service crash/reboot, and packet-capture leak acceptance.
+4. Add the Agent-owned connection runtime only after authorization and crash recovery are tested.
+5. Add Windows 10/11 integration tests for user logon/logoff, session switching, remote-client rejection, unauthorized SID rejection, malformed/oversized/replayed frames, stop during blocked pipe connect/read, service crash/reboot, and packet-capture leak acceptance.
 
 A green service-host build proves only that the Windows binary compiles and its automated checks pass. It is not evidence of a registered service, a connected desktop client, an active kill switch, or leak prevention.
 

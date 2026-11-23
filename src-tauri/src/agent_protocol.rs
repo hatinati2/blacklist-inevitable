@@ -766,7 +766,7 @@ mod tests {
         let detail = status.detail_summary();
         assert!(detail.contains("startup recovery"));
         assert!(detail.contains("unresolved recovery journal"));
-        assert!(detail.contains("journal deletion was not performed"));
+        assert!(detail.contains("No cleanup, rollback, or journal deletion was performed"));
     }
 
     #[test]

@@ -1018,3 +1018,120 @@ impl Drop for WfpEngine {
         }
     }
 }
+
+#[cfg(all(test, windows))]
+mod owned_filter_deletion_tests {
+    use super::*;
+    use crate::recovery_journal::FirewallFilterRecord;
+    use crate::wfp_policy::{FilterIntent, PlannedFilter, TransportProtocol, VpnEndpoint, WfpLayer};
+
+    fn journal_record() -> FirewallFilterRecord {
+        FirewallFilterRecord {
+            provider_key: uuid::Uuid::from_u128(guid_to_u128(&PROVIDER_KEY)).to_string(),
+            filter_key: Some(uuid::Uuid::new_v4().to_string()),
+            layer_key: uuid::Uuid::from_u128(guid_to_u128(&wfp_layer_guid(WfpLayer::AleAuthConnectV4))).to_string(),
+            filter_id: 7,
+        }
+    }
+
+    #[test]
+    fn rejects_legacy_foreign_unsupported_and_duplicate_filter_identities_before_bfe_access() {
+        let mut engine = WfpEngine {
+            handle: std::ptr::null_mut(),
+            poisoned: false,
+        };
+
+        let mut legacy = journal_record();
+        legacy.filter_key = None;
+        assert!(engine.remove_owned_filters(&[legacy]).unwrap_err().contains("no stable filter GUID"));
+
+        let mut foreign = journal_record();
+        foreign.provider_key = uuid::Uuid::new_v4().to_string();
+        assert!(engine.remove_owned_filters(&[foreign]).unwrap_err().contains("does not belong"));
+
+        let mut unsupported = journal_record();
+        unsupported.layer_key = uuid::Uuid::new_v4().to_string();
+        assert!(engine.remove_owned_filters(&[unsupported]).unwrap_err().contains("outside the Agent"));
+
+        let duplicate = journal_record();
+        assert!(engine.remove_owned_filters(&[duplicate.clone(), duplicate]).unwrap_err().contains("duplicate"));
+
+        let mut zero_runtime_id = journal_record();
+        zero_runtime_id.filter_id = 0;
+        assert!(engine.remove_owned_filters(&[zero_runtime_id]).unwrap_err().contains("zero runtime"));
+    }
+
+    /// Commit one permit-only test filter that cannot match a real interface:
+    /// the interface LUID is exactly zero (invalid for a live adapter), and the
+    /// endpoint is a documentation-only TEST-NET address. The filter is removed
+    /// immediately by the public journal-owned deletion path.
+    fn create_nonmatching_test_filter(engine: &mut WfpEngine) -> FirewallFilterRecord {
+        use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::{
+            FwpmFilterGetByKey0, FwpmFreeMemory0, FwpmTransactionBegin0,
+            FwpmTransactionCommit0,
+        };
+
+        engine.ensure_persistent_namespace().expect("verify persistent WFP namespace");
+        let begin = unsafe { FwpmTransactionBegin0(engine.handle, 0) };
+        assert_eq!(begin, 0, "begin isolated test-filter transaction");
+
+        let key = GUID::from_u128(uuid::Uuid::new_v4().as_u128());
+        let planned = PlannedFilter {
+            interface_index: 0,
+            interface_luid: 0,
+            layer: WfpLayer::AleAuthConnectV4,
+            intent: FilterIntent::PermitVpnEndpoint(VpnEndpoint {
+                address: "203.0.113.254".parse().expect("TEST-NET IPv4 address"),
+                port: 65_535,
+                protocol: TransportProtocol::Tcp,
+            }),
+        };
+
+        if let Err(error) = engine.add_and_verify_planned_filter(key, &planned) {
+            let _ = engine.abort_transaction_or_poison();
+            panic!("stage non-matching WFP test filter: {error}");
+        }
+        let commit = unsafe { FwpmTransactionCommit0(engine.handle) };
+        if commit != 0 {
+            let _ = engine.abort_transaction_or_poison();
+            panic!("commit non-matching WFP test filter failed: 0x{commit:08X}");
+        }
+
+        let mut filter_ptr = std::ptr::null_mut();
+        let status = unsafe { FwpmFilterGetByKey0(engine.handle, &key, &mut filter_ptr) };
+        assert_eq!(status, 0, "read back committed WFP test filter");
+        assert!(!filter_ptr.is_null(), "WFP test filter lookup returned null");
+        let filter_id = unsafe { (*filter_ptr).filterId };
+        let mut allocation = filter_ptr.cast();
+        unsafe { FwpmFreeMemory0(&mut allocation) };
+        assert_ne!(filter_id, 0, "committed WFP test filter has a nonzero runtime ID");
+
+        FirewallFilterRecord {
+            provider_key: uuid::Uuid::from_u128(guid_to_u128(&PROVIDER_KEY)).to_string(),
+            filter_key: Some(uuid::Uuid::from_u128(guid_to_u128(&key)).to_string()),
+            layer_key: uuid::Uuid::from_u128(guid_to_u128(&wfp_layer_guid(WfpLayer::AleAuthConnectV4))).to_string(),
+            filter_id,
+        }
+    }
+
+    #[test]
+    fn removes_only_the_journaled_persistent_filter_and_is_idempotent() {
+        let mut engine = WfpEngine::open_local().expect("open local BFE");
+        let record = create_nonmatching_test_filter(&mut engine);
+
+        let first = engine
+            .remove_owned_filters(std::slice::from_ref(&record))
+            .expect("remove exact Agent-owned WFP filter");
+        assert_eq!(first.requested_filter_count, 1);
+        assert_eq!(first.deleted_filter_count, 1);
+        assert_eq!(first.already_absent_filter_count, 0);
+
+        let second = engine
+            .remove_owned_filters(std::slice::from_ref(&record))
+            .expect("repeat exact deletion after filter is already absent");
+        assert_eq!(second.requested_filter_count, 1);
+        assert_eq!(second.deleted_filter_count, 0);
+        assert_eq!(second.already_absent_filter_count, 1);
+    }
+}
+

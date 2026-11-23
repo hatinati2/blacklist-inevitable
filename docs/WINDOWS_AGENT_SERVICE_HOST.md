@@ -17,6 +17,18 @@
 - The unelevated desktop now has a status-only named-pipe client with a five-second timeout, bounded response framing, and request/response correlation. It verifies the server PID and session 0 from the pipe handle, then verifies the process token SID (LocalSystem) when token inspection is available; for a standard user that cannot open the SYSTEM token, it fails over to reading the pipe object's owner SID and accepts only LocalSystem. It sends no credentials and no network-mutating operations.
 - The Windows CI builds this executable independently from the Tauri desktop installer.
 
+## Installer and signed service deployment
+
+- The per-machine NSIS installer bundles `blacklist-inevitable-agent.exe`, the PowerShell service helper, and a publisher-thumbprint pin file under the installed resources directory.
+- The installer requires the normal Windows per-machine elevation/UAC consent. The desktop application itself remains unelevated.
+- Before upgrade, the hook stops an existing Agent service before NSIS replaces the installed Agent executable. Before uninstall, it removes the Agent service before the executable is deleted. If the service cannot be stopped/removed, the hook aborts that installer operation instead of deleting a live service binary.
+- During install, the helper verifies that both the Agent binary and the NSIS installer have valid Authenticode signatures from the exact same 40-hex publisher thumbprint pinned in the bundled file. A missing or unconfigured pin returns a no-install status; unsigned development and CI builds therefore leave the privileged service unregistered.
+- The signed deployment explicitly registers the service as LocalSystem because the current authentication path uses `WTSQueryUserToken` and needs `SE_TCB_NAME`. It applies a restricted service SID, a SYSTEM/Administrators-only service-control DACL, SCM restart-on-failure actions, and a protected `%ProgramData%\\blacklist-inevitable\\Agent` journal directory whose write access includes only SYSTEM, Administrators, and the service SID.
+- The installer workflow can sign the Agent and final NSIS setup binary when `AGENT_SIGNER_THUMBPRINT`, `WINDOWS_SIGNING_PFX_BASE64`, and `WINDOWS_SIGNING_PFX_PASSWORD` are configured. Without all three, the workflow builds an unsigned desktop installer, pins `UNCONFIGURED`, and the smoke test verifies that no LocalSystem Agent service was registered.
+- Uninstallation preserves the ProgramData recovery-journal directory for later reconciliation; it does not silently delete potentially important network-recovery state.
+
+The signed positive deployment path still requires a trusted release certificate and clean Windows 10/11 validation. The ordinary CI workflow without signing secrets validates resource packaging and the fail-closed unsigned path only; it does not prove a signed service was installed or exercised.
+
 ## Important identity and deployment constraints
 
 The current listener targets the active physical-console session. It deliberately rejects other sessions, including RDP sessions, until a tested multi-session policy is implemented.
@@ -29,14 +41,14 @@ The named-pipe DACL is only the first access gate. Authorization also compares t
 
 This is still a service/IPC foundation, not an installed or operational VPN Agent. It does not:
 
-- register, install, upgrade, repair, or uninstall itself as a Windows service;
-- choose or provision its service account, service SID, binary signature policy, or service-owned journal directory ACL;
-- install or launch the Agent service automatically; the desktop-side status-only pipe client exists, but it can only connect when the service is independently present and running;
+- transfer credentials or accept `Connect`/`Disconnect`/`Recover` operations;
+- start sing-box, create TUN, change routes/DNS, or activate firewall policy;
+- load the recovery journal or report a real VPN connection state;
 - transfer credentials or accept Connect/Disconnect/Recover operations;
 - open WFP, start sing-box, create TUN, change routes/DNS, or mutate firewall policy;
 - load the recovery journal or report a real VPN connection state.
 
-The desktop app does not launch or install this binary. The NSIS installer does not bundle it yet. Do not manually register this executable as a production VPN service.
+The desktop process does not launch the Agent directly. The per-machine NSIS installer now bundles the Agent and contains the signature-gated service lifecycle hooks described above. Do not manually register an unsigned or unpinned executable as a production VPN service.
 
 ## Required next slices
 

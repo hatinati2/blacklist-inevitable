@@ -14,6 +14,7 @@
 - IPC frames use the shared four-byte little-endian length prefix, are bounded to 128 KiB, and have a finite 30-second read deadline. The implementation drains the pipe buffer incrementally so a payload larger than the kernel buffer cannot deadlock.
 - A replay guard is created after peer authentication. One request is handled per connection; malformed or unauthorized clients are dropped.
 - Only `GetStatus` and `GetDiagnostics` return a status-only response. `Connect`, `Disconnect`, and `Recover` are explicitly rejected.
+- The unelevated desktop now has a status-only named-pipe client with a five-second timeout, bounded response framing, request/response correlation, and server-process token validation (LocalSystem, session 0). It sends no credentials and no network-mutating operations.
 - The Windows CI builds this executable independently from the Tauri desktop installer.
 
 ## Important identity and deployment constraints
@@ -30,7 +31,7 @@ This is still a service/IPC foundation, not an installed or operational VPN Agen
 
 - register, install, upgrade, repair, or uninstall itself as a Windows service;
 - choose or provision its service account, service SID, binary signature policy, or service-owned journal directory ACL;
-- include a desktop-side named-pipe client or connect the Tauri UI to the service;
+- install or launch the Agent service automatically; the desktop-side status-only pipe client exists, but it can only connect when the service is independently present and running;
 - transfer credentials or accept Connect/Disconnect/Recover operations;
 - open WFP, start sing-box, create TUN, change routes/DNS, or mutate firewall policy;
 - load the recovery journal or report a real VPN connection state.
@@ -39,10 +40,9 @@ The desktop app does not launch or install this binary. The NSIS installer does 
 
 ## Required next slices
 
-1. Add the unelevated desktop named-pipe client, finite timeouts, peer/server identity validation, and response correlation. Keep all network operations rejected.
-2. Add service installation/upgrade/removal with explicit UAC consent, signed-binary verification, LocalSystem/privilege provisioning, service SID hardening, protected journal directory ACLs, and tested rollback.
-3. Add authenticated profile/credential handoff with one-shot memory handling and no secret logging/persistence.
-4. Integrate the recovery journal and WFP transaction backend. Persist exact state before OS mutations and verify it during startup recovery.
+1. Add service installation/upgrade/removal with explicit UAC consent, signed-binary verification, LocalSystem/privilege provisioning, service SID hardening, protected journal directory ACLs, and tested rollback.
+2. Add authenticated profile/credential handoff with one-shot memory handling and no secret logging/persistence.
+3. Integrate the recovery journal and WFP transaction backend. Persist exact state before OS mutations and verify it during startup recovery.
 5. Add the Agent-owned connection runtime only after authorization and crash recovery are tested.
 6. Add Windows 10/11 integration tests for user logon/logoff, session switching, remote-client rejection, unauthorized SID rejection, malformed/oversized/replayed frames, stop during blocked pipe connect/read, service crash/reboot, and packet-capture leak acceptance.
 

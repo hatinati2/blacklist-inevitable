@@ -83,7 +83,10 @@ pub struct AgentRecoveryStatus {
 
 impl AgentRecoveryStatus {
     pub fn is_blocked(&self) -> bool {
-        matches!(self.state, AgentRecoveryState::Blocked)
+        // A journal is not considered reconciled merely because the current
+        // read-only snapshot looks clean. Until a separate reviewed cleanup
+        // protocol disposes of retained journals, startup remains blocked.
+        !matches!(self.state, AgentRecoveryState::Clear)
     }
 
     pub fn detail_summary(&self) -> String {
@@ -95,7 +98,7 @@ impl AgentRecoveryStatus {
         let headline = match self.state {
             AgentRecoveryState::Clear => "Agent startup recovery is clean.".to_string(),
             AgentRecoveryState::VerifiedCleanRetained => {
-                "Agent startup recovery assessment is verified clean; unresolved recovery journals are retained.".to_string()
+                "Agent startup recovery is blocked pending journal disposition: unresolved recovery journals are verified clean but retained.".to_string()
             }
             AgentRecoveryState::Blocked if self.total_sessions > 0 => format!(
                 "Agent startup recovery is blocked: {} unresolved recovery journal(s) require review.",
@@ -748,6 +751,26 @@ mod tests {
         let mut request = connect_request();
         request.version = AGENT_PROTOCOL_VERSION + 1;
         assert!(validate_agent_request(&request).is_err());
+    }
+
+    #[test]
+    fn verified_clean_but_retained_journals_still_block_startup_status() {
+        let status = AgentRecoveryStatus {
+            state: AgentRecoveryState::VerifiedCleanRetained,
+            journal_inventory_complete: true,
+            total_sessions: 1,
+            verified_clean_sessions: 1,
+            blocked_sessions: 0,
+            omitted_sessions: 0,
+            journal_retained: true,
+            sessions: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        assert!(status.is_blocked());
+        let detail = status.detail_summary();
+        assert!(detail.contains("startup recovery"));
+        assert!(detail.contains("unresolved recovery journal"));
+        assert!(detail.contains("verified clean but retained"));
     }
 
     #[test]

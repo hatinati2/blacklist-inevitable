@@ -81,6 +81,588 @@ pub struct RecoveryAssessment {
     pub can_remove_journal: bool,
 }
 
+/// Stable resource locator used by a pure recovery plan. This type is
+/// diagnostic only; it never grants permission to mutate an operating-system
+/// resource.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RecoveryPlanResource {
+    Assessment,
+    Engine,
+    Tunnel,
+    Route(String),
+    Dns(u32),
+    Wfp,
+}
+
+/// A reason why a session cannot yet produce a reviewed recovery intent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryPlanBlocker {
+    pub resource: RecoveryPlanResource,
+    pub disposition: ResourceDisposition,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryPlanState {
+    /// At least one resource is Unknown/Conflict or plan inputs are inconsistent.
+    Blocked,
+    /// All observations are sufficiently specific to describe intents.
+    /// This is not permission to execute them.
+    ReadyForReview,
+    /// Resources appear clean, but the journal is retained and not deletable.
+    VerifiedCleanRetained,
+}
+
+/// Stable WFP identity. Runtime filter IDs are deliberately excluded.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RecoveryWfpFilterIdentity {
+    pub provider_key: String,
+    pub filter_key: String,
+    pub layer_key: String,
+}
+
+/// An immutable description of a possible follow-up operation. The planner
+/// does not execute these intents. A future executor must re-observe the
+/// resource immediately before each individual mutation and assess it again
+/// immediately afterwards.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecoveryIntent {
+    StopEngine {
+        process: EngineProcessRecord,
+    },
+    RemoveTunnel {
+        interface: TunnelInterfaceRecord,
+    },
+    RemoveAppliedRoute {
+        destination_prefix: String,
+        applied: RouteState,
+    },
+    RestorePreviousRoute {
+        destination_prefix: String,
+        /// Exact live route state observed by the planner. None means the
+        /// destination was positively observed absent before restoration.
+        expected_current: Option<RouteState>,
+        previous: RouteState,
+    },
+    RestorePreviousDns {
+        interface_index: u32,
+        interface_guid: String,
+        expected_applied: DnsConfiguration,
+        previous: DnsConfiguration,
+    },
+    RemoveWfpFilter {
+        identity: RecoveryWfpFilterIdentity,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryIntentPlan {
+    pub session_id: u64,
+    pub revision: u64,
+    pub state: RecoveryPlanState,
+    /// Empty whenever any resource is Unknown or Conflict.
+    pub intents: Vec<RecoveryIntent>,
+    pub blockers: Vec<RecoveryPlanBlocker>,
+    /// Always false in this milestone. Journal disposition is a separate review.
+    pub journal_removal_authorized: bool,
+}
+
+impl RecoveryIntentPlan {
+    pub fn is_blocked(&self) -> bool {
+        matches!(self.state, RecoveryPlanState::Blocked)
+    }
+}
+
+fn canonicalize_plan_route_key(value: &str) -> Option<String> {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    let (address, prefix_length) = value.split_once('/')?;
+    let address = address.parse::<IpAddr>().ok()?;
+    let prefix_length = prefix_length.parse::<u8>().ok()?;
+    let network = match address {
+        IpAddr::V4(address) if prefix_length <= 32 => {
+            let bits = u32::from_be_bytes(address.octets());
+            let mask = if prefix_length == 0 { 0 } else { u32::MAX << (32 - prefix_length) };
+            IpAddr::V4(Ipv4Addr::from((bits & mask).to_be_bytes()))
+        }
+        IpAddr::V6(address) if prefix_length <= 128 => {
+            let bits = u128::from_be_bytes(address.octets());
+            let mask = if prefix_length == 0 { 0 } else { u128::MAX << (128 - prefix_length) };
+            IpAddr::V6(Ipv6Addr::from((bits & mask).to_be_bytes()))
+        }
+        _ => return None,
+    };
+    Some(format!("{network}/{prefix_length}"))
+}
+
+fn add_cross_session_identity_blockers(
+    journal: &RecoveryJournal,
+    unresolved_journals: &[RecoveryJournal],
+    blockers: &mut Vec<RecoveryPlanBlocker>,
+) {
+    let mut blocked_engine = false;
+    let mut blocked_tunnel = false;
+    let mut blocked_routes = BTreeSet::new();
+    let mut blocked_dns = BTreeSet::new();
+    let mut blocked_wfp = BTreeSet::new();
+
+    for other in unresolved_journals
+        .iter()
+        .filter(|other| other.session_id != journal.session_id)
+    {
+        if let (Some(expected), Some(actual)) = (&journal.engine, &other.engine) {
+            if expected.process_id == actual.process_id && !blocked_engine {
+                push_recovery_plan_blocker(
+                    blockers,
+                    RecoveryPlanResource::Engine,
+                    ResourceDisposition::Conflict,
+                );
+                blocked_engine = true;
+            }
+        }
+
+        if let (Some(expected), Some(actual)) = (&journal.tunnel, &other.tunnel) {
+            let same_guid = normalize_guid(&expected.interface_guid)
+                .zip(normalize_guid(&actual.interface_guid))
+                .is_some_and(|(left, right)| left == right);
+            if same_guid && !blocked_tunnel {
+                push_recovery_plan_blocker(
+                    blockers,
+                    RecoveryPlanResource::Tunnel,
+                    ResourceDisposition::Conflict,
+                );
+                blocked_tunnel = true;
+            }
+        }
+
+        for expected in &journal.routes {
+            for actual in &other.routes {
+                let same_prefix = canonicalize_plan_route_key(&expected.destination_prefix)
+                    .zip(canonicalize_plan_route_key(&actual.destination_prefix))
+                    .is_some_and(|(left, right)| left == right);
+                if same_prefix && blocked_routes.insert(expected.destination_prefix.clone()) {
+                    push_recovery_plan_blocker(
+                        blockers,
+                        RecoveryPlanResource::Route(expected.destination_prefix.clone()),
+                        ResourceDisposition::Conflict,
+                    );
+                }
+            }
+        }
+
+        for expected in &journal.dns {
+            for actual in &other.dns {
+                let same_index = expected.interface_index == actual.interface_index;
+                let same_guid = expected
+                    .interface_guid
+                    .as_deref()
+                    .and_then(normalize_guid)
+                    .zip(actual.interface_guid.as_deref().and_then(normalize_guid))
+                    .is_some_and(|(left, right)| left == right);
+                if (same_index || same_guid) && blocked_dns.insert(expected.interface_index) {
+                    push_recovery_plan_blocker(
+                        blockers,
+                        RecoveryPlanResource::Dns(expected.interface_index),
+                        ResourceDisposition::Conflict,
+                    );
+                }
+            }
+        }
+
+        for expected in &journal.firewall_filters {
+            for actual in &other.firewall_filters {
+                let same_key = expected
+                    .filter_key
+                    .as_deref()
+                    .and_then(normalize_guid)
+                    .zip(actual.filter_key.as_deref().and_then(normalize_guid))
+                    .is_some_and(|(left, right)| left == right);
+                if same_key {
+                    if let Some(key) = expected.filter_key.as_deref().and_then(normalize_guid) {
+                        if blocked_wfp.insert(key) {
+                            push_recovery_plan_blocker(
+                                blockers,
+                                RecoveryPlanResource::Wfp,
+                                ResourceDisposition::Conflict,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn push_recovery_plan_blocker(
+    blockers: &mut Vec<RecoveryPlanBlocker>,
+    resource: RecoveryPlanResource,
+    disposition: ResourceDisposition,
+) {
+    blockers.push(RecoveryPlanBlocker {
+        resource,
+        disposition,
+    });
+}
+
+/// Convert an assessment into deterministic, review-only intents.
+///
+/// This function performs no Windows API calls, process control, filesystem
+/// writes, route/DNS/WFP changes, rollback, or journal deletion. Unknown or
+/// conflicting state blocks the entire session plan; it never emits a partial
+/// list that could tempt a caller to proceed with only some resources.
+pub fn build_recovery_intent_plan(
+    journal: &RecoveryJournal,
+    unresolved_journals: &[RecoveryJournal],
+    snapshot: &RecoverySnapshot,
+    assessment: &RecoveryAssessment,
+) -> Result<RecoveryIntentPlan, String> {
+    journal.validate()?;
+    for unresolved in unresolved_journals {
+        unresolved.validate()?;
+    }
+    let same_session = unresolved_journals
+        .iter()
+        .filter(|item| item.session_id == journal.session_id)
+        .collect::<Vec<_>>();
+    if same_session.len() != 1 || same_session[0] != journal {
+        return Err("The recovery plan requires the exact selected latest journal from the unresolved-session inventory.".to_string());
+    }
+    if assess_recovery(journal, snapshot) != *assessment {
+        return Err("The supplied recovery assessment does not match the selected journal and live snapshot.".to_string());
+    }
+
+    let mut intents = Vec::new();
+    let mut blockers = Vec::new();
+    add_cross_session_identity_blockers(journal, unresolved_journals, &mut blockers);
+
+    match assessment.engine {
+        ResourceDisposition::VerifiedClean => {}
+        ResourceDisposition::NeedsCleanup => match journal.engine.clone() {
+            Some(process) if process.process_id != 0 && process.creation_time_100ns != 0 => {
+                intents.push(RecoveryIntent::StopEngine { process });
+            }
+            _ => push_recovery_plan_blocker(&mut blockers,RecoveryPlanResource::Engine, ResourceDisposition::Unknown),
+        },
+        disposition => push_recovery_plan_blocker(&mut blockers,RecoveryPlanResource::Engine, disposition),
+    }
+
+    match assessment.tunnel {
+        ResourceDisposition::VerifiedClean => {}
+        ResourceDisposition::NeedsCleanup => match journal.tunnel.clone() {
+            Some(interface)
+                if !interface.address_details.is_empty()
+                    && normalize_guid(&interface.interface_guid).is_some() =>
+            {
+                intents.push(RecoveryIntent::RemoveTunnel { interface });
+            }
+            _ => push_recovery_plan_blocker(&mut blockers,RecoveryPlanResource::Tunnel, ResourceDisposition::Unknown),
+        },
+        disposition => push_recovery_plan_blocker(&mut blockers,RecoveryPlanResource::Tunnel, disposition),
+    }
+
+    let mut route_assessments = BTreeMap::new();
+    let mut duplicate_route_assessments = BTreeSet::new();
+    for item in &assessment.routes {
+        if route_assessments
+            .insert(item.destination_prefix.clone(), item.disposition)
+            .is_some()
+        {
+            duplicate_route_assessments.insert(item.destination_prefix.clone());
+        }
+    }
+    for destination_prefix in duplicate_route_assessments {
+        push_recovery_plan_blocker(&mut blockers,
+            RecoveryPlanResource::Route(destination_prefix),
+            ResourceDisposition::Conflict,
+        );
+    }
+
+    let journal_route_keys = journal
+        .routes
+        .iter()
+        .map(|record| record.destination_prefix.clone())
+        .collect::<BTreeSet<_>>();
+    for record in &journal.routes {
+        let disposition = route_assessments
+            .get(&record.destination_prefix)
+            .copied()
+            .unwrap_or(ResourceDisposition::Unknown);
+        match disposition {
+            ResourceDisposition::VerifiedClean => {}
+            ResourceDisposition::NeedsCleanup => {
+                if record.previous.is_none() && record.applied.interface_luid.is_some() {
+                    intents.push(RecoveryIntent::RemoveAppliedRoute {
+                        destination_prefix: record.destination_prefix.clone(),
+                        applied: record.applied.clone(),
+                    });
+                } else {
+                    push_recovery_plan_blocker(&mut blockers,
+                        RecoveryPlanResource::Route(record.destination_prefix.clone()),
+                        ResourceDisposition::Unknown,
+                    );
+                }
+            }
+            ResourceDisposition::NeedsRestore => {
+                let expected_current = match snapshot.routes.get(&record.destination_prefix) {
+                    Some(Observation::Present(actual)) if actual == &record.applied => {
+                        Some(actual.clone())
+                    }
+                    Some(Observation::Absent) => None,
+                    _ => {
+                        push_recovery_plan_blocker(
+                            &mut blockers,
+                            RecoveryPlanResource::Route(record.destination_prefix.clone()),
+                            ResourceDisposition::Unknown,
+                        );
+                        continue;
+                    }
+                };
+                match record.previous.clone() {
+                    Some(previous)
+                        if record.applied.interface_luid.is_some()
+                            && previous.interface_luid.is_some() =>
+                    {
+                        intents.push(RecoveryIntent::RestorePreviousRoute {
+                            destination_prefix: record.destination_prefix.clone(),
+                            expected_current,
+                            previous,
+                        });
+                    }
+                    _ => push_recovery_plan_blocker(
+                        &mut blockers,
+                        RecoveryPlanResource::Route(record.destination_prefix.clone()),
+                        ResourceDisposition::Unknown,
+                    ),
+                }
+            },
+            other => push_recovery_plan_blocker(&mut blockers,
+                RecoveryPlanResource::Route(record.destination_prefix.clone()),
+                other,
+            ),
+        }
+    }
+    for extra in route_assessments.keys() {
+        if !journal_route_keys.contains(extra) {
+            push_recovery_plan_blocker(&mut blockers,
+                RecoveryPlanResource::Route(extra.clone()),
+                ResourceDisposition::Conflict,
+            );
+        }
+    }
+
+    let mut dns_assessments = BTreeMap::new();
+    let mut duplicate_dns_assessments = BTreeSet::new();
+    for item in &assessment.dns {
+        if dns_assessments
+            .insert(item.interface_index, item.disposition)
+            .is_some()
+        {
+            duplicate_dns_assessments.insert(item.interface_index);
+        }
+    }
+    for interface_index in duplicate_dns_assessments {
+        push_recovery_plan_blocker(&mut blockers,
+            RecoveryPlanResource::Dns(interface_index),
+            ResourceDisposition::Conflict,
+        );
+    }
+
+    let journal_dns_indexes = journal
+        .dns
+        .iter()
+        .map(|record| record.interface_index)
+        .collect::<BTreeSet<_>>();
+    for record in &journal.dns {
+        let disposition = dns_assessments
+            .get(&record.interface_index)
+            .copied()
+            .unwrap_or(ResourceDisposition::Unknown);
+        match disposition {
+            ResourceDisposition::VerifiedClean => {}
+            ResourceDisposition::NeedsRestore => {
+                let expected_guid = record.interface_guid.as_deref().and_then(normalize_guid);
+                let complete = expected_guid.as_deref().is_some_and(|guid| {
+                    complete_dns_interface(&record.applied, guid).is_some()
+                        && complete_dns_interface(&record.previous, guid).is_some()
+                });
+                if let (Some(interface_guid), true) =
+                    (expected_guid, complete)
+                {
+                    intents.push(RecoveryIntent::RestorePreviousDns {
+                        interface_index: record.interface_index,
+                        interface_guid,
+                        expected_applied: record.applied.clone(),
+                        previous: record.previous.clone(),
+                    });
+                } else {
+                    push_recovery_plan_blocker(&mut blockers,
+                        RecoveryPlanResource::Dns(record.interface_index),
+                        ResourceDisposition::Unknown,
+                    );
+                }
+            }
+            ResourceDisposition::NeedsCleanup
+            | ResourceDisposition::Conflict
+            | ResourceDisposition::Unknown => {
+                push_recovery_plan_blocker(&mut blockers,
+                    RecoveryPlanResource::Dns(record.interface_index),
+                    disposition,
+                );
+            }
+        }
+    }
+    for extra in dns_assessments.keys() {
+        if !journal_dns_indexes.contains(extra) {
+            push_recovery_plan_blocker(&mut blockers,
+                RecoveryPlanResource::Dns(*extra),
+                ResourceDisposition::Conflict,
+            );
+        }
+    }
+
+    match assessment.firewall_filters {
+        ResourceDisposition::VerifiedClean => {}
+        ResourceDisposition::NeedsCleanup => match &snapshot.firewall_filters {
+            Observation::Present(observed_filters) => {
+                let mut expected_by_key =
+                    BTreeMap::<String, (String, String)>::new();
+                let mut invalid_expected = false;
+                for record in &journal.firewall_filters {
+                    match (
+                        normalize_guid(&record.provider_key),
+                        record.filter_key.as_deref().and_then(normalize_guid),
+                        normalize_guid(&record.layer_key),
+                    ) {
+                        (Some(provider), Some(filter), Some(layer)) => {
+                            if expected_by_key.insert(filter, (provider, layer)).is_some() {
+                                invalid_expected = true;
+                            }
+                        }
+                        _ => invalid_expected = true,
+                    }
+                }
+
+                let mut observed_keys = BTreeSet::new();
+                let mut found = Vec::new();
+                let mut invalid_observed = false;
+                for record in observed_filters {
+                    let identity = match (
+                        normalize_guid(&record.provider_key),
+                        record.filter_key.as_deref().and_then(normalize_guid),
+                        normalize_guid(&record.layer_key),
+                    ) {
+                        (Some(provider_key), Some(filter_key), Some(layer_key)) => {
+                            RecoveryWfpFilterIdentity {
+                                provider_key,
+                                filter_key,
+                                layer_key,
+                            }
+                        }
+                        _ => {
+                            invalid_observed = true;
+                            continue;
+                        }
+                    };
+                    if !observed_keys.insert(identity.filter_key.clone()) {
+                        invalid_observed = true;
+                        continue;
+                    }
+                    let expected = expected_by_key.get(&identity.filter_key);
+                    if expected != Some(&(identity.provider_key.clone(), identity.layer_key.clone())) {
+                        invalid_observed = true;
+                        continue;
+                    }
+                    found.push(identity);
+                }
+
+                if invalid_expected || invalid_observed || found.is_empty() {
+                    push_recovery_plan_blocker(
+                        &mut blockers,
+                        RecoveryPlanResource::Wfp,
+                        if invalid_expected || invalid_observed {
+                            ResourceDisposition::Conflict
+                        } else {
+                            ResourceDisposition::Unknown
+                        },
+                    );
+                } else {
+                    intents.extend(
+                        found
+                            .into_iter()
+                            .map(|identity| RecoveryIntent::RemoveWfpFilter { identity }),
+                    );
+                }
+            }
+            Observation::Unknown | Observation::Absent => {
+                push_recovery_plan_blocker(
+                    &mut blockers,
+                    RecoveryPlanResource::Wfp,
+                    ResourceDisposition::Unknown,
+                );
+            }
+        },
+        disposition => push_recovery_plan_blocker(
+            &mut blockers,
+            RecoveryPlanResource::Wfp,
+            disposition,
+        ),
+    }
+
+    // Make the plan stable for serialization and review. This is not an
+    // execution order; a future executor must define and validate dependencies.
+    intents.sort_by_key(|intent| match intent {
+        RecoveryIntent::StopEngine { .. } => (0u8, String::new()),
+        RecoveryIntent::RemoveTunnel { interface } => {
+            (1, interface.interface_guid.to_ascii_lowercase())
+        }
+        RecoveryIntent::RemoveAppliedRoute { destination_prefix, .. } => {
+            (2, destination_prefix.clone())
+        }
+        RecoveryIntent::RestorePreviousRoute { destination_prefix, .. } => {
+            (2, destination_prefix.clone())
+        }
+        RecoveryIntent::RestorePreviousDns { interface_index, .. } => {
+            (3, format!("{interface_index:010}"))
+        }
+        RecoveryIntent::RemoveWfpFilter { identity } => (4, identity.filter_key.clone()),
+    });
+    blockers.sort_by_key(|blocker| blocker.resource.clone());
+
+    let state = if !blockers.is_empty() {
+        intents.clear();
+        RecoveryPlanState::Blocked
+    } else if assessment.can_remove_journal {
+        if !intents.is_empty() {
+            intents.clear();
+            push_recovery_plan_blocker(&mut blockers,
+                RecoveryPlanResource::Assessment,
+                ResourceDisposition::Conflict,
+            );
+            RecoveryPlanState::Blocked
+        } else {
+            RecoveryPlanState::VerifiedCleanRetained
+        }
+    } else if !intents.is_empty() {
+        RecoveryPlanState::ReadyForReview
+    } else {
+        push_recovery_plan_blocker(&mut blockers,
+            RecoveryPlanResource::Assessment,
+            ResourceDisposition::Unknown,
+        );
+        RecoveryPlanState::Blocked
+    };
+
+    blockers.sort_by_key(|blocker| blocker.resource.clone());
+
+    Ok(RecoveryIntentPlan {
+        session_id: journal.session_id,
+        revision: journal.revision,
+        state,
+        intents,
+        blockers,
+        journal_removal_authorized: false,
+    })
+}
+
 pub fn assess_recovery(
     journal: &RecoveryJournal,
     snapshot: &RecoverySnapshot,
@@ -483,6 +1065,56 @@ mod tests {
         }
     }
 
+    fn tunnel() -> TunnelInterfaceRecord {
+        let address: IpAddr = "198.18.0.1".parse().unwrap();
+        TunnelInterfaceRecord {
+            interface_guid: "4d36e972-e325-11ce-bfc1-08002be10318".into(),
+            interface_index: 17,
+            alias: "Blacklist Inevitable TUN".into(),
+            mtu: 1400,
+            addresses: vec![address],
+            address_details: vec![crate::recovery_journal::TunnelAddressRecord {
+                address,
+                prefix_length: 32,
+            }],
+        }
+    }
+
+    fn complete_dns_record() -> DnsMutationRecord {
+        DnsMutationRecord {
+            interface_index: 12,
+            interface_guid: Some("4d36e972-e325-11ce-bfc1-08002be10318".into()),
+            applied: complete_dns("198.18.0.1", "fd00::53"),
+            previous: complete_dns("192.0.2.53", "2001:db8::53"),
+        }
+    }
+
+    fn ready_plan_fixture() -> (RecoveryJournal, RecoverySnapshot) {
+        let mut journal = RecoveryJournal::new(22);
+        journal.engine = Some(engine());
+        journal.tunnel = Some(tunnel());
+        let route = route_record();
+        let dns = complete_dns_record();
+        journal.routes.push(route.clone());
+        journal.dns.push(dns.clone());
+        journal.firewall_filters.push(filter_record(77));
+
+        let mut snapshot = empty_snapshot();
+        snapshot.engine = Observation::Present(engine());
+        snapshot.tunnel = Observation::Present(tunnel());
+        snapshot.routes.insert(
+            route.destination_prefix.clone(),
+            Observation::Present(route.applied.clone()),
+        );
+        snapshot.dns.insert(
+            dns.interface_index,
+            Observation::Present(dns.applied.clone()),
+        );
+        snapshot.firewall_filters = Observation::Present(vec![filter_record(999)]);
+
+        (journal, snapshot)
+    }
+
     fn empty_snapshot() -> RecoverySnapshot {
         RecoverySnapshot {
             engine: Observation::Absent,
@@ -491,6 +1123,342 @@ mod tests {
             dns: BTreeMap::new(),
             firewall_filters: Observation::Present(Vec::new()),
         }
+    }
+
+    #[test]
+    fn empty_assessment_produces_retained_clean_plan_without_journal_authority() {
+        let journal = RecoveryJournal::new(21);
+        let snapshot = empty_snapshot();
+        let assessment = assess_recovery(&journal, &snapshot);
+        assert!(assessment.can_remove_journal);
+
+        let plan = build_recovery_intent_plan(&journal, std::slice::from_ref(&journal), &snapshot, &assessment).unwrap();
+        assert_eq!(plan.session_id, journal.session_id);
+        assert_eq!(plan.revision, journal.revision);
+        assert_eq!(plan.state, RecoveryPlanState::VerifiedCleanRetained);
+        assert!(plan.intents.is_empty());
+        assert!(plan.blockers.is_empty());
+        assert!(!plan.journal_removal_authorized);
+    }
+
+    #[test]
+    fn planner_emits_exact_stable_intents_for_cleanup_and_restore_dispositions() {
+        let (journal, snapshot) = ready_plan_fixture();
+        journal.validate().unwrap();
+        let assessment = assess_recovery(&journal, &snapshot);
+        assert_eq!(assessment.engine, ResourceDisposition::NeedsCleanup);
+        assert_eq!(assessment.tunnel, ResourceDisposition::NeedsCleanup);
+        assert_eq!(assessment.routes[0].disposition, ResourceDisposition::NeedsRestore);
+        assert_eq!(assessment.dns[0].disposition, ResourceDisposition::NeedsRestore);
+        assert_eq!(assessment.firewall_filters, ResourceDisposition::NeedsCleanup);
+
+        let plan = build_recovery_intent_plan(&journal, std::slice::from_ref(&journal), &snapshot, &assessment).unwrap();
+        assert_eq!(plan.state, RecoveryPlanState::ReadyForReview);
+        assert!(!plan.is_blocked());
+        assert_eq!(plan.intents.len(), 5);
+        assert!(plan.blockers.is_empty());
+        assert!(!plan.journal_removal_authorized);
+        assert!(matches!(
+            &plan.intents[0],
+            RecoveryIntent::StopEngine { process } if Some(process) == journal.engine.as_ref()
+        ));
+        assert!(plan.intents.iter().any(|intent| matches!(
+            intent,
+            RecoveryIntent::RestorePreviousRoute {
+                destination_prefix,
+                expected_current,
+                previous,
+            } if destination_prefix == &journal.routes[0].destination_prefix
+                && expected_current.as_ref() == Some(&journal.routes[0].applied)
+                && Some(previous) == journal.routes[0].previous.as_ref()
+        )));
+        assert!(plan.intents.iter().any(|intent| matches!(
+            intent,
+            RecoveryIntent::RestorePreviousDns {
+                interface_guid,
+                expected_applied,
+                previous,
+                ..
+            } if interface_guid == journal.dns[0].interface_guid.as_ref().unwrap()
+                && expected_applied == &journal.dns[0].applied
+                && previous == &journal.dns[0].previous
+        )));
+        assert!(plan.intents.iter().any(|intent| matches!(
+            intent,
+            RecoveryIntent::RemoveWfpFilter { identity }
+                if identity.filter_key == journal.firewall_filters[0].filter_key.clone().unwrap()
+                    && identity.provider_key == journal.firewall_filters[0].provider_key
+                    && identity.layer_key == journal.firewall_filters[0].layer_key
+        )));
+    }
+
+    #[test]
+    fn absent_applied_route_plan_records_absent_as_the_expected_current_state() {
+        let mut journal = RecoveryJournal::new(28);
+        let route = route_record();
+        journal.routes.push(route.clone());
+        let mut snapshot = empty_snapshot();
+        snapshot.routes.insert(route.destination_prefix.clone(), Observation::Absent);
+        let assessment = assess_recovery(&journal, &snapshot);
+        assert_eq!(assessment.routes[0].disposition, ResourceDisposition::NeedsRestore);
+
+        let plan = build_recovery_intent_plan(
+            &journal,
+            std::slice::from_ref(&journal),
+            &snapshot,
+            &assessment,
+        ).unwrap();
+        assert_eq!(plan.state, RecoveryPlanState::ReadyForReview);
+        assert!(matches!(
+            &plan.intents[0],
+            RecoveryIntent::RestorePreviousRoute {
+                expected_current: None,
+                previous,
+                ..
+            } if Some(previous) == journal.routes[0].previous.as_ref()
+        ));
+    }
+
+    #[test]
+    fn wfp_cleanup_intents_include_only_filters_present_in_the_verified_snapshot() {
+        let mut journal = RecoveryJournal::new(27);
+        let present = filter_record(77);
+        let mut already_absent = filter_record(88);
+        already_absent.filter_key =
+            Some("d3c2a1b0-1111-4222-8333-444455556666".into());
+        already_absent.layer_key =
+            "e4d3c2b1-2222-4333-8444-555566667777".into();
+        journal.firewall_filters = vec![present.clone(), already_absent];
+
+        let mut snapshot = empty_snapshot();
+        let mut live_present = present.clone();
+        live_present.filter_id = 999;
+        snapshot.firewall_filters = Observation::Present(vec![live_present]);
+
+        let assessment = assess_recovery(&journal, &snapshot);
+        assert_eq!(assessment.firewall_filters, ResourceDisposition::NeedsCleanup);
+        let plan = build_recovery_intent_plan(
+            &journal,
+            std::slice::from_ref(&journal),
+            &snapshot,
+            &assessment,
+        ).unwrap();
+
+        assert_eq!(plan.state, RecoveryPlanState::ReadyForReview);
+        assert_eq!(plan.intents.len(), 1);
+        assert!(matches!(
+            &plan.intents[0],
+            RecoveryIntent::RemoveWfpFilter { identity }
+                if identity.filter_key == present.filter_key.clone().unwrap()
+        ));
+    }
+
+    #[test]
+    fn planner_rejects_an_assessment_or_journal_that_does_not_match_its_inputs() {
+        let (journal, snapshot) = ready_plan_fixture();
+        let assessment = assess_recovery(&journal, &snapshot);
+        let mut mismatched_assessment = assessment.clone();
+        mismatched_assessment.engine = ResourceDisposition::VerifiedClean;
+        assert!(build_recovery_intent_plan(
+            &journal,
+            std::slice::from_ref(&journal),
+            &snapshot,
+            &mismatched_assessment,
+        ).is_err());
+
+        let mut different_checkpoint = journal.clone();
+        different_checkpoint.revision += 1;
+        assert!(build_recovery_intent_plan(
+            &journal,
+            std::slice::from_ref(&different_checkpoint),
+            &snapshot,
+            &assessment,
+        ).is_err());
+    }
+
+    #[test]
+    fn unknown_or_conflicting_resource_blocks_the_entire_plan() {
+        let (journal, mut snapshot) = ready_plan_fixture();
+        snapshot.dns.insert(journal.dns[0].interface_index, Observation::Unknown);
+        let unknown = assess_recovery(&journal, &snapshot);
+        let blocked = build_recovery_intent_plan(&journal, std::slice::from_ref(&journal), &snapshot, &unknown).unwrap();
+        assert_eq!(blocked.state, RecoveryPlanState::Blocked);
+        assert!(blocked.intents.is_empty());
+        assert!(blocked.blockers.iter().any(|item| {
+            item.resource == RecoveryPlanResource::Dns(journal.dns[0].interface_index)
+                && item.disposition == ResourceDisposition::Unknown
+        }));
+
+        let (journal, mut snapshot) = ready_plan_fixture();
+        let mut different_process = engine();
+        different_process.creation_time_100ns += 1;
+        snapshot.engine = Observation::Present(different_process);
+        let conflict = assess_recovery(&journal, &snapshot);
+        assert_eq!(conflict.engine, ResourceDisposition::Conflict);
+        let blocked = build_recovery_intent_plan(&journal, std::slice::from_ref(&journal), &snapshot, &conflict).unwrap();
+        assert_eq!(blocked.state, RecoveryPlanState::Blocked);
+        assert!(blocked.intents.is_empty());
+        assert!(blocked.blockers.iter().any(|item| {
+            item.resource == RecoveryPlanResource::Engine
+                && item.disposition == ResourceDisposition::Conflict
+        }));
+    }
+
+    #[test]
+    fn cross_session_resource_ownership_collisions_block_every_intent() {
+        let (journal, snapshot) = ready_plan_fixture();
+        let assessment = assess_recovery(&journal, &snapshot);
+
+        let mut other = RecoveryJournal::new(26);
+        let mut reused_pid = journal.engine.clone().unwrap();
+        reused_pid.creation_time_100ns += 1;
+        other.engine = Some(reused_pid);
+        other.tunnel = journal.tunnel.clone();
+        other.routes = journal.routes.clone();
+        other.dns = journal.dns.clone();
+        other.firewall_filters = journal.firewall_filters.clone();
+
+        let unresolved = vec![journal.clone(), other];
+        let plan = build_recovery_intent_plan(&journal, &unresolved, &snapshot, &assessment).unwrap();
+        assert_eq!(plan.state, RecoveryPlanState::Blocked);
+        assert!(plan.intents.is_empty());
+        assert!(!plan.journal_removal_authorized);
+        for resource in [
+            RecoveryPlanResource::Engine,
+            RecoveryPlanResource::Tunnel,
+            RecoveryPlanResource::Route(journal.routes[0].destination_prefix.clone()),
+            RecoveryPlanResource::Dns(journal.dns[0].interface_index),
+            RecoveryPlanResource::Wfp,
+        ] {
+            assert!(plan.blockers.iter().any(|blocker| {
+                blocker.resource == resource
+                    && blocker.disposition == ResourceDisposition::Conflict
+            }));
+        }
+    }
+
+    #[test]
+    fn created_routes_produce_sorted_remove_intents_only_with_stable_luids() {
+        let mut journal = RecoveryJournal::new(24);
+        let mut first = route_record();
+        first.destination_prefix = "203.0.113.0/24".into();
+        first.previous = None;
+        let mut second = route_record();
+        second.destination_prefix = "198.18.0.0/24".into();
+        second.previous = None;
+        journal.routes = vec![first.clone(), second.clone()];
+
+        let mut snapshot = empty_snapshot();
+        snapshot.routes.insert(
+            first.destination_prefix.clone(),
+            Observation::Present(first.applied.clone()),
+        );
+        snapshot.routes.insert(
+            second.destination_prefix.clone(),
+            Observation::Present(second.applied.clone()),
+        );
+        let assessment = assess_recovery(&journal, &snapshot);
+        assert!(assessment.routes.iter().all(|item| {
+            item.disposition == ResourceDisposition::NeedsCleanup
+        }));
+
+        let plan = build_recovery_intent_plan(&journal, std::slice::from_ref(&journal), &snapshot, &assessment).unwrap();
+        assert_eq!(plan.state, RecoveryPlanState::ReadyForReview);
+        assert_eq!(plan.intents.len(), 2);
+        assert!(matches!(
+            &plan.intents[0],
+            RecoveryIntent::RemoveAppliedRoute { destination_prefix, .. }
+                if destination_prefix == "198.18.0.0/24"
+        ));
+        assert!(matches!(
+            &plan.intents[1],
+            RecoveryIntent::RemoveAppliedRoute { destination_prefix, .. }
+                if destination_prefix == "203.0.113.0/24"
+        ));
+    }
+
+    #[test]
+    fn rejects_inconsistent_duplicate_assessments_and_legacy_wfp_keys_block_planning() {
+        let (journal, snapshot) = ready_plan_fixture();
+        let mut assessment = assess_recovery(&journal, &snapshot);
+        assessment.routes.push(assessment.routes[0].clone());
+        // The planner re-computes the assessor output from its inputs and
+        // rejects a duplicated/tampered assessment rather than planning from it.
+        assert!(build_recovery_intent_plan(
+            &journal,
+            std::slice::from_ref(&journal),
+            &snapshot,
+            &assessment,
+        ).is_err());
+
+        let mut journal = RecoveryJournal::new(25);
+        let mut legacy = filter_record(77);
+        legacy.filter_key = None;
+        journal.firewall_filters.push(legacy);
+        let mut snapshot = empty_snapshot();
+        snapshot.firewall_filters =
+            Observation::Present(vec![filter_record(999)]);
+        let assessment = assess_recovery(&journal, &snapshot);
+        assert_eq!(assessment.firewall_filters, ResourceDisposition::Unknown);
+        let plan = build_recovery_intent_plan(&journal, std::slice::from_ref(&journal), &snapshot, &assessment).unwrap();
+        assert_eq!(plan.state, RecoveryPlanState::Blocked);
+        assert!(plan.intents.is_empty());
+        assert!(plan.blockers.iter().any(|item| {
+            item.resource == RecoveryPlanResource::Wfp
+                && item.disposition == ResourceDisposition::Unknown
+        }));
+    }
+
+    #[test]
+    fn partial_dual_stack_dns_never_creates_a_restore_intent() {
+        let (journal, mut snapshot) = ready_plan_fixture();
+        let DnsConfiguration::Interface(mut partial) = journal.dns[0].applied.clone() else {
+            panic!("fixture must use a complete interface DNS snapshot");
+        };
+        partial.ipv6 = None;
+        snapshot.dns.insert(
+            journal.dns[0].interface_index,
+            Observation::Present(DnsConfiguration::Interface(partial)),
+        );
+        let assessment = assess_recovery(&journal, &snapshot);
+        assert_eq!(assessment.dns[0].disposition, ResourceDisposition::Unknown);
+
+        let plan = build_recovery_intent_plan(&journal, std::slice::from_ref(&journal), &snapshot, &assessment).unwrap();
+        assert_eq!(plan.state, RecoveryPlanState::Blocked);
+        assert!(plan.intents.is_empty());
+        assert!(!plan.journal_removal_authorized);
+    }
+
+    #[test]
+    fn missing_assessment_entry_and_legacy_route_identity_are_blocked() {
+        let (journal, snapshot) = ready_plan_fixture();
+        let mut assessment = assess_recovery(&journal, &snapshot);
+        assessment.routes.clear();
+        // A missing assessor entry is inconsistent with the full snapshot.
+        // Reject it rather than turning a caller-supplied partial assessment
+        // into a reviewable intent plan.
+        assert!(build_recovery_intent_plan(
+            &journal,
+            std::slice::from_ref(&journal),
+            &snapshot,
+            &assessment,
+        ).is_err());
+
+        let mut journal = RecoveryJournal::new(23);
+        let mut route = route_record();
+        route.previous = None;
+        route.applied.interface_luid = None;
+        journal.routes.push(route.clone());
+        let mut snapshot = empty_snapshot();
+        snapshot.routes.insert(
+            route.destination_prefix.clone(),
+            Observation::Present(route.applied.clone()),
+        );
+        let assessment = assess_recovery(&journal, &snapshot);
+        assert_eq!(assessment.routes[0].disposition, ResourceDisposition::Unknown);
+        let plan = build_recovery_intent_plan(&journal, std::slice::from_ref(&journal), &snapshot, &assessment).unwrap();
+        assert_eq!(plan.state, RecoveryPlanState::Blocked);
+        assert!(plan.intents.is_empty());
     }
 
     #[test]

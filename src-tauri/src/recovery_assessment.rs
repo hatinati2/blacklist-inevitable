@@ -352,7 +352,9 @@ fn assess_firewall_filters(
         let Some(layer_key) = normalize_guid(&record.layer_key) else {
             return ResourceDisposition::Unknown;
         };
-        expected_by_key.insert(filter_key, (provider_key, layer_key));
+        if expected_by_key.insert(filter_key, (provider_key, layer_key)).is_some() {
+            return ResourceDisposition::Conflict;
+        }
     }
 
     let mut seen = BTreeSet::new();
@@ -391,6 +393,16 @@ fn assess_firewall_filters(
     } else {
         ResourceDisposition::VerifiedClean
     }
+}
+
+/// Assess the complete product-provider WFP inventory against the union of
+/// every unresolved session. Startup must use this once per snapshot before
+/// splitting the inventory into per-session diagnostics.
+pub fn assess_firewall_filter_inventory(
+    expected: &[FirewallFilterRecord],
+    observed: &Observation<Vec<FirewallFilterRecord>>,
+) -> ResourceDisposition {
+    assess_firewall_filters(expected, observed)
 }
 
 #[cfg(test)]
@@ -852,6 +864,18 @@ mod tests {
         assert_eq!(
             assess_recovery(&journal, &snapshot).firewall_filters,
             ResourceDisposition::VerifiedClean
+        );
+    }
+
+    #[test]
+    fn duplicate_stable_wfp_keys_across_sessions_are_a_conflict() {
+        let first = filter_record(77);
+        let mut expected = vec![first.clone(), first.clone()];
+        expected[1].filter_id = 88;
+        let observed = Observation::Present(vec![first]);
+        assert_eq!(
+            assess_firewall_filter_inventory(&expected, &observed),
+            ResourceDisposition::Conflict
         );
     }
 

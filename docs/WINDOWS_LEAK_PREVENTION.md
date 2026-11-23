@@ -45,6 +45,16 @@ Therefore:
 
 ## Required Agent-owned egress policy
 
+The WFP backend now has a narrowly scoped cleanup primitive for persistent filters:
+- It accepts only stable filter GUIDs recorded in the recovery journal.
+- It first requires a complete provider-scoped inventory and a positively verified persistent provider/sublayer.
+- Each current filter must still match the journaled provider and layer, plus the live BFE identity read from the inventory; a changed identity aborts the transaction.
+- It deletes only the requested keys, verifies absence after commit, and verifies the original identities remain present if the deletion transaction aborts.
+- A missing key is treated as already absent only after the complete provider inventory is verified. Legacy records without stable filter GUIDs are not deleted automatically.
+- The operation does not remove the provider/sublayer and is not called by startup recovery, Connect, Disconnect or Recover.
+
+This is a cleanup building block, not an active kill switch. No physical-egress filters are installed by this method during normal application operation, and it does not establish crash/reboot protection or packet-level leak prevention.
+
 The Agent must own a WFP policy independently of sing-box's dynamic WFP session.
 
 1. Resolve and pin the active VPN endpoint address set and exact transport ports before the tunnel. Preserve only the narrow physical route and WFP allow rule required for those endpoint connections.

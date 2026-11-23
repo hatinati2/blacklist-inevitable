@@ -47,6 +47,28 @@ pub struct FilterValidationReport {
 }
 
 #[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FilterDeletionReport {
+    /// Number of stable journal filter identities requested for deletion.
+    pub requested_filter_count: usize,
+    /// Number of filters deleted and confirmed absent after commit.
+    pub deleted_filter_count: usize,
+    /// Number of requested stable keys already absent from the verified provider inventory.
+    pub already_absent_filter_count: usize,
+}
+
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy)]
+struct ExpectedFilterIdentity {
+    key: GUID,
+    layer: GUID,
+    observed_filter_id: u64,
+}
+
+#[cfg(windows)]
+const FWP_E_FILTER_NOT_FOUND: u32 = 0x8032_0003;
+
+#[cfg(windows)]
 #[derive(Clone, Copy)]
 enum ExpectedCondition {
     InterfaceLuid(u64),
@@ -111,6 +133,165 @@ unsafe impl Send for WfpEngine {}
 
 #[cfg(windows)]
 impl WfpEngine {
+    /// Delete only persistent filters named by stable journal GUIDs.
+    ///
+    /// The provider-scoped inventory is verified first. Each requested key must
+    /// belong to this binary's provider and sublayer and must still have the
+    /// journaled layer identity. Runtime filter IDs are refreshed from the live
+    /// inventory because BFE IDs are diagnostic, not durable identities.
+    ///
+    /// This method never deletes unknown filters, filters from another provider,
+    /// or the provider/sublayer namespace itself. It is a cleanup primitive only;
+    /// the connection transaction does not call it yet.
+    pub fn remove_owned_filters(
+        &mut self,
+        expected_filters: &[crate::recovery_journal::FirewallFilterRecord],
+    ) -> Result<FilterDeletionReport, String> {
+        use std::collections::BTreeSet;
+        use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::{
+            FwpmTransactionBegin0, FwpmTransactionCommit0,
+        };
+
+        const MAX_DELETE_REQUESTS: usize = 256;
+        if expected_filters.is_empty() {
+            return Ok(FilterDeletionReport {
+                requested_filter_count: 0,
+                deleted_filter_count: 0,
+                already_absent_filter_count: 0,
+            });
+        }
+        if expected_filters.len() > MAX_DELETE_REQUESTS {
+            return Err(format!(
+                "The WFP deletion request exceeds the safe limit of {MAX_DELETE_REQUESTS} stable filter identities."
+            ));
+        }
+
+        let expected_provider = uuid::Uuid::from_u128(guid_to_u128(&PROVIDER_KEY)).to_string();
+        let mut requested = Vec::with_capacity(expected_filters.len());
+        let mut requested_keys = BTreeSet::new();
+
+        for record in expected_filters {
+            if !record.provider_key.eq_ignore_ascii_case(&expected_provider) {
+                return Err("A WFP deletion record does not belong to this Agent's provider.".into());
+            }
+            let key_text = record
+                .filter_key
+                .as_deref()
+                .ok_or_else(|| "A legacy WFP record has no stable filter GUID and cannot be deleted automatically.".to_string())?;
+            let key = uuid::Uuid::parse_str(key_text)
+                .map_err(|_| "A WFP deletion record contains an invalid stable filter GUID.".to_string())?;
+            if key.is_nil() || !requested_keys.insert(key.as_u128()) {
+                return Err("The WFP deletion request contains a nil or duplicate stable filter GUID.".into());
+            }
+
+            let layer_uuid = uuid::Uuid::parse_str(&record.layer_key)
+                .map_err(|_| "A WFP deletion record contains an invalid layer GUID.".to_string())?;
+            if layer_uuid.is_nil() {
+                return Err("A WFP deletion record contains a nil layer GUID.".into());
+            }
+            let layer = GUID::from_u128(layer_uuid.as_u128());
+            if !guid_eq(&layer, &wfp_layer_guid(crate::wfp_policy::WfpLayer::AleAuthConnectV4))
+                && !guid_eq(&layer, &wfp_layer_guid(crate::wfp_policy::WfpLayer::AleAuthConnectV6))
+            {
+                return Err("A WFP deletion record names a layer outside the Agent's supported egress policy.".into());
+            }
+            if record.filter_id == 0 {
+                return Err("A WFP deletion record contains an invalid zero runtime filter ID.".into());
+            }
+
+            requested.push(ExpectedFilterIdentity {
+                key: GUID::from_u128(key.as_u128()),
+                layer,
+                observed_filter_id: 0,
+            });
+        }
+
+        // This read-only snapshot also verifies that the persistent provider and
+        // sublayer still exist and are owned by this binary. Missing namespace
+        // state is Unknown, not proof that the requested filters are absent.
+        let inventory = self.enumerate_owned_filters()?;
+        let mut present = Vec::new();
+        let mut already_absent = 0usize;
+
+        for expected in &mut requested {
+            let key_text = uuid::Uuid::from_u128(guid_to_u128(&expected.key)).to_string();
+            let Some(current) = inventory.iter().find(|candidate| {
+                candidate.filter_key.as_deref().is_some_and(|value| {
+                    value.eq_ignore_ascii_case(&key_text)
+                })
+            }) else {
+                already_absent += 1;
+                continue;
+            };
+
+            if !current.provider_key.eq_ignore_ascii_case(&expected_provider) {
+                return Err("The current WFP filter inventory has an unexpected provider identity.".into());
+            }
+            let current_layer = uuid::Uuid::parse_str(&current.layer_key)
+                .map_err(|_| "The current WFP filter inventory contains an invalid layer identity.".to_string())?;
+            if !guid_eq(&GUID::from_u128(current_layer.as_u128()), &expected.layer)
+                || current.filter_id == 0
+            {
+                return Err("The current WFP filter no longer matches the journaled provider/layer identity.".into());
+            }
+            expected.observed_filter_id = current.filter_id;
+            present.push(*expected);
+        }
+
+        if present.is_empty() {
+            return Ok(FilterDeletionReport {
+                requested_filter_count: requested.len(),
+                deleted_filter_count: 0,
+                already_absent_filter_count: already_absent,
+            });
+        }
+
+        self.ensure_open()?;
+        let begin = unsafe { FwpmTransactionBegin0(self.handle, 0) };
+        if begin != 0 {
+            return Err(format!(
+                "Could not begin the WFP filter deletion transaction (0x{begin:08X})."
+            ));
+        }
+
+        let operation = (|| -> Result<(), String> {
+            for expected in &present {
+                delete_filter_in_transaction(self.handle, expected)?;
+            }
+            Ok(())
+        })();
+
+        if let Err(operation_error) = operation {
+            self.abort_transaction_or_poison()?;
+            for expected in &present {
+                verify_owned_filter_present(self.handle, expected)?;
+            }
+            return Err(operation_error);
+        }
+
+        let commit = unsafe { FwpmTransactionCommit0(self.handle) };
+        if commit != 0 {
+            let error = format!(
+                "FwpmTransactionCommit0 failed while deleting Agent-owned WFP filters (0x{commit:08X})."
+            );
+            self.abort_transaction_or_poison()?;
+            for expected in &present {
+                verify_owned_filter_present(self.handle, expected)?;
+            }
+            return Err(error);
+        }
+
+        for expected in &present {
+            verify_filter_absent(self.handle, &expected.key)?;
+        }
+
+        Ok(FilterDeletionReport {
+            requested_filter_count: requested.len(),
+            deleted_filter_count: present.len(),
+            already_absent_filter_count: already_absent,
+        })
+    }
+
     /// Open the local Base Filtering Engine. Callers must run in an authorized
     /// service context. A successful open does not imply any filter is installed.
     pub fn open_local() -> Result<Self, String> {
@@ -541,6 +722,119 @@ impl WfpEngine {
 }
 
 #[cfg(windows)]
+fn delete_filter_in_transaction(
+    engine: windows_sys::Win32::Foundation::HANDLE,
+    expected: &ExpectedFilterIdentity,
+) -> Result<(), String> {
+    use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::{
+        FwpmFilterDeleteByKey0, FwpmFilterGetByKey0, FwpmFreeMemory0,
+        FWPM_FILTER_FLAG_PERSISTENT,
+    };
+
+    let mut filter_ptr = std::ptr::null_mut();
+    let lookup = unsafe { FwpmFilterGetByKey0(engine, &expected.key, &mut filter_ptr) };
+    if lookup != 0 {
+        return Err(format!(
+            "The journaled WFP filter could not be re-read before deletion (0x{lookup:08X})."
+        ));
+    }
+    if filter_ptr.is_null() {
+        return Err("WFP returned a null filter while preparing an owned-filter deletion.".into());
+    }
+
+    let verification = {
+        let filter = unsafe { &*filter_ptr };
+        let provider_matches = !filter.providerKey.is_null()
+            && guid_eq(unsafe { &*filter.providerKey }, &PROVIDER_KEY);
+        let valid = guid_eq(&filter.filterKey, &expected.key)
+            && filter.filterId == expected.observed_filter_id
+            && guid_eq(&filter.layerKey, &expected.layer)
+            && guid_eq(&filter.subLayerKey, &SUBLAYER_KEY)
+            && provider_matches
+            && filter.flags & FWPM_FILTER_FLAG_PERSISTENT != 0;
+        if valid {
+            Ok(())
+        } else {
+            Err("The WFP filter changed ownership or identity after inventory; deletion was aborted.".to_string())
+        }
+    };
+    let mut allocation = filter_ptr.cast();
+    unsafe { FwpmFreeMemory0(&mut allocation) };
+    verification?;
+
+    let delete = unsafe { FwpmFilterDeleteByKey0(engine, &expected.key) };
+    if delete != 0 {
+        return Err(format!(
+            "FwpmFilterDeleteByKey0 failed with Windows status 0x{delete:08X}."
+        ));
+    }
+    verify_filter_absent(engine, &expected.key)
+}
+
+#[cfg(windows)]
+fn verify_owned_filter_present(
+    engine: windows_sys::Win32::Foundation::HANDLE,
+    expected: &ExpectedFilterIdentity,
+) -> Result<(), String> {
+    use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::{
+        FwpmFilterGetByKey0, FwpmFreeMemory0, FWPM_FILTER_FLAG_PERSISTENT,
+    };
+
+    let mut filter_ptr = std::ptr::null_mut();
+    let status = unsafe { FwpmFilterGetByKey0(engine, &expected.key, &mut filter_ptr) };
+    if status != 0 {
+        return Err(format!(
+            "Could not confirm WFP filter rollback after an aborted deletion (0x{status:08X})."
+        ));
+    }
+    if filter_ptr.is_null() {
+        return Err("WFP filter rollback lookup returned a null object.".into());
+    }
+
+    let filter = unsafe { &*filter_ptr };
+    let provider_matches = !filter.providerKey.is_null()
+        && guid_eq(unsafe { &*filter.providerKey }, &PROVIDER_KEY);
+    let valid = guid_eq(&filter.filterKey, &expected.key)
+        && filter.filterId == expected.observed_filter_id
+        && guid_eq(&filter.layerKey, &expected.layer)
+        && guid_eq(&filter.subLayerKey, &SUBLAYER_KEY)
+        && provider_matches
+        && filter.flags & FWPM_FILTER_FLAG_PERSISTENT != 0;
+    let mut allocation = filter_ptr.cast();
+    unsafe { FwpmFreeMemory0(&mut allocation) };
+    if !valid {
+        return Err("The WFP filter was not restored to its prior owned identity after transaction abort.".into());
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn verify_filter_absent(
+    engine: windows_sys::Win32::Foundation::HANDLE,
+    key: &GUID,
+) -> Result<(), String> {
+    use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::{
+        FwpmFilterGetByKey0, FwpmFreeMemory0,
+    };
+
+    let mut filter_ptr = std::ptr::null_mut();
+    let status = unsafe { FwpmFilterGetByKey0(engine, key, &mut filter_ptr) };
+    if status == FWP_E_FILTER_NOT_FOUND {
+        return Ok(());
+    }
+    if status == 0 {
+        if !filter_ptr.is_null() {
+            let mut allocation = filter_ptr.cast();
+            unsafe { FwpmFreeMemory0(&mut allocation) };
+        }
+        return Err("The WFP filter is still visible after its deletion transaction completed.".into());
+    }
+    Err(format!(
+        "Could not confirm WFP filter absence after deletion (0x{status:08X})."
+    ))
+}
+
+#[cfg(windows)]
 fn verify_staged_filter(
     engine: windows_sys::Win32::Foundation::HANDLE,
     key: &GUID,
@@ -670,26 +964,7 @@ fn verify_filter_absent_after_abort(
     engine: windows_sys::Win32::Foundation::HANDLE,
     key: &GUID,
 ) -> Result<(), String> {
-    use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::{
-        FwpmFilterGetByKey0, FwpmFreeMemory0,
-    };
-    const FWP_E_FILTER_NOT_FOUND: u32 = 0x8032_0003;
-
-    let mut filter_ptr = std::ptr::null_mut();
-    let status = unsafe { FwpmFilterGetByKey0(engine, key, &mut filter_ptr) };
-    if status == FWP_E_FILTER_NOT_FOUND {
-        return Ok(());
-    }
-    if status == 0 {
-        if !filter_ptr.is_null() {
-            let mut allocation = filter_ptr.cast();
-            unsafe { FwpmFreeMemory0(&mut allocation) };
-        }
-        return Err("A staged WFP filter remained visible after transaction rollback; policy state is unconfirmed.".into());
-    }
-    Err(format!(
-        "Could not confirm that a staged WFP filter was removed by transaction rollback (0x{status:08X})."
-    ))
+    verify_filter_absent(engine, key)
 }
 
 /// Resolve a Windows interface index to its stable NET_LUID and verify the

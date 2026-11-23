@@ -61,10 +61,29 @@ type AgentRecoveryStatus = {
   diagnostics: string[];
 };
 
+type AgentConnectionPhase =
+  | "disconnected"
+  | "preparing"
+  | "startingEngine"
+  | "configuringNetwork"
+  | "connected"
+  | "disconnecting"
+  | "recovering"
+  | "failed";
+
+type AgentConnectionSnapshot = {
+  phase: AgentConnectionPhase;
+  sessionId: number | null;
+  profileId: string | null;
+  detail: string | null;
+  cleanupHealthy: boolean;
+};
+
 type AgentServiceStatus = {
   available: boolean;
   state: "running" | "unavailable" | "unsupported" | "recoveryRequired";
   detail: string;
+  connection?: AgentConnectionSnapshot | null;
   recovery?: AgentRecoveryStatus | null;
 };
 
@@ -109,6 +128,27 @@ type EndpointResult = {
   latencyMs: number | null;
   detail: string;
 };
+
+function connectionPhaseLabel(phase: AgentConnectionPhase): string {
+  switch (phase) {
+    case "disconnected":
+      return "Disconnected";
+    case "preparing":
+      return "Preparing";
+    case "startingEngine":
+      return "Starting engine";
+    case "configuringNetwork":
+      return "Configuring network";
+    case "connected":
+      return "Connected";
+    case "disconnecting":
+      return "Disconnecting";
+    case "recovering":
+      return "Recovery in progress";
+    case "failed":
+      return "Failed / blocked";
+  }
+}
 
 function recoveryStateLabel(state: AgentRecoveryState): string {
   switch (state) {
@@ -445,6 +485,37 @@ export default function App() {
         <p className="panel-copy" aria-live="polite">
           {agentStatus?.detail ?? "Checking the local Agent service…"}
         </p>
+        {agentStatus?.connection && (
+          <div className="recovery-details" aria-live="polite">
+            <div className="recovery-overview">
+              <div>
+                <span className="recovery-label">Agent connection state</span>
+                <strong className={
+                  agentStatus.connection.phase === "disconnected" && agentStatus.connection.cleanupHealthy
+                    ? "recovery-state recovery-state-clear"
+                    : "recovery-state recovery-state-blocked"
+                }>
+                  {connectionPhaseLabel(agentStatus.connection.phase)}
+                </strong>
+              </div>
+              <div className="recovery-inventory">
+                <span>
+                  {agentStatus.connection.cleanupHealthy
+                    ? "Cleanup state confirmed"
+                    : "Cleanup state unconfirmed"}
+                </span>
+                <span>
+                  {agentStatus.connection.sessionId === null
+                    ? "No active session token"
+                    : `Session ${agentStatus.connection.sessionId}`}
+                </span>
+              </div>
+            </div>
+            {agentStatus.connection.detail && (
+              <p className="recovery-note">{agentStatus.connection.detail}</p>
+            )}
+          </div>
+        )}
         {agentStatus?.recovery && (
           <div className="recovery-details" aria-live="polite">
             <div className="recovery-overview">

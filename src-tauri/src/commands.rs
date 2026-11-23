@@ -56,6 +56,11 @@ pub struct EndpointTestResult {
 }
 
 #[tauri::command]
+pub async fn get_agent_status() -> crate::agent_client::DesktopAgentStatus {
+    crate::agent_client::get_status().await
+}
+
+#[tauri::command]
 pub async fn get_app_status(app: AppHandle) -> AppStatus {
     let supervisor = app.state::<ProcessSupervisor>().inner().clone();
     // Version checks start a short-lived engine subprocess. Register it so app

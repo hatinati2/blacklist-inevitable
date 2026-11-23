@@ -87,7 +87,7 @@ pub struct AgentRequest {
     pub operation: AgentOperation,
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum AgentResponseStatus {
     Ok,
@@ -95,7 +95,7 @@ pub enum AgentResponseStatus {
     Failed,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentResponse {
     pub version: u16,

@@ -204,7 +204,7 @@ pub fn build_recovery_intent_plan(
             }
             _ => push_recovery_plan_blocker(&mut blockers,RecoveryPlanResource::Engine, ResourceDisposition::Unknown),
         },
-        disposition => add_blocker(RecoveryPlanResource::Engine, disposition),
+        disposition => push_recovery_plan_blocker(&mut blockers,RecoveryPlanResource::Engine, disposition),
     }
 
     match assessment.tunnel {
@@ -216,9 +216,9 @@ pub fn build_recovery_intent_plan(
             {
                 intents.push(RecoveryIntent::RemoveTunnel { interface });
             }
-            _ => add_blocker(RecoveryPlanResource::Tunnel, ResourceDisposition::Unknown),
+            _ => push_recovery_plan_blocker(&mut blockers,RecoveryPlanResource::Tunnel, ResourceDisposition::Unknown),
         },
-        disposition => add_blocker(RecoveryPlanResource::Tunnel, disposition),
+        disposition => push_recovery_plan_blocker(&mut blockers,RecoveryPlanResource::Tunnel, disposition),
     }
 
     let mut route_assessments = BTreeMap::new();
@@ -232,7 +232,7 @@ pub fn build_recovery_intent_plan(
         }
     }
     for destination_prefix in duplicate_route_assessments {
-        add_blocker(
+        push_recovery_plan_blocker(&mut blockers,
             RecoveryPlanResource::Route(destination_prefix),
             ResourceDisposition::Conflict,
         );
@@ -257,7 +257,7 @@ pub fn build_recovery_intent_plan(
                         applied: record.applied.clone(),
                     });
                 } else {
-                    add_blocker(
+                    push_recovery_plan_blocker(&mut blockers,
                         RecoveryPlanResource::Route(record.destination_prefix.clone()),
                         ResourceDisposition::Unknown,
                     );
@@ -274,12 +274,12 @@ pub fn build_recovery_intent_plan(
                         previous,
                     });
                 }
-                _ => add_blocker(
+                _ => push_recovery_plan_blocker(&mut blockers,
                     RecoveryPlanResource::Route(record.destination_prefix.clone()),
                     ResourceDisposition::Unknown,
                 ),
             },
-            other => add_blocker(
+            other => push_recovery_plan_blocker(&mut blockers,
                 RecoveryPlanResource::Route(record.destination_prefix.clone()),
                 other,
             ),
@@ -287,7 +287,7 @@ pub fn build_recovery_intent_plan(
     }
     for extra in route_assessments.keys() {
         if !journal_route_keys.contains(extra) {
-            add_blocker(
+            push_recovery_plan_blocker(&mut blockers,
                 RecoveryPlanResource::Route(extra.clone()),
                 ResourceDisposition::Conflict,
             );
@@ -305,7 +305,7 @@ pub fn build_recovery_intent_plan(
         }
     }
     for interface_index in duplicate_dns_assessments {
-        add_blocker(
+        push_recovery_plan_blocker(&mut blockers,
             RecoveryPlanResource::Dns(interface_index),
             ResourceDisposition::Conflict,
         );
@@ -339,7 +339,7 @@ pub fn build_recovery_intent_plan(
                         previous: record.previous.clone(),
                     });
                 } else {
-                    add_blocker(
+                    push_recovery_plan_blocker(&mut blockers,
                         RecoveryPlanResource::Dns(record.interface_index),
                         ResourceDisposition::Unknown,
                     );
@@ -348,7 +348,7 @@ pub fn build_recovery_intent_plan(
             ResourceDisposition::NeedsCleanup
             | ResourceDisposition::Conflict
             | ResourceDisposition::Unknown => {
-                add_blocker(
+                push_recovery_plan_blocker(&mut blockers,
                     RecoveryPlanResource::Dns(record.interface_index),
                     disposition,
                 );
@@ -357,7 +357,7 @@ pub fn build_recovery_intent_plan(
     }
     for extra in dns_assessments.keys() {
         if !journal_dns_indexes.contains(extra) {
-            add_blocker(
+            push_recovery_plan_blocker(&mut blockers,
                 RecoveryPlanResource::Dns(*extra),
                 ResourceDisposition::Conflict,
             );
@@ -368,7 +368,7 @@ pub fn build_recovery_intent_plan(
         ResourceDisposition::VerifiedClean => {}
         ResourceDisposition::NeedsCleanup => {
             if journal.firewall_filters.is_empty() {
-                add_blocker(RecoveryPlanResource::Wfp, ResourceDisposition::Unknown);
+                push_recovery_plan_blocker(&mut blockers,RecoveryPlanResource::Wfp, ResourceDisposition::Unknown);
             } else {
                 for record in &journal.firewall_filters {
                     let identity = match (
@@ -384,7 +384,7 @@ pub fn build_recovery_intent_plan(
                             }
                         }
                         _ => {
-                            add_blocker(RecoveryPlanResource::Wfp, ResourceDisposition::Unknown);
+                            push_recovery_plan_blocker(&mut blockers,RecoveryPlanResource::Wfp, ResourceDisposition::Unknown);
                             continue;
                         }
                     };
@@ -392,7 +392,7 @@ pub fn build_recovery_intent_plan(
                 }
             }
         }
-        disposition => add_blocker(RecoveryPlanResource::Wfp, disposition),
+        disposition => push_recovery_plan_blocker(&mut blockers,RecoveryPlanResource::Wfp, disposition),
     }
 
     // Make the plan stable for serialization and review. This is not an
@@ -421,7 +421,7 @@ pub fn build_recovery_intent_plan(
     } else if assessment.can_remove_journal {
         if !intents.is_empty() {
             intents.clear();
-            add_blocker(
+            push_recovery_plan_blocker(&mut blockers,
                 RecoveryPlanResource::Assessment,
                 ResourceDisposition::Conflict,
             );
@@ -432,7 +432,7 @@ pub fn build_recovery_intent_plan(
     } else if !intents.is_empty() {
         RecoveryPlanState::ReadyForReview
     } else {
-        add_blocker(
+        push_recovery_plan_blocker(&mut blockers,
             RecoveryPlanResource::Assessment,
             ResourceDisposition::Unknown,
         );

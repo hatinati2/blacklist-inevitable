@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::recovery_journal::{
     DnsConfiguration, DnsMutationRecord, EngineProcessRecord, FirewallFilterRecord,

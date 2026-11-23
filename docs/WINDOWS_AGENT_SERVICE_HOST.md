@@ -39,20 +39,20 @@ The named-pipe DACL is only the first access gate. Authorization also compares t
 
 ## Deliberate non-goals
 
-This is still a service/IPC foundation, not an installed or operational VPN Agent. It does not:
+The installer/deployment foundation does not turn the status-only service into an operational VPN Agent. The service still:
 
-- transfer credentials or accept `Connect`/`Disconnect`/`Recover` operations;
-- start sing-box, create TUN, change routes/DNS, or activate firewall policy;
-- load the recovery journal or report a real VPN connection state;
-- transfer credentials or accept Connect/Disconnect/Recover operations;
-- open WFP, start sing-box, create TUN, change routes/DNS, or mutate firewall policy;
-- load the recovery journal or report a real VPN connection state.
+- rejects `Connect`, `Disconnect`, and `Recover`;
+- does not transfer profile credentials;
+- does not start sing-box, create TUN, change routes/DNS, or activate firewall policy;
+- does not load or reconcile the recovery journal and does not report a real VPN connection state;
+- does not provide an Agent-owned all-protocol physical-egress kill switch or prove packet-level leak prevention.
 
-The desktop process does not launch the Agent directly. The per-machine NSIS installer now bundles the Agent and contains the signature-gated service lifecycle hooks described above. Do not manually register an unsigned or unpinned executable as a production VPN service.
+A successful unsigned CI smoke test proves resource packaging and the fail-closed no-service path only. It is not evidence that a trusted signed service was installed. The positive signed path still needs a release certificate and clean Windows 10/11 integration testing for service SID restrictions, LocalSystem token access, failed-upgrade rollback, service crash/reboot, and packet-capture leak acceptance.
+
+The desktop process does not launch the Agent directly. The per-machine NSIS installer bundles it and uses the signature-gated service lifecycle hooks above. Do not manually register an unsigned or unpinned executable as a production VPN service.
 
 ## Required next slices
 
-1. Add service installation/upgrade/removal with explicit UAC consent, signed-binary verification, LocalSystem/privilege provisioning, service SID hardening, protected journal directory ACLs, and tested rollback.
 2. Add authenticated profile/credential handoff with one-shot memory handling and no secret logging/persistence.
 3. Integrate the recovery journal and WFP transaction backend. Persist exact state before OS mutations and verify it during startup recovery.
 4. Add the Agent-owned connection runtime only after authorization and crash recovery are tested.

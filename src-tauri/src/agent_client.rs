@@ -7,8 +7,8 @@
 use serde::Deserialize;
 
 use crate::agent_protocol::{
-    write_agent_message, AgentOperation, AgentRequest, AGENT_PROTOCOL_VERSION,
-    AGENT_RESPONSE_ACK_BYTE, MAX_AGENT_REQUEST_BYTES,
+    write_agent_message, AgentOperation, AgentRecoveryStatus, AgentRequest,
+    AGENT_PROTOCOL_VERSION, AGENT_RESPONSE_ACK_BYTE, MAX_AGENT_REQUEST_BYTES,
 };
 
 
@@ -206,6 +206,13 @@ fn validate_server_identity_values(
 
 const PIPE_NAME: &str = r"\\.\pipe\BlacklistInevitable.Agent.v1";
 
+#[derive(Debug, Clone)]
+pub struct AgentStatusResponse {
+    pub status: String,
+    pub detail: String,
+    pub recovery: Option<AgentRecoveryStatus>,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AgentResponseEnvelope {
@@ -213,9 +220,13 @@ struct AgentResponseEnvelope {
     request_id: String,
     status: String,
     detail: Option<String>,
+    recovery: Option<AgentRecoveryStatus>,
 }
 
-fn decode_agent_response(payload: &[u8], expected_request_id: &str) -> Result<String, String> {
+fn decode_agent_response(
+    payload: &[u8],
+    expected_request_id: &str,
+) -> Result<AgentStatusResponse, String> {
     if payload.is_empty() || payload.len() > MAX_AGENT_REQUEST_BYTES {
         return Err("The Agent response is empty or exceeds the protocol size limit.".to_string());
     }
@@ -229,23 +240,27 @@ fn decode_agent_response(payload: &[u8], expected_request_id: &str) -> Result<St
     if response.request_id != expected_request_id {
         return Err("The Agent response did not match the outstanding request.".to_string());
     }
-    if response.status != "ok" {
-        return Err(response
-            .detail
-            .unwrap_or_else(|| "The Agent rejected the status request.".to_string()));
+    if !matches!(response.status.as_str(), "ok" | "rejected" | "failed") {
+        return Err("The Agent returned an unsupported response status.".to_string());
     }
 
-    Ok(response
+    let detail = response
         .detail
         .unwrap_or_else(|| "The Agent service is responding.".to_string())
         .chars()
-        .filter(|character| !character.is_control() || matches!(*character, '\n' | '\t'))
+        .filter(|character| !character.is_control() || matches!(*character, '\\n' | '\\t'))
         .take(1200)
-        .collect())
+        .collect();
+
+    Ok(AgentStatusResponse {
+        status: response.status,
+        detail,
+        recovery: response.recovery,
+    })
 }
 
 #[cfg(windows)]
-pub async fn query_status() -> Result<String, String> {
+pub async fn query_status() -> Result<AgentStatusResponse, String> {
     use std::time::{Duration, Instant};
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -301,14 +316,14 @@ pub async fn query_status() -> Result<String, String> {
         pipe.read_exact(&mut payload)
             .await
             .map_err(|_| "The Agent closed the status response before its payload arrived.".to_string())?;
-        let detail = decode_agent_response(&payload, &request_id)?;
+        let response = decode_agent_response(&payload, &request_id)?;
         pipe.write_all(&[AGENT_RESPONSE_ACK_BYTE])
             .await
             .map_err(|_| "The Agent response acknowledgement could not be sent.".to_string())?;
         pipe.flush()
             .await
             .map_err(|_| "The Agent response acknowledgement could not be flushed.".to_string())?;
-        Ok(detail)
+        Ok(response)
     })
     .await
     .map_err(|_| "The Agent status request timed out.".to_string())?
@@ -371,10 +386,10 @@ mod tests {
     #[test]
     fn accepts_a_correlated_status_response() {
         let payload = br#"{"version":1,"requestId":"status-1","status":"ok","connection":null,"detail":"Agent ready"}"#;
-        assert_eq!(
-            decode_agent_response(payload, "status-1").unwrap(),
-            "Agent ready"
-        );
+        let response = decode_agent_response(payload, "status-1").unwrap();
+        assert_eq!(response.status, "ok");
+        assert_eq!(response.detail, "Agent ready");
+        assert!(response.recovery.is_none());
     }
 
     #[test]
@@ -390,8 +405,47 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_success_responses() {
-        let payload = br#"{"version":1,"requestId":"status-1","status":"rejected","detail":"disabled"}"#;
+    fn preserves_structured_recovery_status_on_rejected_responses() {
+        let payload = br#"{
+            "version":1,
+            "requestId":"status-1",
+            "status":"rejected",
+            "detail":"Agent startup recovery is blocked: 1 unresolved recovery journal requires review.",
+            "recovery":{
+                "state":"blocked",
+                "journalInventoryComplete":true,
+                "totalSessions":1,
+                "verifiedCleanSessions":0,
+                "blockedSessions":1,
+                "omittedSessions":0,
+                "journalRetained":true,
+                "sessions":[{
+                    "sessionId":17,
+                    "revision":2,
+                    "phase":"recoveryRequired",
+                    "engine":"unknown",
+                    "tunnel":"verifiedClean",
+                    "routes":{"verifiedClean":1,"needsCleanup":0,"needsRestore":0,"conflict":0,"unknown":0},
+                    "dns":{"verifiedClean":0,"needsCleanup":0,"needsRestore":0,"conflict":0,"unknown":1},
+                    "firewallFilters":"verifiedClean",
+                    "verifiedClean":false
+                }],
+                "diagnostics":["DNS observer returned a partial family snapshot."]
+            }
+        }"#;
+        let response = decode_agent_response(payload, "status-1").unwrap();
+        assert_eq!(response.status, "rejected");
+        assert!(response.detail.contains("startup recovery"));
+        let recovery = response.recovery.expect("the structured recovery payload must be preserved");
+        assert!(matches!(recovery.state, crate::agent_protocol::AgentRecoveryState::Blocked));
+        assert_eq!(recovery.total_sessions, 1);
+        assert_eq!(recovery.sessions[0].dns.unknown, 1);
+        assert!(recovery.journal_retained);
+    }
+
+    #[test]
+    fn rejects_an_unsupported_response_status() {
+        let payload = br#"{"version":1,"requestId":"status-1","status":"mutate","detail":"unexpected"}"#;
         assert!(decode_agent_response(payload, "status-1").is_err());
     }
 

@@ -472,8 +472,9 @@ mod windows_service {
         // Load every committed checkpoint before exposing the pipe as RUNNING.
         // A missing, unsafe, corrupt, or unresolved journal leaves the service
         // available for read-only diagnostics but its status endpoint is rejected.
-        if let Err(error) = crate::agent_service::initialize_startup_recovery() {
-            eprintln!("Agent startup recovery is blocked: {error}");
+        let recovery = crate::agent_service::initialize_startup_recovery();
+        if recovery.is_blocked() {
+            eprintln!("Agent startup recovery is blocked: {}", recovery.detail_summary());
         }
 
         // The service is not reported as RUNNING until its protected, local-only

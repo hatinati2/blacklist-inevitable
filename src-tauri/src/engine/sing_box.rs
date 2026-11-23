@@ -299,6 +299,44 @@ pub fn build_tun_session_config_with_routing_policy(
     Ok(config)
 }
 
+/// Build a Rule-mode TUN config from a previously verified, immutable rule-set cache.
+///
+/// This is configuration generation only. It never downloads cache files, launches
+/// sing-box, creates a TUN interface, or changes Windows networking. The caller
+/// must obtain `cache_files` from the Agent's verified cache primitive and must
+/// treat any validation error as a hard failure.
+pub(crate) fn build_tun_session_config_with_verified_rule_set_cache(
+    profile: &ProfileSummary,
+    credentials: &BTreeMap<String, String>,
+    options: &TunSessionOptions,
+    policy: &crate::destination_routing::DestinationRoutingPolicy,
+    cache_file_path: &str,
+    cache_files: &crate::ruleset_cache::RuleSetCacheFiles,
+) -> Result<Value, String> {
+    let mut config = build_tun_session_config(profile, credentials, options)?;
+
+    if policy.mode == crate::destination_routing::TrafficRoutingMode::Rule
+        && policy.bypass_iran
+    {
+        crate::destination_routing::apply_destination_routing_policy_with_rule_set_cache(
+            &mut config,
+            policy,
+            cache_file_path,
+            cache_files,
+        )?;
+    } else {
+        // Global mode and Rule mode without Iran bypass do not consume the
+        // cached SRS files, so preserve the existing non-cache builder path.
+        crate::destination_routing::apply_destination_routing_policy(
+            &mut config,
+            policy,
+            cache_file_path,
+        )?;
+    }
+
+    Ok(config)
+}
+
 pub fn build_tun_session_config(
     profile: &ProfileSummary,
     credentials: &BTreeMap<String, String>,
@@ -906,6 +944,90 @@ mod tests {
             "sing-box v{SING_BOX_VERSION} rejected the Iran rule-based TUN config: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    #[test]
+    fn builds_rule_mode_tun_config_with_verified_cache_initial_paths() {
+        use crate::destination_routing::{DestinationRoutingPolicy, TrafficRoutingMode};
+        use crate::ruleset_cache::{RuleSetCacheFiles, SOURCE_REVISION};
+
+        let profile = sample_profile("trojan");
+        let credentials = BTreeMap::from([("password".to_string(), "test-only-secret".to_string())]);
+        let policy = DestinationRoutingPolicy {
+            mode: TrafficRoutingMode::Rule,
+            ..DestinationRoutingPolicy::default()
+        };
+        let cache_files = RuleSetCacheFiles {
+            geoip_path: std::path::PathBuf::from(
+                r"C:\\ProgramData\\BlacklistInevitable\\Agent\\RuleSets\\geoip-ir.srs",
+            ),
+            geosite_path: std::path::PathBuf::from(
+                r"C:\\ProgramData\\BlacklistInevitable\\Agent\\RuleSets\\geosite-ir.srs",
+            ),
+            source_revision: SOURCE_REVISION,
+        };
+
+        let config = build_tun_session_config_with_verified_rule_set_cache(
+            &profile,
+            &credentials,
+            &sample_tun_options(),
+            &policy,
+            r"C:\\ProgramData\\BlacklistInevitable\\Agent\\sing-box.db",
+            &cache_files,
+        )
+        .expect("build Rule-mode config from verified cache");
+
+        let rule_sets = config["route"]["rule_set"]
+            .as_array()
+            .expect("remote rule-set list");
+        assert_eq!(rule_sets.len(), 2);
+        assert_eq!(rule_sets[0]["tag"], "blacklist-geosite-ir");
+        assert_eq!(
+            rule_sets[0]["initial_path"],
+            r"C:\\ProgramData\\BlacklistInevitable\\Agent\\RuleSets\\geosite-ir.srs"
+        );
+        assert_eq!(rule_sets[1]["tag"], "blacklist-geoip-ir");
+        assert_eq!(
+            rule_sets[1]["initial_path"],
+            r"C:\\ProgramData\\BlacklistInevitable\\Agent\\RuleSets\\geoip-ir.srs"
+        );
+        assert_eq!(rule_sets[0]["type"], "remote");
+        assert_eq!(rule_sets[0]["http_client"], "blacklist-rule-set-http");
+        assert_eq!(rule_sets[0]["update_interval"], "24h");
+        assert_eq!(
+            config["route"]["default_http_client"],
+            "blacklist-rule-set-http"
+        );
+    }
+
+    #[test]
+    fn refuses_unverified_cache_when_rule_mode_requires_iran_bypass() {
+        use crate::destination_routing::{DestinationRoutingPolicy, TrafficRoutingMode};
+        use crate::ruleset_cache::RuleSetCacheFiles;
+
+        let profile = sample_profile("trojan");
+        let credentials = BTreeMap::from([("password".to_string(), "test-only-secret".to_string())]);
+        let policy = DestinationRoutingPolicy {
+            mode: TrafficRoutingMode::Rule,
+            ..DestinationRoutingPolicy::default()
+        };
+        let unpinned_cache = RuleSetCacheFiles {
+            geoip_path: std::path::PathBuf::from(r"C:\\ProgramData\\geoip-ir.srs"),
+            geosite_path: std::path::PathBuf::from(r"C:\\ProgramData\\geosite-ir.srs"),
+            source_revision: "unreviewed-revision",
+        };
+
+        let error = build_tun_session_config_with_verified_rule_set_cache(
+            &profile,
+            &credentials,
+            &sample_tun_options(),
+            &policy,
+            r"C:\\ProgramData\\BlacklistInevitable\\Agent\\sing-box.db",
+            &unpinned_cache,
+        )
+        .expect_err("an unpinned cache must never produce a Rule-mode config");
+
+        assert!(error.contains("unsupported source revision"));
     }
 
     #[test]

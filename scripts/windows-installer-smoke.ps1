@@ -79,6 +79,17 @@ if ($publisherThumbprint -eq "UNCONFIGURED") {
     if ($service.Status -ne "Running") {
         throw "The signed installer did not start the Windows Agent service."
     }
+    $serviceDetails = Get-CimInstance -ClassName Win32_Service -Filter "Name='BlacklistInevitableAgent'"
+    if (-not $serviceDetails -or $serviceDetails.StartName -ne "LocalSystem") {
+        throw "The Agent service is not configured to run under the required LocalSystem identity."
+    }
+    if ($serviceDetails.PathName -notlike "*$agentPath*") {
+        throw "The Agent service image path does not match the signed Agent executable in Program Files."
+    }
+    $sidOutput = (& (Join-Path $env:WINDIR "System32\sc.exe") qsidtype "BlacklistInevitableAgent" 2>&1 | Out-String)
+    if ($LASTEXITCODE -ne 0 -or $sidOutput -notmatch "RESTRICTED") {
+        throw "The Agent service did not retain the restricted service SID type."
+    }
     $journalDirectory = Join-Path $env:ProgramData "blacklist-inevitable\Agent"
     if (-not (Test-Path -LiteralPath $journalDirectory -PathType Container)) {
         throw "The Agent did not provision its protected recovery-journal directory."

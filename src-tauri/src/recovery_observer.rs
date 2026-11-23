@@ -996,6 +996,198 @@ mod tests {
         assert!(super::canonicalize_ip_prefix("203.0.113.1".parse().unwrap(), 33).is_err());
         assert!(super::canonicalize_ip_prefix("2001:db8::1".parse().unwrap(), 129).is_err());
     }
+    #[cfg(windows)]
+    #[test]
+    fn live_engine_observer_matches_the_current_process_creation_identity() {
+        use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
+        use windows_sys::Win32::System::Threading::{
+            GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+
+        let pid = std::process::id();
+        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        assert!(!process.is_null(), "OpenProcess failed with {}", unsafe {
+            windows_sys::Win32::Foundation::GetLastError()
+        });
+
+        let mut creation = FILETIME::default();
+        let mut exit = FILETIME::default();
+        let mut kernel = FILETIME::default();
+        let mut user = FILETIME::default();
+        let ok = unsafe {
+            GetProcessTimes(process, &mut creation, &mut exit, &mut kernel, &mut user)
+        };
+        let error = unsafe { windows_sys::Win32::Foundation::GetLastError() };
+        unsafe { CloseHandle(process) };
+        assert_ne!(ok, 0, "GetProcessTimes failed with {error}");
+
+        let expected = crate::recovery_journal::EngineProcessRecord {
+            process_id: pid,
+            creation_time_100ns: super::filetime_to_ticks(
+                creation.dwLowDateTime,
+                creation.dwHighDateTime,
+            ),
+        };
+        assert_ne!(expected.creation_time_100ns, 0);
+        let observed = super::observe_recorded_engine_process(&expected)
+            .expect("the current process identity must be readable");
+        assert_eq!(observed, super::Observation::Present(expected));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn live_tunnel_observer_reads_stable_interface_and_unicast_inventory() {
+        use windows_sys::Win32::NetworkManagement::IpHelper::{
+            GetIfTable2, MIB_IF_ROW2, MIB_IF_TABLE2,
+        };
+
+        let mut table: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
+        let status = unsafe { GetIfTable2(&mut table) };
+        assert_eq!(status, 0, "GetIfTable2 failed with {status}");
+        assert!(!table.is_null(), "GetIfTable2 returned a null table");
+        let _table = super::OwnedIpHelperTable(table.cast());
+
+        let count = unsafe { (*table).NumEntries as usize };
+        assert!(count > 0 && count <= 2048, "invalid interface count {count}");
+        let rows = unsafe {
+            std::slice::from_raw_parts(
+                std::ptr::addr_of!((*table).Table).cast::<MIB_IF_ROW2>(),
+                count,
+            )
+        };
+
+        let mut observed = None;
+        let mut errors = Vec::new();
+        for row in rows {
+            let guid = uuid::Uuid::from_u128(super::guid_to_u128(&row.InterfaceGuid));
+            let interface_index = row.InterfaceIndex;
+            let interface_luid = unsafe { row.InterfaceLuid.Value };
+            if guid.is_nil() || interface_index == 0 || interface_luid == 0 {
+                continue;
+            }
+
+            // The observer selects only by the stable GUID. Other expected
+            // fields are intentionally placeholders; the returned live record
+            // is the OS snapshot and is checked for internal consistency below.
+            let expected = crate::recovery_journal::TunnelInterfaceRecord {
+                interface_guid: guid.to_string(),
+                interface_index,
+                alias: String::new(),
+                mtu: row.Mtu,
+                addresses: Vec::new(),
+                address_details: Vec::new(),
+            };
+            match super::observe_recorded_tunnel_interface(&expected) {
+                Ok(super::Observation::Present(actual)) => {
+                    assert_eq!(actual.interface_guid, expected.interface_guid);
+                    assert_eq!(actual.interface_index, interface_index);
+                    let address_set = actual.address_details.iter()
+                        .map(|detail| detail.address)
+                        .collect::<std::collections::BTreeSet<_>>();
+                    let compatibility_set = actual.addresses.iter().copied()
+                        .collect::<std::collections::BTreeSet<_>>();
+                    assert_eq!(address_set, compatibility_set);
+                    assert_eq!(address_set.len(), actual.address_details.len());
+                    observed = Some(actual);
+                    break;
+                }
+                Ok(super::Observation::Absent | super::Observation::Unknown) => {}
+                Err(error) if errors.len() < 8 => errors.push(error),
+                Err(_) => {}
+            }
+        }
+
+        assert!(
+            observed.is_some(),
+            "no live interface produced a stable GUID/LUID and unicast snapshot: {}",
+            errors.join(" | ")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn live_route_observer_matches_a_unique_current_ipv4_or_ipv6_route() {
+        use crate::recovery_journal::{RecoveryJournal, RouteMutationRecord, RouteState};
+        use windows_sys::Win32::NetworkManagement::IpHelper::{
+            GetIpForwardTable2, MIB_IPFORWARD_ROW2, MIB_IPFORWARD_TABLE2,
+        };
+        use windows_sys::Win32::Networking::WinSock::AF_UNSPEC;
+
+        let mut table: *mut MIB_IPFORWARD_TABLE2 = std::ptr::null_mut();
+        let status = unsafe { GetIpForwardTable2(AF_UNSPEC, &mut table) };
+        assert_eq!(status, 0, "GetIpForwardTable2 failed with {status}");
+        assert!(!table.is_null(), "GetIpForwardTable2 returned a null route table");
+        let _table = super::OwnedIpHelperTable(table.cast());
+
+        let count = unsafe { (*table).NumEntries as usize };
+        assert!(count > 0 && count <= 16_384, "invalid route count {count}");
+        let rows = unsafe {
+            std::slice::from_raw_parts(
+                std::ptr::addr_of!((*table).Table).cast::<MIB_IPFORWARD_ROW2>(),
+                count,
+            )
+        };
+
+        let mut candidates = Vec::new();
+        for row in rows {
+            let address = match super::sockaddr_address(&row.DestinationPrefix.Prefix) {
+                Ok(address) => address,
+                Err(_) => continue,
+            };
+            let prefix = match super::canonicalize_ip_prefix(
+                address,
+                row.DestinationPrefix.PrefixLength,
+            ) {
+                Ok(prefix) => prefix,
+                Err(_) => continue,
+            };
+            let next_hop_address = match super::sockaddr_address(&row.NextHop) {
+                Ok(address) if address.is_ipv4() == address.is_ipv4() => address,
+                _ => continue,
+            };
+            if row.InterfaceIndex == 0 || unsafe { row.InterfaceLuid.Value } == 0 {
+                continue;
+            }
+            let next_hop = if next_hop_address.is_unspecified() {
+                None
+            } else {
+                Some(next_hop_address)
+            };
+            let state = RouteState {
+                interface_index: row.InterfaceIndex,
+                interface_luid: Some(unsafe { row.InterfaceLuid.Value }),
+                next_hop,
+                metric: row.Metric,
+            };
+            candidates.push((prefix, state));
+        }
+
+        let mut chosen = None;
+        for (index, (prefix, state)) in candidates.iter().enumerate() {
+            if candidates.iter().enumerate()
+                .all(|(other_index, (other_prefix, _))| other_index == index || other_prefix != prefix)
+            {
+                chosen = Some((prefix.clone(), state.clone()));
+                break;
+            }
+        }
+        let (destination_prefix, expected_state) =
+            chosen.expect("the Windows runner must expose a unique route prefix");
+
+        let mut journal = RecoveryJournal::new(0xA11CE);
+        journal.routes.push(RouteMutationRecord {
+            destination_prefix: destination_prefix.clone(),
+            applied: expected_state.clone(),
+            previous: None,
+        });
+        let observed = super::observe_recorded_routes(&journal)
+            .expect("the live route inventory must be readable");
+        assert_eq!(
+            observed.get(&destination_prefix),
+            Some(&super::Observation::Present(expected_state))
+        );
+    }
+
     /// This test is intentionally read-only. It exercises the native DNS APIs
     /// on a real Windows runner and asserts that the current probe never
     /// mislabels its one-family response as a complete dual-stack snapshot.

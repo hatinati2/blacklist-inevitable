@@ -92,8 +92,21 @@ impl AgentRecoveryStatus {
             AgentRecoveryState::VerifiedCleanRetained => "verified-clean-journal-retained",
             AgentRecoveryState::Blocked => "blocked",
         };
+        let headline = match self.state {
+            AgentRecoveryState::Clear => "Agent startup recovery is clean.".to_string(),
+            AgentRecoveryState::VerifiedCleanRetained => {
+                "Agent startup recovery assessment is verified clean; unresolved recovery journals are retained.".to_string()
+            }
+            AgentRecoveryState::Blocked if self.total_sessions > 0 => format!(
+                "Agent startup recovery is blocked: {} unresolved recovery journal(s) require review.",
+                self.total_sessions
+            ),
+            AgentRecoveryState::Blocked => {
+                "Agent startup recovery is blocked: the unresolved recovery journal inventory is unavailable.".to_string()
+            }
+        };
         format!(
-            "Read-only recovery assessment: state={state}; sessions={}; verifiedClean={}; blocked={}; inventoryComplete={}; journalRetained={}. No cleanup, rollback, or journal deletion was performed; VPN operations remain disabled.",
+            "{headline} Read-only assessment: state={state}; sessions={}; verifiedClean={}; blocked={}; inventoryComplete={}; journalRetained={}. No cleanup, rollback, or journal deletion was performed; VPN operations remain disabled.",
             self.total_sessions, self.verified_clean_sessions, self.blocked_sessions,
             self.journal_inventory_complete, self.journal_retained
         )
@@ -735,6 +748,25 @@ mod tests {
         let mut request = connect_request();
         request.version = AGENT_PROTOCOL_VERSION + 1;
         assert!(validate_agent_request(&request).is_err());
+    }
+
+    #[test]
+    fn blocked_recovery_summary_preserves_installer_diagnostic_contract() {
+        let status = AgentRecoveryStatus {
+            state: AgentRecoveryState::Blocked,
+            journal_inventory_complete: true,
+            total_sessions: 1,
+            verified_clean_sessions: 0,
+            blocked_sessions: 1,
+            omitted_sessions: 0,
+            journal_retained: true,
+            sessions: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let detail = status.detail_summary();
+        assert!(detail.contains("startup recovery"));
+        assert!(detail.contains("unresolved recovery journal"));
+        assert!(detail.contains("journal deletion was not performed"));
     }
 
     #[test]

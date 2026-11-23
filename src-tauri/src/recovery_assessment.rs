@@ -868,6 +868,21 @@ mod tests {
     }
 
     #[test]
+    fn global_wfp_inventory_accepts_distinct_filters_owned_by_multiple_sessions() {
+        let first = filter_record(77);
+        let mut second = filter_record(88);
+        second.filter_key = Some("d3c2a1b0-1111-4222-8333-444455556666".into());
+        second.layer_key = "e4d3c2b1-2222-4333-8444-555566667777".into();
+        let expected = vec![first.clone(), second.clone()];
+        let observed = Observation::Present(vec![first, second]);
+
+        assert_eq!(
+            assess_firewall_filter_inventory(&expected, &observed),
+            ResourceDisposition::NeedsCleanup
+        );
+    }
+
+    #[test]
     fn duplicate_stable_wfp_keys_across_sessions_are_a_conflict() {
         let first = filter_record(77);
         let mut expected = vec![first.clone(), first.clone()];

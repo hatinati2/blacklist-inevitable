@@ -330,7 +330,7 @@ pub async fn query_status() -> Result<AgentStatusResponse, String> {
 }
 
 #[cfg(not(windows))]
-pub async fn query_status() -> Result<String, String> {
+pub async fn query_status() -> Result<AgentStatusResponse, String> {
     Err("The privileged Agent service is available only in the Windows desktop build.".to_string())
 }
 

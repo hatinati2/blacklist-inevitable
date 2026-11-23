@@ -20,10 +20,52 @@ type AppStatus = {
   engines: EngineTarget[];
 };
 
+type AgentRecoveryDisposition =
+  | "verifiedClean"
+  | "needsCleanup"
+  | "needsRestore"
+  | "conflict"
+  | "unknown";
+
+type AgentRecoveryState = "clear" | "verifiedCleanRetained" | "blocked";
+
+type AgentRecoveryDispositionCounts = {
+  verifiedClean: number;
+  needsCleanup: number;
+  needsRestore: number;
+  conflict: number;
+  unknown: number;
+};
+
+type AgentRecoverySessionStatus = {
+  sessionId: number;
+  revision: number;
+  phase: string;
+  engine: AgentRecoveryDisposition;
+  tunnel: AgentRecoveryDisposition;
+  routes: AgentRecoveryDispositionCounts;
+  dns: AgentRecoveryDispositionCounts;
+  firewallFilters: AgentRecoveryDisposition;
+  verifiedClean: boolean;
+};
+
+type AgentRecoveryStatus = {
+  state: AgentRecoveryState;
+  journalInventoryComplete: boolean;
+  totalSessions: number;
+  verifiedCleanSessions: number;
+  blockedSessions: number;
+  omittedSessions: number;
+  journalRetained: boolean;
+  sessions: AgentRecoverySessionStatus[];
+  diagnostics: string[];
+};
+
 type AgentServiceStatus = {
   available: boolean;
   state: "running" | "unavailable" | "unsupported" | "recoveryRequired";
   detail: string;
+  recovery?: AgentRecoveryStatus | null;
 };
 
 type Profile = {
@@ -67,6 +109,42 @@ type EndpointResult = {
   latencyMs: number | null;
   detail: string;
 };
+
+function recoveryStateLabel(state: AgentRecoveryState): string {
+  switch (state) {
+    case "clear":
+      return "No unresolved recovery journals";
+    case "verifiedCleanRetained":
+      return "Resources verified clean; journal retained";
+    case "blocked":
+      return "Recovery is blocked";
+  }
+}
+
+function dispositionLabel(disposition: AgentRecoveryDisposition): string {
+  switch (disposition) {
+    case "verifiedClean":
+      return "Verified clean";
+    case "needsCleanup":
+      return "Needs cleanup";
+    case "needsRestore":
+      return "Needs restore";
+    case "conflict":
+      return "Conflict";
+    case "unknown":
+      return "Unknown";
+  }
+}
+
+function dispositionCountsLabel(counts: AgentRecoveryDispositionCounts): string {
+  return [
+    `clean ${counts.verifiedClean}`,
+    `cleanup ${counts.needsCleanup}`,
+    `restore ${counts.needsRestore}`,
+    `conflict ${counts.conflict}`,
+    `unknown ${counts.unknown}`,
+  ].join(" · ");
+}
 
 export default function App() {
   const [status, setStatus] = useState<AppStatus | null>(null);
@@ -112,6 +190,7 @@ export default function App() {
         available: false,
         state: "unavailable",
         detail: typeof error === "string" ? error : "The Agent status request failed.",
+        recovery: null,
       });
     } finally {
       setAgentStatusLoading(false);
@@ -366,6 +445,82 @@ export default function App() {
         <p className="panel-copy" aria-live="polite">
           {agentStatus?.detail ?? "Checking the local Agent service…"}
         </p>
+        {agentStatus?.recovery && (
+          <div className="recovery-details" aria-live="polite">
+            <div className="recovery-overview">
+              <div>
+                <span className="recovery-label">Recovery assessment</span>
+                <strong className={
+                  agentStatus.recovery.state === "clear"
+                    ? "recovery-state recovery-state-clear"
+                    : "recovery-state recovery-state-blocked"
+                }>
+                  {recoveryStateLabel(agentStatus.recovery.state)}
+                </strong>
+              </div>
+              <div className="recovery-inventory">
+                <span>{agentStatus.recovery.journalInventoryComplete ? "Complete journal inventory" : "Incomplete journal inventory"}</span>
+                <span>{agentStatus.recovery.totalSessions} session(s)</span>
+                <span>{agentStatus.recovery.verifiedCleanSessions} verified clean</span>
+                <span>{agentStatus.recovery.blockedSessions} blocked</span>
+                <span>{agentStatus.recovery.journalRetained ? "Journal retained" : "No journal retained"}</span>
+              </div>
+            </div>
+            {agentStatus.recovery.state === "verifiedCleanRetained" && (
+              <p className="recovery-retained-warning">
+                The observed resources look clean, but the recovery journal is still retained.
+                The Agent remains blocked until journal disposition has a separately reviewed protocol.
+              </p>
+            )}
+            {agentStatus.recovery.sessions.map((session) => (
+              <article className="recovery-session" key={`${session.sessionId}:${session.revision}`}>
+                <div className="recovery-session-heading">
+                  <strong>Session {session.sessionId} · revision {session.revision}</strong>
+                  <span>{session.phase}</span>
+                </div>
+                <div className="recovery-resource-grid">
+                  <div className="recovery-resource">
+                    <span>Engine process</span>
+                    <strong>{dispositionLabel(session.engine)}</strong>
+                  </div>
+                  <div className="recovery-resource">
+                    <span>Tunnel interface</span>
+                    <strong>{dispositionLabel(session.tunnel)}</strong>
+                  </div>
+                  <div className="recovery-resource">
+                    <span>Routes</span>
+                    <strong>{dispositionCountsLabel(session.routes)}</strong>
+                  </div>
+                  <div className="recovery-resource">
+                    <span>DNS</span>
+                    <strong>{dispositionCountsLabel(session.dns)}</strong>
+                  </div>
+                  <div className="recovery-resource">
+                    <span>WFP filters</span>
+                    <strong>{dispositionLabel(session.firewallFilters)}</strong>
+                  </div>
+                  <div className="recovery-resource">
+                    <span>Session outcome</span>
+                    <strong>{session.verifiedClean ? "Verified clean; journal still retained" : "Not verified clean"}</strong>
+                  </div>
+                </div>
+              </article>
+            ))}
+            {agentStatus.recovery.omittedSessions > 0 && (
+              <p className="recovery-note">
+                {agentStatus.recovery.omittedSessions} additional session(s) omitted from the compact detail list; aggregate counts include them.
+              </p>
+            )}
+            {agentStatus.recovery.diagnostics.length > 0 && (
+              <div className="recovery-diagnostics">
+                <span className="recovery-label">Observer diagnostics</span>
+                {agentStatus.recovery.diagnostics.map((diagnostic, index) => (
+                  <p className="recovery-diagnostic" key={index}>{diagnostic}</p>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
         <div className="panel-actions">
           <span className="hint-text">
             Read-only status channel. Connect, Disconnect, and recovery remain disabled.

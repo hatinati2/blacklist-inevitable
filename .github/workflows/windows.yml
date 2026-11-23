@@ -98,11 +98,14 @@ jobs:
 
 
       - name: Sign Windows installer when release signing is configured
-        if: env.AGENT_SIGNING_CONFIGURED == 'true'
         shell: pwsh
         env:
           AGENT_SIGNER_THUMBPRINT: ${{ vars.AGENT_SIGNER_THUMBPRINT }}
         run: |
+          if ($env:AGENT_SIGNING_CONFIGURED -ne "true") {
+            Write-Host "No trusted Agent signing certificate was configured; skipping installer signing."
+            exit 0
+          }
           $thumbprint = ($env:AGENT_SIGNER_THUMBPRINT -replace '\s', '').ToUpperInvariant()
           $kitsRoot = Join-Path ([Environment]::GetEnvironmentVariable("ProgramFiles(x86)")) "Windows Kits\10\bin"
           $signtool = Get-ChildItem -Path $kitsRoot -Filter "signtool.exe" -Recurse -ErrorAction Stop |

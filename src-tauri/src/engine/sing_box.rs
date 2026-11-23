@@ -959,10 +959,10 @@ mod tests {
         };
         let cache_files = RuleSetCacheFiles {
             geoip_path: std::path::PathBuf::from(
-                r"C:\\ProgramData\\BlacklistInevitable\\Agent\\RuleSets\\geoip-ir.srs",
+                r"C:\ProgramData\BlacklistInevitable\Agent\RuleSets\geoip-ir.srs",
             ),
             geosite_path: std::path::PathBuf::from(
-                r"C:\\ProgramData\\BlacklistInevitable\\Agent\\RuleSets\\geosite-ir.srs",
+                r"C:\ProgramData\BlacklistInevitable\Agent\RuleSets\geosite-ir.srs",
             ),
             source_revision: SOURCE_REVISION,
         };
@@ -972,7 +972,7 @@ mod tests {
             &credentials,
             &sample_tun_options(),
             &policy,
-            r"C:\\ProgramData\\BlacklistInevitable\\Agent\\sing-box.db",
+            r"C:\ProgramData\BlacklistInevitable\Agent\sing-box.db",
             &cache_files,
         )
         .expect("build Rule-mode config from verified cache");
@@ -984,12 +984,12 @@ mod tests {
         assert_eq!(rule_sets[0]["tag"], "blacklist-geosite-ir");
         assert_eq!(
             rule_sets[0]["initial_path"],
-            r"C:\\ProgramData\\BlacklistInevitable\\Agent\\RuleSets\\geosite-ir.srs"
+            r"C:\ProgramData\BlacklistInevitable\Agent\RuleSets\geosite-ir.srs"
         );
         assert_eq!(rule_sets[1]["tag"], "blacklist-geoip-ir");
         assert_eq!(
             rule_sets[1]["initial_path"],
-            r"C:\\ProgramData\\BlacklistInevitable\\Agent\\RuleSets\\geoip-ir.srs"
+            r"C:\ProgramData\BlacklistInevitable\Agent\RuleSets\geoip-ir.srs"
         );
         assert_eq!(rule_sets[0]["type"], "remote");
         assert_eq!(rule_sets[0]["http_client"], "blacklist-rule-set-http");
@@ -1012,8 +1012,8 @@ mod tests {
             ..DestinationRoutingPolicy::default()
         };
         let unpinned_cache = RuleSetCacheFiles {
-            geoip_path: std::path::PathBuf::from(r"C:\\ProgramData\\geoip-ir.srs"),
-            geosite_path: std::path::PathBuf::from(r"C:\\ProgramData\\geosite-ir.srs"),
+            geoip_path: std::path::PathBuf::from(r"C:\ProgramData\geoip-ir.srs"),
+            geosite_path: std::path::PathBuf::from(r"C:\ProgramData\geosite-ir.srs"),
             source_revision: "unreviewed-revision",
         };
 
@@ -1022,7 +1022,7 @@ mod tests {
             &credentials,
             &sample_tun_options(),
             &policy,
-            r"C:\\ProgramData\\BlacklistInevitable\\Agent\\sing-box.db",
+            r"C:\ProgramData\BlacklistInevitable\Agent\sing-box.db",
             &unpinned_cache,
         )
         .expect_err("an unpinned cache must never produce a Rule-mode config");

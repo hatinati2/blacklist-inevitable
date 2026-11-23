@@ -248,7 +248,7 @@ fn decode_agent_response(
         .detail
         .unwrap_or_else(|| "The Agent service is responding.".to_string())
         .chars()
-        .filter(|character| !character.is_control() || matches!(*character, '\\n' | '\\t'))
+        .filter(|character| !character.is_control() || matches!(*character, '\n' | '\t'))
         .take(1200)
         .collect();
 

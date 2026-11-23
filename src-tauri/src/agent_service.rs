@@ -328,6 +328,13 @@ mod startup_recovery_tests {
     fn unresolved_journals_are_never_assumed_clean_without_live_observers() {
         let mut journal = RecoveryJournal::new(41);
         journal.phase = JournalPhase::RecoveryRequired;
+        // Deliberately point at this still-running test process but use a
+        // mismatching creation time. This deterministically produces Conflict
+        // even on Windows runners where the product WFP namespace is present.
+        journal.engine = Some(crate::recovery_journal::EngineProcessRecord {
+            process_id: std::process::id(),
+            creation_time_100ns: 1,
+        });
         let status = assess_startup_journals(&[journal]);
         assert!(status.is_blocked());
         assert_eq!(status.total_sessions, 1);

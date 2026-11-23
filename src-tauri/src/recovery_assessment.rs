@@ -138,7 +138,9 @@ pub enum RecoveryIntent {
     },
     RestorePreviousRoute {
         destination_prefix: String,
-        expected_applied: RouteState,
+        /// Exact live route state observed by the planner. None means the
+        /// destination was positively observed absent before restoration.
+        expected_current: Option<RouteState>,
         previous: RouteState,
     },
     RestorePreviousDns {
@@ -399,21 +401,38 @@ pub fn build_recovery_intent_plan(
                     );
                 }
             }
-            ResourceDisposition::NeedsRestore => match record.previous.clone() {
-                Some(previous)
-                    if record.applied.interface_luid.is_some()
-                        && previous.interface_luid.is_some() =>
-                {
-                    intents.push(RecoveryIntent::RestorePreviousRoute {
-                        destination_prefix: record.destination_prefix.clone(),
-                        expected_applied: record.applied.clone(),
-                        previous,
-                    });
+            ResourceDisposition::NeedsRestore => {
+                let expected_current = match snapshot.routes.get(&record.destination_prefix) {
+                    Some(Observation::Present(actual)) if actual == &record.applied => {
+                        Some(actual.clone())
+                    }
+                    Some(Observation::Absent) => None,
+                    _ => {
+                        push_recovery_plan_blocker(
+                            &mut blockers,
+                            RecoveryPlanResource::Route(record.destination_prefix.clone()),
+                            ResourceDisposition::Unknown,
+                        );
+                        continue;
+                    }
+                };
+                match record.previous.clone() {
+                    Some(previous)
+                        if record.applied.interface_luid.is_some()
+                            && previous.interface_luid.is_some() =>
+                    {
+                        intents.push(RecoveryIntent::RestorePreviousRoute {
+                            destination_prefix: record.destination_prefix.clone(),
+                            expected_current,
+                            previous,
+                        });
+                    }
+                    _ => push_recovery_plan_blocker(
+                        &mut blockers,
+                        RecoveryPlanResource::Route(record.destination_prefix.clone()),
+                        ResourceDisposition::Unknown,
+                    ),
                 }
-                _ => push_recovery_plan_blocker(&mut blockers,
-                    RecoveryPlanResource::Route(record.destination_prefix.clone()),
-                    ResourceDisposition::Unknown,
-                ),
             },
             other => push_recovery_plan_blocker(&mut blockers,
                 RecoveryPlanResource::Route(record.destination_prefix.clone()),
@@ -1146,10 +1165,10 @@ mod tests {
             intent,
             RecoveryIntent::RestorePreviousRoute {
                 destination_prefix,
-                expected_applied,
+                expected_current,
                 previous,
             } if destination_prefix == &journal.routes[0].destination_prefix
-                && expected_applied == &journal.routes[0].applied
+                && expected_current.as_ref() == Some(&journal.routes[0].applied)
                 && Some(previous) == journal.routes[0].previous.as_ref()
         )));
         assert!(plan.intents.iter().any(|intent| matches!(
@@ -1170,6 +1189,33 @@ mod tests {
                     && identity.provider_key == journal.firewall_filters[0].provider_key
                     && identity.layer_key == journal.firewall_filters[0].layer_key
         )));
+    }
+
+    #[test]
+    fn absent_applied_route_plan_records_absent_as_the_expected_current_state() {
+        let mut journal = RecoveryJournal::new(28);
+        let route = route_record();
+        journal.routes.push(route.clone());
+        let mut snapshot = empty_snapshot();
+        snapshot.routes.insert(route.destination_prefix.clone(), Observation::Absent);
+        let assessment = assess_recovery(&journal, &snapshot);
+        assert_eq!(assessment.routes[0].disposition, ResourceDisposition::NeedsRestore);
+
+        let plan = build_recovery_intent_plan(
+            &journal,
+            std::slice::from_ref(&journal),
+            &snapshot,
+            &assessment,
+        ).unwrap();
+        assert_eq!(plan.state, RecoveryPlanState::ReadyForReview);
+        assert!(matches!(
+            &plan.intents[0],
+            RecoveryIntent::RestorePreviousRoute {
+                expected_current: None,
+                previous,
+                ..
+            } if Some(previous) == journal.routes[0].previous.as_ref()
+        ));
     }
 
     #[test]

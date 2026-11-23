@@ -14,7 +14,7 @@
 - IPC frames use the shared four-byte little-endian length prefix, are bounded to 128 KiB, and have a finite 30-second read deadline. The implementation drains the pipe buffer incrementally so a payload larger than the kernel buffer cannot deadlock.
 - A replay guard is created after peer authentication. One request is handled per connection; malformed or unauthorized clients are dropped.
 - Only `GetStatus` and `GetDiagnostics` return a status-only response. `Connect`, `Disconnect`, and `Recover` are explicitly rejected.
-- The unelevated desktop now has a status-only named-pipe client with a five-second timeout, bounded response framing, request/response correlation, and server-process token validation (LocalSystem, session 0). It sends no credentials and no network-mutating operations.
+- The unelevated desktop now has a status-only named-pipe client with a five-second timeout, bounded response framing, and request/response correlation. It verifies the server process token (LocalSystem, session 0) when token inspection is available; for a standard user that cannot open the SYSTEM token, it fails over to reading the pipe object's owner SID and accepts only LocalSystem. It sends no credentials and no network-mutating operations.
 - The Windows CI builds this executable independently from the Tauri desktop installer.
 
 ## Important identity and deployment constraints

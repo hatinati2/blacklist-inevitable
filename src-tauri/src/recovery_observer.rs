@@ -1129,6 +1129,7 @@ mod tests {
         };
 
         let mut candidates = Vec::new();
+        let mut prefix_counts = std::collections::BTreeMap::<String, usize>::new();
         for row in rows {
             let address = match super::sockaddr_address(&row.DestinationPrefix.Prefix) {
                 Ok(address) => address,
@@ -1159,20 +1160,14 @@ mod tests {
                 next_hop,
                 metric: row.Metric,
             };
+            *prefix_counts.entry(prefix.clone()).or_default() += 1;
             candidates.push((prefix, state));
         }
 
-        let mut chosen = None;
-        for (index, (prefix, state)) in candidates.iter().enumerate() {
-            if candidates.iter().enumerate()
-                .all(|(other_index, (other_prefix, _))| other_index == index || other_prefix != prefix)
-            {
-                chosen = Some((prefix.clone(), state.clone()));
-                break;
-            }
-        }
-        let (destination_prefix, expected_state) =
-            chosen.expect("the Windows runner must expose a unique route prefix");
+        let (destination_prefix, expected_state) = candidates
+            .into_iter()
+            .find(|(prefix, _)| prefix_counts.get(prefix).copied() == Some(1))
+            .expect("the Windows runner must expose a unique route prefix");
 
         let mut journal = RecoveryJournal::new(0xA11CE);
         journal.routes.push(RouteMutationRecord {

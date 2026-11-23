@@ -158,10 +158,22 @@ fn assess_startup_journals(journals: &[RecoveryJournal]) -> AgentRecoveryStatus 
     // prefix or DNS interface cannot be independently attributed to multiple
     // sessions. Keep those observations Unknown rather than implying that
     // either session can safely restore the shared resource.
+    let mut engine_identity_counts = BTreeMap::<(u32, u64), u32>::new();
+    let mut tunnel_guid_counts = BTreeMap::<String, u32>::new();
     let mut route_key_counts = BTreeMap::<String, u32>::new();
     let mut dns_index_counts = BTreeMap::<u32, u32>::new();
     let mut dns_guid_counts = BTreeMap::<String, u32>::new();
     for journal in journals {
+        if let Some(engine) = &journal.engine {
+            *engine_identity_counts
+                .entry((engine.process_id, engine.creation_time_100ns))
+                .or_default() += 1;
+        }
+        if let Some(tunnel) = &journal.tunnel {
+            *tunnel_guid_counts
+                .entry(tunnel.interface_guid.to_ascii_lowercase())
+                .or_default() += 1;
+        }
         for record in &journal.routes {
             let key = crate::recovery_observer::canonicalize_prefix(&record.destination_prefix)
                 .unwrap_or_else(|_| record.destination_prefix.clone());
@@ -174,6 +186,14 @@ fn assess_startup_journals(journals: &[RecoveryJournal]) -> AgentRecoveryStatus 
             }
         }
     }
+    let ambiguous_engine_identities = engine_identity_counts
+        .into_iter()
+        .filter_map(|(identity, count)| (count > 1).then_some(identity))
+        .collect::<BTreeSet<_>>();
+    let ambiguous_tunnel_guids = tunnel_guid_counts
+        .into_iter()
+        .filter_map(|(guid, count)| (count > 1).then_some(guid))
+        .collect::<BTreeSet<_>>();
     let mut ambiguous_route_keys = BTreeSet::new();
     let mut ambiguous_dns_interfaces = BTreeSet::new();
     for journal in journals {
@@ -201,6 +221,16 @@ fn assess_startup_journals(journals: &[RecoveryJournal]) -> AgentRecoveryStatus 
 
     for journal in journals {
         let engine = match journal.engine.as_ref() {
+            Some(expected)
+                if ambiguous_engine_identities
+                    .contains(&(expected.process_id, expected.creation_time_100ns)) =>
+            {
+                add_bounded_diagnostic(
+                    &mut diagnostics,
+                    "An engine process identity is referenced by multiple unresolved sessions.",
+                );
+                Observation::Unknown
+            }
             Some(expected) => match observe_recorded_engine_process(expected) {
                 Ok(observed) => observed,
                 Err(error) => {
@@ -212,6 +242,15 @@ fn assess_startup_journals(journals: &[RecoveryJournal]) -> AgentRecoveryStatus 
         };
 
         let tunnel = match journal.tunnel.as_ref() {
+            Some(expected)
+                if ambiguous_tunnel_guids.contains(&expected.interface_guid.to_ascii_lowercase()) =>
+            {
+                add_bounded_diagnostic(
+                    &mut diagnostics,
+                    "A tunnel interface GUID is referenced by multiple unresolved sessions.",
+                );
+                Observation::Unknown
+            }
             Some(expected) => match observe_recorded_tunnel_interface(expected) {
                 Ok(observed) => observed,
                 Err(error) => {

@@ -118,10 +118,9 @@ fn verify_system_service_peer(
     pipe: &tokio::net::windows::named_pipe::NamedPipeClient,
 ) -> Result<(), String> {
     use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, HANDLE};
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
     use windows_sys::Win32::Security::{
-        GetTokenInformation, GetLengthSid, GetSecurityInfo, OpenProcessToken, TokenSessionId,
-        TokenUser, OWNER_SECURITY_INFORMATION, SE_FILE_OBJECT, TOKEN_QUERY, TOKEN_USER,
+        GetTokenInformation, OpenProcessToken, TokenSessionId, TokenUser, TOKEN_QUERY, TOKEN_USER,
     };
     use windows_sys::Win32::System::Pipes::GetNamedPipeServerProcessId;
     use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};

@@ -105,6 +105,10 @@ jobs:
             }
           }
 
+          # Make the exact, hash-verified SRS directory available to the Rust
+          # integration test so it validates the real generated TUN config.
+          "SING_BOX_RULESET_DIRECTORY=$directory" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
           $config = @{
             outbounds = @(@{ type = "direct"; tag = "direct" })
             route = @{

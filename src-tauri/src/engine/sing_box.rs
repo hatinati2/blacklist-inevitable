@@ -901,35 +901,60 @@ mod tests {
 
     #[test]
     fn validates_iran_rule_mode_tun_config_with_pinned_sing_box_binary() {
-        use crate::destination_routing::{
-            DestinationRoutingPolicy, TrafficRoutingMode,
-        };
+        use crate::destination_routing::{DestinationRoutingPolicy, TrafficRoutingMode};
+        use crate::ruleset_cache::{RuleSetCacheFiles, SOURCE_REVISION};
 
         let Ok(binary) = std::env::var("SING_BOX_VALIDATOR") else {
             return;
         };
+        let Ok(rule_set_directory) = std::env::var("SING_BOX_RULESET_DIRECTORY") else {
+            // CI sets both variables after verifying the pinned binary and exact SRS bytes.
+            // Local unit tests remain independent of downloaded external assets.
+            return;
+        };
+
+        let geoip_path = std::path::PathBuf::from(&rule_set_directory).join("geoip-ir.srs");
+        let geosite_path = std::path::PathBuf::from(&rule_set_directory).join("geosite-ir.srs");
+        assert!(geoip_path.is_file(), "the verified geoip-ir SRS asset is missing");
+        assert!(geosite_path.is_file(), "the verified geosite-ir SRS asset is missing");
+
         let profile = sample_profile("trojan");
         let credentials = BTreeMap::from([("password".to_string(), "test-only-secret".to_string())]);
         let policy = DestinationRoutingPolicy {
             mode: TrafficRoutingMode::Rule,
             ..DestinationRoutingPolicy::default()
         };
-        let config = build_tun_session_config_with_routing_policy(
+        let cache_files = RuleSetCacheFiles {
+            geoip_path: geoip_path.clone(),
+            geosite_path: geosite_path.clone(),
+            source_revision: SOURCE_REVISION,
+        };
+        let config = build_tun_session_config_with_verified_rule_set_cache(
             &profile,
             &credentials,
             &sample_tun_options(),
             &policy,
-            r"C:\ProgramData\blacklist-inevitable\cache\sing-box.db",
-        ).expect("generate Iran rule-based TUN config");
+            r"C:\ProgramData\BlacklistInevitable\Agent\sing-box.db",
+            &cache_files,
+        )
+        .expect("generate Iran Rule-mode TUN config from verified cache files");
+
+        let rule_sets = config["route"]["rule_set"]
+            .as_array()
+            .expect("generated remote rule-set list");
+        assert_eq!(rule_sets.len(), 2);
+        assert_eq!(rule_sets[0]["initial_path"], geosite_path.to_string_lossy().as_ref());
+        assert_eq!(rule_sets[1]["initial_path"], geoip_path.to_string_lossy().as_ref());
 
         let directory = std::env::temp_dir()
             .join(format!("blacklist-rule-routing-config-{}", Uuid::new_v4()));
         fs::create_dir_all(&directory).expect("create temporary rule-routing config directory");
-        let config_path = directory.join("rule-routing.json");
+        let config_path = directory.join("rule-routing-with-initial-path.json");
         fs::write(
             &config_path,
             serde_json::to_vec(&config).expect("serialize rule-routing config"),
-        ).expect("write rule-routing config");
+        )
+        .expect("write rule-routing config");
 
         let output = std::process::Command::new(&binary)
             .arg("check")
@@ -941,7 +966,7 @@ mod tests {
 
         assert!(
             output.status.success(),
-            "sing-box v{SING_BOX_VERSION} rejected the Iran rule-based TUN config: {}",
+            "sing-box v{SING_BOX_VERSION} rejected the generated Rule-mode TUN config with real SRS initial_path files: {}",
             String::from_utf8_lossy(&output.stderr)
         );
     }

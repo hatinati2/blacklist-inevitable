@@ -232,9 +232,9 @@ fn is_local_system_sid(sid: &[u8]) -> bool {
 #[cfg(windows)]
 fn verify_local_system_pipe_owner(pipe_handle: windows_sys::Win32::Foundation::HANDLE) -> Result<(), String> {
     use windows_sys::Win32::Foundation::LocalFree;
-    use windows_sys::Win32::Security::{
-        GetLengthSid, GetSecurityInfo, OWNER_SECURITY_INFORMATION, SE_FILE_OBJECT,
-    };
+    use windows_sys::Win32::Security::GetLengthSid;
+    use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
+    use windows_sys::Win32::Security::OWNER_SECURITY_INFORMATION;
 
     let mut owner_sid = std::ptr::null_mut();
     let mut security_descriptor = std::ptr::null_mut();

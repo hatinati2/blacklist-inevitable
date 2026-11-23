@@ -192,11 +192,13 @@ fn handle_authenticated_connection(pipe: HANDLE, stop_event: HANDLE) -> Result<(
             let recovery = crate::agent_service::startup_recovery_status();
             let detail = recovery.detail_summary();
             let blocked = recovery.is_blocked();
+            let connection = crate::agent_service::connection_snapshot();
             let mut response = if blocked {
                 AgentResponse::rejected(request.request_id, detail.clone())
             } else {
-                AgentResponse::ok(request.request_id, None)
+                AgentResponse::ok(request.request_id, Some(connection.clone()))
             };
+            response.connection = Some(connection);
             response.detail = Some(detail);
             response.recovery = Some(recovery);
             response

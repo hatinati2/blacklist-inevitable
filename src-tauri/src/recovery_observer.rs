@@ -1142,7 +1142,7 @@ mod tests {
                 Err(_) => continue,
             };
             let next_hop_address = match super::sockaddr_address(&row.NextHop) {
-                Ok(address) if address.is_ipv4() == address.is_ipv4() => address,
+                Ok(next_hop) if next_hop.is_ipv4() == address.is_ipv4() => next_hop,
                 _ => continue,
             };
             if row.InterfaceIndex == 0 || unsafe { row.InterfaceLuid.Value } == 0 {

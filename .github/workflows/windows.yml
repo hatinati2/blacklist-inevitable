@@ -120,6 +120,38 @@ jobs:
           & $env:SING_BOX_VALIDATOR check -c $configPath
           if ($LASTEXITCODE -ne 0) { throw "sing-box rejected the pinned Iran SRS rule-set assets." }
 
+          $remoteConfig = @{
+            outbounds = @(
+              @{ type = "direct"; tag = "blacklist-direct" },
+              @{ type = "direct"; tag = "blacklist-profile" }
+            )
+            http_clients = @(
+              @{ tag = "blacklist-rule-set-http"; detour = "blacklist-direct" }
+            )
+            route = @{
+              final = "blacklist-profile"
+              default_http_client = "blacklist-rule-set-http"
+              rule_set = @(
+                @{
+                  type = "remote"; tag = "blacklist-geosite-ir"; format = "binary"
+                  url = "https://raw.githubusercontent.com/Chocolate4U/Iran-sing-box-rules/$revision/geosite-ir.srs"
+                  initial_path = (Join-Path $directory "geosite-ir.srs")
+                  http_client = "blacklist-rule-set-http"; update_interval = "24h"
+                },
+                @{
+                  type = "remote"; tag = "blacklist-geoip-ir"; format = "binary"
+                  url = "https://raw.githubusercontent.com/Chocolate4U/Iran-sing-box-rules/$revision/geoip-ir.srs"
+                  initial_path = (Join-Path $directory "geoip-ir.srs")
+                  http_client = "blacklist-rule-set-http"; update_interval = "24h"
+                }
+              )
+            }
+          } | ConvertTo-Json -Depth 10
+          $remoteConfigPath = Join-Path $directory "validate-remote-initial-path.json"
+          [IO.File]::WriteAllText($remoteConfigPath, $remoteConfig, [Text.UTF8Encoding]::new($false))
+          & $env:SING_BOX_VALIDATOR check -c $remoteConfigPath
+          if ($LASTEXITCODE -ne 0) { throw "sing-box rejected the remote rule-set initial_path configuration." }
+
       - name: Format Rust sources
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --all
 

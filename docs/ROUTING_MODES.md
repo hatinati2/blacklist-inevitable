@@ -19,7 +19,9 @@ The Iranian rule-sets are maintained by the community project [Chocolate4U/Iran-
 
 The Agent now contains a bounded, redirect-disabled download/cache primitive. It accepts only the two hard-coded HTTPS URLs for that immutable commit, checks exact length, SRS header and SHA-256, and writes verified bytes through a same-directory temporary file followed by an atomic rename. Its cache directory is created only beneath the installer-provisioned `ProgramData\\BlacklistInevitable\\Agent` root, whose ACL is restricted to SYSTEM, Administrators and the Agent service SID. It refuses symlink/reparse-point directories and never changes ACLs itself.
 
-This cache primitive is not called by Agent startup, status IPC, or the desktop UI. It is not yet wired to the connection transaction or to sing-box `initial_path`; it therefore does not activate Rule mode or initiate downloads on an installed machine. The future Agent connection path must require both verified assets before building a Rule-mode config and must fail closed if either is unavailable.
+A crate-internal, pure configuration builder can now accept the verified cache result and place its two file paths in sing-box remote rule-set `initial_path` fields. It validates the pinned source revision and Windows absolute path shape. Existing callers that do not pass a verified cache result keep the previous remote-rule-set config without `initial_path`.
+
+Neither the cache download primitive nor this initial-path builder is called by Agent startup, status IPC, the desktop UI, or the connection transaction. They therefore do not activate Rule mode or initiate downloads on an installed machine. The future Agent connection path must explicitly call the bounded cache fetch, pass its returned token to the config builder, require both files, and fail closed if either is unavailable.
 
 DNS queries continue to use the encrypted HTTPS resolver configured for the selected profile; DNS reverse mapping is enabled so destination-domain information can be retained for subsequent route matching. Rule matching uses sing-box's route sniff action and process-independent destination matchers.
 

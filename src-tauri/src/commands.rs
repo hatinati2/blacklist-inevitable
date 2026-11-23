@@ -104,8 +104,10 @@ fn agent_service_status_from_result(
         Ok(response) => {
             let recovery_blocked = response.recovery.as_ref().is_some_and(|recovery| recovery.is_blocked());
             let response_failed = response.status != "ok";
-            let state = if response_failed || recovery_blocked {
+            let state = if recovery_blocked || response.status == "rejected" {
                 "recoveryRequired"
+            } else if response_failed {
+                "unavailable"
             } else {
                 "running"
             };

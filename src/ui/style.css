@@ -129,3 +129,30 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 @media (max-width: 560px) {
   .settings-actions { align-items: flex-end; flex-direction: column; }
 }
+
+
+.recovery-details { margin-top: 16px; padding-top: 15px; border-top: 1px solid rgba(142, 164, 194, 0.12); }
+.recovery-overview { display: grid; grid-template-columns: minmax(150px, 0.8fr) minmax(0, 1.2fr); gap: 14px; padding: 14px; border: 1px solid rgba(142, 164, 194, 0.13); border-radius: 12px; background: rgba(12, 17, 26, 0.36); }
+.recovery-label { display: block; margin-bottom: 7px; color: #8292a8; font-size: 9px; font-weight: 750; letter-spacing: 0.13em; text-transform: uppercase; }
+.recovery-state { display: block; color: #e9b6b6; font-size: 12px; line-height: 1.5; }
+.recovery-state-clear { color: #9ce2c9; }
+.recovery-state-blocked { color: #e6b1b1; }
+.recovery-inventory { display: flex; align-content: flex-start; flex-wrap: wrap; gap: 6px; }
+.recovery-inventory span { padding: 5px 8px; border: 1px solid rgba(142, 164, 194, 0.13); border-radius: 999px; color: #9eacc0; background: rgba(111, 135, 169, 0.06); font-size: 9px; }
+.recovery-retained-warning { margin: 10px 0 0; padding: 10px 12px; border: 1px solid rgba(221, 180, 112, 0.2); border-radius: 10px; color: #d3c09c; background: rgba(176, 130, 64, 0.07); font-size: 10px; line-height: 1.6; }
+.recovery-session { margin-top: 10px; padding: 13px; border: 1px solid rgba(142, 164, 194, 0.12); border-radius: 12px; background: rgba(12, 17, 26, 0.28); }
+.recovery-session-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 12px; margin-bottom: 11px; }
+.recovery-session-heading strong { color: #dce5f0; font-size: 10px; }
+.recovery-session-heading span { color: #8292a8; font-size: 9px; }
+.recovery-resource-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.recovery-resource { min-width: 0; padding: 8px 9px; border-radius: 8px; background: rgba(111, 135, 169, 0.06); }
+.recovery-resource span { display: block; margin-bottom: 4px; color: #8292a8; font-size: 9px; }
+.recovery-resource strong { display: block; color: #c2cfdd; font-size: 9px; font-weight: 650; line-height: 1.5; overflow-wrap: anywhere; }
+.recovery-note { margin: 9px 0 0; color: #8998ad; font-size: 9px; line-height: 1.5; }
+.recovery-diagnostics { margin-top: 12px; }
+.recovery-diagnostic { margin: 5px 0 0; padding: 8px 10px; border-left: 2px solid rgba(221, 180, 112, 0.45); color: #a9a18e; background: rgba(176, 130, 64, 0.05); font-size: 9px; line-height: 1.55; overflow-wrap: anywhere; }
+
+@media (max-width: 560px) {
+  .recovery-overview { grid-template-columns: 1fr; }
+  .recovery-resource-grid { grid-template-columns: 1fr; }
+}

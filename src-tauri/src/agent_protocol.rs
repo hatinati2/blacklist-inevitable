@@ -738,6 +738,50 @@ mod tests {
     }
 
     #[test]
+    fn structured_recovery_status_fits_the_bounded_agent_response_frame() {
+        let counts = AgentRecoveryDispositionCounts {
+            verified_clean: u32::MAX,
+            needs_cleanup: u32::MAX,
+            needs_restore: u32::MAX,
+            conflict: u32::MAX,
+            unknown: u32::MAX,
+        };
+        let session = AgentRecoverySessionStatus {
+            session_id: u64::MAX,
+            revision: u64::MAX,
+            phase: "RecoveryRequired".to_string(),
+            engine: crate::recovery_assessment::ResourceDisposition::Unknown,
+            tunnel: crate::recovery_assessment::ResourceDisposition::Conflict,
+            routes: counts.clone(),
+            dns: counts,
+            firewall_filters: crate::recovery_assessment::ResourceDisposition::Unknown,
+            verified_clean: false,
+        };
+        let recovery = AgentRecoveryStatus {
+            state: AgentRecoveryState::Blocked,
+            journal_inventory_complete: false,
+            total_sessions: u32::MAX,
+            verified_clean_sessions: u32::MAX,
+            blocked_sessions: u32::MAX,
+            omitted_sessions: u32::MAX,
+            journal_retained: true,
+            sessions: vec![session.clone(), session],
+            diagnostics: vec!["x".repeat(120), "y".repeat(120)],
+        };
+        let mut response = AgentResponse::rejected(
+            "recovery-01".to_string(),
+            recovery.detail_summary(),
+        );
+        response.recovery = Some(recovery);
+        let encoded = serde_json::to_vec(&response).unwrap();
+        assert!(encoded.len() <= 2048, "response frame was {} bytes", encoded.len());
+
+        let value: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(value["recovery"]["state"], "blocked");
+        assert_eq!(value["recovery"]["sessions"][0]["routes"]["unknown"], u32::MAX);
+    }
+
+    #[test]
     fn agent_response_does_not_include_credentials() {
         let credentials =
             BTreeMap::from([("password".to_string(), "sensitive-passphrase".to_string())]);

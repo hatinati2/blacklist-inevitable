@@ -7,6 +7,18 @@ type EngineTarget = {
   integrationStage: string;
 };
 
+type DesktopAgentStatus = {
+  available: boolean;
+  connection: {
+    phase: string;
+    sessionId: number | null;
+    profileId: string | null;
+    detail: string | null;
+    cleanupHealthy: boolean;
+  } | null;
+  detail: string;
+};
+
 type AppStatus = {
   appName: string;
   version: string;
@@ -64,6 +76,7 @@ type EndpointResult = {
 
 export default function App() {
   const [status, setStatus] = useState<AppStatus | null>(null);
+  const [agentStatus, setAgentStatus] = useState<DesktopAgentStatus | null>(null);
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [shareText, setShareText] = useState("");
   const [endpointResults, setEndpointResults] = useState<EndpointResult[] | null>(null);
@@ -100,6 +113,19 @@ export default function App() {
       setStatus(nextStatus);
     } catch {
       // Preserve the last known runtime status if the lightweight refresh fails.
+    }
+  }, []);
+
+  const refreshAgentStatus = useCallback(async () => {
+    try {
+      const nextStatus = await invoke<DesktopAgentStatus>("get_agent_status");
+      setAgentStatus(nextStatus);
+    } catch {
+      setAgentStatus({
+        available: false,
+        connection: null,
+        detail: "The privileged Agent status could not be read from this desktop session.",
+      });
     }
   }, []);
 
@@ -141,9 +167,10 @@ export default function App() {
 
   useEffect(() => {
     void refreshStatus();
+    void refreshAgentStatus();
     void refreshProfiles();
     void refreshRealDelaySettings();
-  }, [refreshStatus, refreshProfiles, refreshRealDelaySettings]);
+  }, [refreshStatus, refreshAgentStatus, refreshProfiles, refreshRealDelaySettings]);
 
   const engines = status?.engines ?? [
     { kind: "sing-box", binaryName: "sing-box", integrationStage: "implemented · preflight only" },
@@ -301,6 +328,31 @@ export default function App() {
         </div>
       </section>
 
+      <section className="panel agent-panel" aria-live="polite">
+        <div className="panel-heading">
+          <div>
+            <p className="eyebrow">PRIVILEGED WINDOWS AGENT</p>
+            <h2>{agentStatus?.available ? "Agent service reachable" : "Agent service unavailable"}</h2>
+          </div>
+          <span className={agentStatus?.available ? "agent-state-tag online" : "agent-state-tag offline"}>
+            {agentStatus ? (agentStatus.available ? "Authenticated pipe" : "Not connected") : "Checking…"}
+          </span>
+        </div>
+        <p className="panel-copy">
+          {agentStatus?.detail ?? "Checking the local Windows service…"}
+        </p>
+        {agentStatus?.connection ? (
+          <div className="agent-connection-line">
+            <strong>{agentStatus.connection.phase}</strong>
+            <span>{agentStatus.connection.cleanupHealthy ? "Cleanup state verified" : "Cleanup state requires recovery"}</span>
+          </div>
+        ) : (
+          <p className="hint-text">
+            This channel currently reads service status only. Connect, Disconnect, recovery, and network changes remain disabled.
+          </p>
+        )}
+      </section>
+
       {status && !status.runtimeCleanupHealthy && (
         <section className="runtime-warning" role="alert">
           <strong>Engine operations are locked for safety</strong>
@@ -449,7 +501,7 @@ export default function App() {
           <p className="eyebrow">SAVED PROFILES</p>
           <h2>Your server list</h2>
         </div>
-        <button className="quiet-button" onClick={() => { void refreshStatus(); void refreshProfiles(); }} disabled={busy || previewMode}>
+        <button className="quiet-button" onClick={() => { void refreshStatus(); void refreshAgentStatus(); void refreshProfiles(); }} disabled={busy || previewMode}>
           Refresh
         </button>
       </section>

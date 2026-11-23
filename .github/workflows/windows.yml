@@ -66,6 +66,60 @@ jobs:
           if ($version -notmatch "1\.14\.4") { throw "The config validator reports an unexpected sing-box version: $version" }
           "SING_BOX_VALIDATOR=$($binary.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
+      - name: Verify pinned Iran rule-set assets with SHA-256 and sing-box
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $revision = "1597f121656f3e63f2624a471401002941d888c4"
+          $directory = Join-Path $env:RUNNER_TEMP "blacklist-inevitable-pinned-rule-sets"
+          New-Item -ItemType Directory -Path $directory -Force | Out-Null
+          $assets = @(
+            @{
+              Name = "geoip-ir"
+              Url = "https://raw.githubusercontent.com/Chocolate4U/Iran-sing-box-rules/$revision/geoip-ir.srs"
+              Length = 14288
+              Sha256 = "2c32f50294216355ba41a2defb6c8d9896903ef07837668f5002f53f2cd8912c"
+            },
+            @{
+              Name = "geosite-ir"
+              Url = "https://raw.githubusercontent.com/Chocolate4U/Iran-sing-box-rules/$revision/geosite-ir.srs"
+              Length = 310185
+              Sha256 = "59ad4f15d78b27017315da1de79ebb3250ad1ba7a870b2424319285f7864cbe0"
+            }
+          )
+          foreach ($asset in $assets) {
+            $path = Join-Path $directory ($asset.Name + ".srs")
+            Invoke-WebRequest -Uri $asset.Url -OutFile $path -MaximumRedirection 0
+            $actualLength = (Get-Item -LiteralPath $path).Length
+            $actualHash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actualLength -ne $asset.Length) { throw "$($asset.Name) has an unexpected byte length." }
+            if ($actualHash -ne $asset.Sha256) { throw "$($asset.Name) failed its pinned SHA-256 check." }
+            $stream = [IO.File]::OpenRead($path)
+            try {
+              $header = New-Object byte[] 4
+              if ($stream.Read($header, 0, 4) -ne 4 -or $header[0] -ne 0x53 -or $header[1] -ne 0x52 -or $header[2] -ne 0x53 -or $header[3] -ne 0x01) {
+                throw "$($asset.Name) does not have the SRS binary header."
+              }
+            } finally {
+              $stream.Dispose()
+            }
+          }
+
+          $config = @{
+            outbounds = @(@{ type = "direct"; tag = "direct" })
+            route = @{
+              final = "direct"
+              rule_set = @(
+                @{ type = "local"; tag = "geoip-ir"; format = "binary"; path = (Join-Path $directory "geoip-ir.srs") },
+                @{ type = "local"; tag = "geosite-ir"; format = "binary"; path = (Join-Path $directory "geosite-ir.srs") }
+              )
+            }
+          } | ConvertTo-Json -Depth 8
+          $configPath = Join-Path $directory "validate-rulesets.json"
+          [IO.File]::WriteAllText($configPath, $config, [Text.UTF8Encoding]::new($false))
+          & $env:SING_BOX_VALIDATOR check -c $configPath
+          if ($LASTEXITCODE -ne 0) { throw "sing-box rejected the pinned Iran SRS rule-set assets." }
+
       - name: Format Rust sources
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --all
 

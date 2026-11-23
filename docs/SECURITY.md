@@ -73,3 +73,11 @@ Before normal connection functionality is implemented:
 - Real Delay workers are detached from the invoking Tauri command so closing the invoking window or cancelling that command does not abort the worker before cleanup. The process-wide supervisor waits for graceful cleanup, while the Windows Job Object provides kill-on-close containment for assigned children.
 - Complete license, notice, redistribution, signing, and release review remains a release gate.
 - Never download or execute an engine binary merely because a profile references it.
+
+### Routing rule-set seed cache
+
+- The initial Iranian `geoip-ir.srs` / `geosite-ir.srs` data is pinned to one immutable upstream Git commit, with exact SHA-256 digests and byte lengths in source. Runtime code never resolves the mutable `rule-set` branch.
+- The Agent cache fetch primitive disables HTTP redirects, uses bounded connect/overall timeouts, caps streamed bytes, verifies the SRS header, exact size and SHA-256, and commits each verified file by same-directory atomic rename.
+- Cache files are versioned by source revision and digest and live only below the installer-provisioned protected Agent directory. The Agent never changes this directory ACL; newly created children inherit the existing SYSTEM / Administrators / Agent-service-SID access policy.
+- The upstream Git commit is unsigned. Integrity for this application pin is provided by the reviewed immutable commit URL and SHA-256 values compiled into the application, not by a claim that the source commit is cryptographically signed. Updating the rules requires a reviewed pin change.
+- This cache primitive is not invoked by startup, status IPC or the desktop UI and is not yet connected to `initial_path` or Connect. No live rule-set fetch or routing activation occurs in the current release path.

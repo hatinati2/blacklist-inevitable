@@ -88,11 +88,14 @@ fn disposition_counts(
 
 #[cfg(windows)]
 fn assess_startup_journals(journals: &[RecoveryJournal]) -> AgentRecoveryStatus {
-    use crate::recovery_assessment::{assess_recovery, RecoverySnapshot};
+    use crate::recovery_assessment::{
+        assess_firewall_filter_inventory, assess_recovery, RecoverySnapshot,
+    };
     use crate::recovery_observer::{
         observe_agent_wfp_filters, observe_recorded_dns, observe_recorded_engine_process,
         observe_recorded_routes, observe_recorded_tunnel_interface,
     };
+    use std::collections::BTreeSet;
 
     if journals.is_empty() {
         return AgentRecoveryStatus {
@@ -118,6 +121,37 @@ fn assess_startup_journals(journals: &[RecoveryJournal]) -> AgentRecoveryStatus 
     let mut diagnostics = Vec::new();
     if let Some(error) = wfp_open_error {
         add_bounded_diagnostic(&mut diagnostics, format!("WFP inventory unavailable: {error}"));
+    }
+
+    // WFP's provider inventory is global to all unresolved sessions. Take
+    // exactly one complete read-only snapshot and validate it against the
+    // union of every session's stable filter keys. Assessing the full provider
+    // inventory independently against each journal would make filters owned
+    // by another unresolved session look unjournaled.
+    let wfp_inventory = match wfp_engine.as_mut() {
+        Some(engine) => match observe_agent_wfp_filters(engine) {
+            Ok(observed) => observed,
+            Err(error) => {
+                add_bounded_diagnostic(&mut diagnostics, format!("WFP observer: {error}"));
+                Observation::Unknown
+            }
+        },
+        None => Observation::Unknown,
+    };
+    let expected_wfp = journals
+        .iter()
+        .flat_map(|journal| journal.firewall_filters.iter().cloned())
+        .collect::<Vec<_>>();
+    let wfp_inventory_disposition =
+        assess_firewall_filter_inventory(&expected_wfp, &wfp_inventory);
+    if matches!(
+        wfp_inventory_disposition,
+        ResourceDisposition::Conflict | ResourceDisposition::Unknown
+    ) {
+        add_bounded_diagnostic(
+            &mut diagnostics,
+            format!("The complete product WFP inventory is {wfp_inventory_disposition:?}; every affected session remains blocked."),
+        );
     }
 
     let mut verified_clean_sessions = 0u32;
@@ -175,15 +209,32 @@ fn assess_startup_journals(journals: &[RecoveryJournal]) -> AgentRecoveryStatus 
             dns.insert(record.interface_index, observed);
         }
 
-        let firewall_filters = match wfp_engine.as_mut() {
-            Some(engine) => match observe_agent_wfp_filters(engine) {
-                Ok(observed) => observed,
-                Err(error) => {
-                    add_bounded_diagnostic(&mut diagnostics, format!("WFP observer: {error}"));
-                    Observation::Unknown
+        let firewall_filters = match wfp_inventory_disposition {
+            ResourceDisposition::Conflict | ResourceDisposition::Unknown => Observation::Unknown,
+            ResourceDisposition::VerifiedClean | ResourceDisposition::NeedsCleanup => {
+                match &wfp_inventory {
+                    Observation::Present(all_filters) => {
+                        let session_filter_keys = journal
+                            .firewall_filters
+                            .iter()
+                            .filter_map(|record| record.filter_key.as_deref())
+                            .map(str::to_ascii_lowercase)
+                            .collect::<BTreeSet<_>>();
+                        let session_filters = all_filters
+                            .iter()
+                            .filter(|record| {
+                                record.filter_key.as_deref().is_some_and(|key| {
+                                    session_filter_keys.contains(&key.to_ascii_lowercase())
+                                })
+                            })
+                            .cloned()
+                            .collect();
+                        Observation::Present(session_filters)
+                    }
+                    Observation::Absent | Observation::Unknown => Observation::Unknown,
                 }
-            },
-            None => Observation::Unknown,
+            }
+            ResourceDisposition::NeedsRestore => Observation::Unknown,
         };
 
         let snapshot = RecoverySnapshot {

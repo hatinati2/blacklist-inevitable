@@ -459,7 +459,7 @@ mod tests {
         })
         .to_string();
         let decoded = decode_agent_response(payload.as_bytes(), "status-1").unwrap();
-        assert!(decoded.len() <= 1200);
-        assert!(!decoded.chars().any(|character| character == '\r'));
+        assert!(decoded.detail.len() <= 1200);
+        assert!(!decoded.detail.chars().any(|character| character == '\r'));
     }
 }

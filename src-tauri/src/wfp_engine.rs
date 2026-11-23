@@ -53,7 +53,7 @@ pub struct FilterDeletionReport {
     pub requested_filter_count: usize,
     /// Number of filters deleted and confirmed absent after commit.
     pub deleted_filter_count: usize,
-    /// Number of requested stable keys already absent from the verified provider inventory.
+    /// Number of requested stable keys already absent after namespace and exact-key verification.
     pub already_absent_filter_count: usize,
 }
 
@@ -199,10 +199,10 @@ impl WfpEngine {
 
     /// Delete only persistent filters named by stable journal GUIDs.
     ///
-    /// The provider-scoped inventory is verified first. Each requested key must
-    /// belong to this binary's provider and sublayer and must still have the
-    /// journaled layer identity. Runtime filter IDs are refreshed from the live
-    /// inventory because BFE IDs are diagnostic, not durable identities.
+    /// The persistent provider and sublayer are verified read-only first. Each
+    /// journal GUID is then looked up directly and must still belong to this
+    /// binary's provider and sublayer on the journaled layer. Runtime filter IDs
+    /// are refreshed because BFE IDs are diagnostic, not durable identities.
     ///
     /// This method never deletes unknown filters, filters from another provider,
     /// or the provider/sublayer namespace itself. It is a cleanup primitive only;
@@ -287,8 +287,8 @@ impl WfpEngine {
         }
 
         if present.is_empty() {
-            // Confirm every requested key is still absent after the complete
-            // provider inventory; an inventory omission alone is not enough.
+            // Confirm every requested key remains absent after the initial
+            // exact-key lookups; a transient lookup error is never treated as absence.
             for expected in &requested {
                 verify_filter_absent(self.handle, &expected.key)?;
             }
@@ -334,8 +334,8 @@ impl WfpEngine {
             return Err(error);
         }
 
-        // Recheck every requested key, including keys absent in the first
-        // inventory, so a concurrent replacement cannot be mistaken for success.
+        // Recheck every requested key, including keys absent at initial lookup,
+        // so a concurrent replacement cannot be mistaken for success.
         for expected in &requested {
             verify_filter_absent(self.handle, &expected.key)?;
         }
@@ -856,7 +856,7 @@ fn delete_filter_in_transaction(
         if valid {
             Ok(())
         } else {
-            Err("The WFP filter changed ownership or identity after inventory; deletion was aborted.".to_string())
+            Err("The WFP filter changed ownership or identity after the initial GUID lookup; deletion was aborted.".to_string())
         }
     };
     let mut allocation = filter_ptr.cast();

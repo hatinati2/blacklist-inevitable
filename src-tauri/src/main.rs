@@ -24,5 +24,13 @@ fn run_agent_status_smoke_test() -> Result<String, String> {
         .enable_all()
         .build()
         .map_err(|_| "The Agent smoke-test runtime could not be started.".to_string())?;
-    runtime.block_on(blacklist_inevitable_lib::agent_client::query_status())
+    runtime
+        .block_on(blacklist_inevitable_lib::agent_client::query_status())
+        .and_then(|response| {
+            if response.status == "ok" {
+                Ok(response.detail)
+            } else {
+                Err(response.detail)
+            }
+        })
 }

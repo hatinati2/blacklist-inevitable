@@ -154,6 +154,47 @@ fn assess_startup_journals(journals: &[RecoveryJournal]) -> AgentRecoveryStatus 
         );
     }
 
+    // Overlapping journal identities are ambiguous: a shared destination
+    // prefix or DNS interface cannot be independently attributed to multiple
+    // sessions. Keep those observations Unknown rather than implying that
+    // either session can safely restore the shared resource.
+    let mut route_key_counts = BTreeMap::<String, u32>::new();
+    let mut dns_index_counts = BTreeMap::<u32, u32>::new();
+    let mut dns_guid_counts = BTreeMap::<String, u32>::new();
+    for journal in journals {
+        for record in &journal.routes {
+            let key = crate::recovery_observer::canonicalize_prefix(&record.destination_prefix)
+                .unwrap_or_else(|_| record.destination_prefix.clone());
+            *route_key_counts.entry(key).or_default() += 1;
+        }
+        for record in &journal.dns {
+            *dns_index_counts.entry(record.interface_index).or_default() += 1;
+            if let Some(guid) = record.interface_guid.as_deref() {
+                *dns_guid_counts.entry(guid.to_ascii_lowercase()).or_default() += 1;
+            }
+        }
+    }
+    let mut ambiguous_route_keys = BTreeSet::new();
+    let mut ambiguous_dns_interfaces = BTreeSet::new();
+    for journal in journals {
+        for record in &journal.routes {
+            let key = crate::recovery_observer::canonicalize_prefix(&record.destination_prefix)
+                .unwrap_or_else(|_| record.destination_prefix.clone());
+            if route_key_counts.get(&key).copied().unwrap_or(0) > 1 {
+                ambiguous_route_keys.insert(key);
+            }
+        }
+        for record in &journal.dns {
+            let duplicate_index = dns_index_counts.get(&record.interface_index).copied().unwrap_or(0) > 1;
+            let duplicate_guid = record.interface_guid.as_deref().is_some_and(|guid| {
+                dns_guid_counts.get(&guid.to_ascii_lowercase()).copied().unwrap_or(0) > 1
+            });
+            if duplicate_index || duplicate_guid {
+                ambiguous_dns_interfaces.insert(record.interface_index);
+            }
+        }
+    }
+
     let mut verified_clean_sessions = 0u32;
     let mut blocked_sessions = 0u32;
     let mut session_summaries = Vec::new();
@@ -193,17 +234,31 @@ fn assess_startup_journals(journals: &[RecoveryJournal]) -> AgentRecoveryStatus 
         // An omitted key is never equivalent to Absent, even if an observer
         // implementation changes later to return a partial map.
         for record in &journal.routes {
-            routes.entry(record.destination_prefix.clone())
-                .or_insert(Observation::Unknown);
+            let key = crate::recovery_observer::canonicalize_prefix(&record.destination_prefix)
+                .unwrap_or_else(|_| record.destination_prefix.clone());
+            if ambiguous_route_keys.contains(&key) {
+                routes.insert(record.destination_prefix.clone(), Observation::Unknown);
+            } else {
+                routes.entry(record.destination_prefix.clone())
+                    .or_insert(Observation::Unknown);
+            }
         }
 
         let mut dns = BTreeMap::new();
         for record in &journal.dns {
-            let observed = match observe_recorded_dns(record) {
-                Ok(observed) => observed,
-                Err(error) => {
-                    add_bounded_diagnostic(&mut diagnostics, format!("DNS observer: {error}"));
-                    Observation::Unknown
+            let observed = if ambiguous_dns_interfaces.contains(&record.interface_index) {
+                add_bounded_diagnostic(
+                    &mut diagnostics,
+                    format!("DNS interface {} is referenced by multiple unresolved sessions; its state is ambiguous.", record.interface_index),
+                );
+                Observation::Unknown
+            } else {
+                match observe_recorded_dns(record) {
+                    Ok(observed) => observed,
+                    Err(error) => {
+                        add_bounded_diagnostic(&mut diagnostics, format!("DNS observer: {error}"));
+                        Observation::Unknown
+                    }
                 }
             };
             dns.insert(record.interface_index, observed);

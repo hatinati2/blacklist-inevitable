@@ -92,25 +92,11 @@ impl AgentRecoveryStatus {
             AgentRecoveryState::VerifiedCleanRetained => "verified-clean-journal-retained",
             AgentRecoveryState::Blocked => "blocked",
         };
-        let mut detail = format!(
-            "Read-only recovery assessment: state={state}; sessions={}; verifiedClean={}; blocked={}; inventoryComplete={}; journalRetained={}.",
+        format!(
+            "Read-only recovery assessment: state={state}; sessions={}; verifiedClean={}; blocked={}; inventoryComplete={}; journalRetained={}. No cleanup, rollback, or journal deletion was performed; VPN operations remain disabled.",
             self.total_sessions, self.verified_clean_sessions, self.blocked_sessions,
             self.journal_inventory_complete, self.journal_retained
-        );
-        for session in &self.sessions {
-            detail.push_str(&format!(
-                " Session {} r{} {:?}: engine={:?}, tunnel={:?}, routes[{}], dns[{}], WFP={:?}.",
-                session.session_id, session.revision, session.phase,
-                session.engine, session.tunnel, session.routes.compact(),
-                session.dns.compact(), session.firewall_filters
-            ));
-        }
-        for diagnostic in &self.diagnostics {
-            detail.push_str(" ");
-            detail.push_str(diagnostic);
-        }
-        detail.push_str(" No cleanup, rollback, or journal deletion was performed; VPN operations remain disabled.");
-        detail.chars().take(1100).collect()
+        )
     }
 }
 

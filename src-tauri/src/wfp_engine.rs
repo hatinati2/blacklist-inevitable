@@ -768,7 +768,10 @@ fn delete_filter_in_transaction(
             "FwpmFilterDeleteByKey0 failed with Windows status 0x{delete:08X}."
         ));
     }
-    verify_filter_absent(engine, &expected.key)
+
+    // The transaction's committed read-back is the authoritative absence
+    // check; do not infer committed state from an in-transaction lookup.
+    Ok(())
 }
 
 #[cfg(windows)]

@@ -7,6 +7,7 @@ pub mod agent_service;
 pub mod agent_pipe;
 pub mod connection_state;
 pub mod destination_routing;
+mod ruleset_cache;
 pub mod recovery_journal;
 pub mod recovery_assessment;
 pub mod recovery_observer;

@@ -310,6 +310,7 @@ fn push_recovery_plan_blocker(
 pub fn build_recovery_intent_plan(
     journal: &RecoveryJournal,
     unresolved_journals: &[RecoveryJournal],
+    snapshot: &RecoverySnapshot,
     assessment: &RecoveryAssessment,
 ) -> Result<RecoveryIntentPlan, String> {
     journal.validate()?;
@@ -320,8 +321,11 @@ pub fn build_recovery_intent_plan(
         .iter()
         .filter(|item| item.session_id == journal.session_id)
         .collect::<Vec<_>>();
-    if same_session.len() != 1 || same_session[0].revision != journal.revision {
-        return Err("The recovery plan requires exactly the selected latest journal in the unresolved-session inventory.".to_string());
+    if same_session.len() != 1 || same_session[0] != journal {
+        return Err("The recovery plan requires the exact selected latest journal from the unresolved-session inventory.".to_string());
+    }
+    if assess_recovery(journal, snapshot) != *assessment {
+        return Err("The supplied recovery assessment does not match the selected journal and live snapshot.".to_string());
     }
 
     let mut intents = Vec::new();
@@ -499,10 +503,46 @@ pub fn build_recovery_intent_plan(
     match assessment.firewall_filters {
         ResourceDisposition::VerifiedClean => {}
         ResourceDisposition::NeedsCleanup => {
-            if journal.firewall_filters.is_empty() {
-                push_recovery_plan_blocker(&mut blockers,RecoveryPlanResource::Wfp, ResourceDisposition::Unknown);
-            } else {
+            let crate::recovery_assessment::Observation::Present(observed_filters) =
+                &snapshot.firewall_filters
+            else {
+                push_recovery_plan_blocker(
+                    &mut blockers,
+                    RecoveryPlanResource::Wfp,
+                    ResourceDisposition::Unknown,
+                );
+                // The complete provider snapshot is required to identify which
+                // stable filter keys are actually present at planning time.
+                Vec::new()
+            };
+
+            if let crate::recovery_assessment::Observation::Present(observed_filters) =
+                &snapshot.firewall_filters
+            {
+                let mut expected_by_key = BTreeMap::<
+                    String,
+                    (String, String),
+                >::new();
+                let mut invalid_expected = false;
                 for record in &journal.firewall_filters {
+                    match (
+                        normalize_guid(&record.provider_key),
+                        record.filter_key.as_deref().and_then(normalize_guid),
+                        normalize_guid(&record.layer_key),
+                    ) {
+                        (Some(provider), Some(filter), Some(layer)) => {
+                            if expected_by_key.insert(filter, (provider, layer)).is_some() {
+                                invalid_expected = true;
+                            }
+                        }
+                        _ => invalid_expected = true,
+                    }
+                }
+
+                let mut observed_keys = BTreeSet::new();
+                let mut found = Vec::new();
+                let mut invalid_observed = false;
+                for record in observed_filters {
                     let identity = match (
                         normalize_guid(&record.provider_key),
                         record.filter_key.as_deref().and_then(normalize_guid),
@@ -516,15 +556,42 @@ pub fn build_recovery_intent_plan(
                             }
                         }
                         _ => {
-                            push_recovery_plan_blocker(&mut blockers,RecoveryPlanResource::Wfp, ResourceDisposition::Unknown);
+                            invalid_observed = true;
                             continue;
                         }
                     };
-                    intents.push(RecoveryIntent::RemoveWfpFilter { identity });
+                    if !observed_keys.insert(identity.filter_key.clone()) {
+                        invalid_observed = true;
+                        continue;
+                    }
+                    let expected = expected_by_key.get(&identity.filter_key);
+                    if expected != Some(&(identity.provider_key.clone(), identity.layer_key.clone())) {
+                        invalid_observed = true;
+                        continue;
+                    }
+                    found.push(identity);
+                }
+
+                if invalid_expected || invalid_observed || found.is_empty() {
+                    push_recovery_plan_blocker(
+                        &mut blockers,
+                        RecoveryPlanResource::Wfp,
+                        if invalid_expected || invalid_observed {
+                            ResourceDisposition::Conflict
+                        } else {
+                            ResourceDisposition::Unknown
+                        },
+                    );
+                } else {
+                    intents.extend(
+                        found
+                            .into_iter()
+                            .map(|identity| RecoveryIntent::RemoveWfpFilter { identity }),
+                    );
                 }
             }
         }
-        disposition => push_recovery_plan_blocker(&mut blockers,RecoveryPlanResource::Wfp, disposition),
+        disposition => push_recovery_plan_blocker(&mut blockers, RecoveryPlanResource::Wfp, disposition),
     }
 
     // Make the plan stable for serialization and review. This is not an
@@ -1051,7 +1118,7 @@ mod tests {
         let assessment = assess_recovery(&journal, &empty_snapshot());
         assert!(assessment.can_remove_journal);
 
-        let plan = build_recovery_intent_plan(&journal, std::slice::from_ref(&journal), &assessment).unwrap();
+        let plan = build_recovery_intent_plan(&journal, std::slice::from_ref(&journal), &snapshot, &assessment).unwrap();
         assert_eq!(plan.session_id, journal.session_id);
         assert_eq!(plan.revision, journal.revision);
         assert_eq!(plan.state, RecoveryPlanState::VerifiedCleanRetained);
@@ -1116,7 +1183,7 @@ mod tests {
         let (journal, mut snapshot) = ready_plan_fixture();
         snapshot.dns.insert(journal.dns[0].interface_index, Observation::Unknown);
         let unknown = assess_recovery(&journal, &snapshot);
-        let blocked = build_recovery_intent_plan(&journal, std::slice::from_ref(&journal), &unknown).unwrap();
+        let blocked = build_recovery_intent_plan(&journal, std::slice::from_ref(&journal), &snapshot, &unknown).unwrap();
         assert_eq!(blocked.state, RecoveryPlanState::Blocked);
         assert!(blocked.intents.is_empty());
         assert!(blocked.blockers.iter().any(|item| {
@@ -1130,7 +1197,7 @@ mod tests {
         snapshot.engine = Observation::Present(different_process);
         let conflict = assess_recovery(&journal, &snapshot);
         assert_eq!(conflict.engine, ResourceDisposition::Conflict);
-        let blocked = build_recovery_intent_plan(&journal, std::slice::from_ref(&journal), &conflict).unwrap();
+        let blocked = build_recovery_intent_plan(&journal, std::slice::from_ref(&journal), &snapshot, &conflict).unwrap();
         assert_eq!(blocked.state, RecoveryPlanState::Blocked);
         assert!(blocked.intents.is_empty());
         assert!(blocked.blockers.iter().any(|item| {
@@ -1154,7 +1221,7 @@ mod tests {
         other.firewall_filters = journal.firewall_filters.clone();
 
         let unresolved = vec![journal.clone(), other];
-        let plan = build_recovery_intent_plan(&journal, &unresolved, &assessment).unwrap();
+        let plan = build_recovery_intent_plan(&journal, &unresolved, &snapshot, &assessment).unwrap();
         assert_eq!(plan.state, RecoveryPlanState::Blocked);
         assert!(plan.intents.is_empty());
         assert!(!plan.journal_removal_authorized);

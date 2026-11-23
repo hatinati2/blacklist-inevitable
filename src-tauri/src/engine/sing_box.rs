@@ -925,8 +925,8 @@ mod tests {
             ..DestinationRoutingPolicy::default()
         };
         let cache_files = RuleSetCacheFiles {
-            geoip_path,
-            geosite_path,
+            geoip_path: geoip_path.clone(),
+            geosite_path: geosite_path.clone(),
             source_revision: SOURCE_REVISION,
         };
         let config = build_tun_session_config_with_verified_rule_set_cache(

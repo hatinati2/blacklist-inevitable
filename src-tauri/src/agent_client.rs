@@ -210,6 +210,7 @@ const PIPE_NAME: &str = r"\\.\pipe\BlacklistInevitable.Agent.v1";
 pub struct AgentStatusResponse {
     pub status: String,
     pub detail: String,
+    pub connection: Option<crate::connection_state::ConnectionSnapshot>,
     pub recovery: Option<AgentRecoveryStatus>,
 }
 
@@ -220,6 +221,8 @@ struct AgentResponseEnvelope {
     request_id: String,
     status: String,
     detail: Option<String>,
+    #[serde(default)]
+    connection: Option<crate::connection_state::ConnectionSnapshot>,
     recovery: Option<AgentRecoveryStatus>,
 }
 
@@ -252,9 +255,33 @@ fn decode_agent_response(
         .take(1200)
         .collect();
 
+    if response.connection.as_ref().is_some_and(|snapshot| {
+        snapshot
+            .profile_id
+            .as_ref()
+            .is_some_and(|value| value.len() > 128 || value.chars().any(char::is_control))
+            || snapshot.detail.as_ref().is_some_and(|value| {
+                value.len() > 512
+                    || value.chars().any(|character| {
+                        character.is_control() && !matches!(character, '\n' | '\t')
+                    })
+            })
+            || (snapshot.phase == crate::connection_state::ConnectionPhase::Disconnected
+                && (snapshot.session_id.is_some()
+                    || snapshot.profile_id.is_some()
+                    || !snapshot.cleanup_healthy))
+            || (snapshot.phase == crate::connection_state::ConnectionPhase::Connected
+                && (snapshot.session_id.is_none()
+                    || snapshot.profile_id.is_none()
+                    || !snapshot.cleanup_healthy))
+    }) {
+        return Err("The Agent returned an invalid or oversized connection status.".to_string());
+    }
+
     Ok(AgentStatusResponse {
         status: response.status,
         detail,
+        connection: response.connection,
         recovery: response.recovery,
     })
 }
@@ -389,6 +416,7 @@ mod tests {
         let response = decode_agent_response(payload, "status-1").unwrap();
         assert_eq!(response.status, "ok");
         assert_eq!(response.detail, "Agent ready");
+        assert!(response.connection.is_none());
         assert!(response.recovery.is_none());
     }
 
@@ -411,6 +439,13 @@ mod tests {
             "requestId":"status-1",
             "status":"rejected",
             "detail":"Agent startup recovery is blocked: 1 unresolved recovery journal requires review.",
+            "connection":{
+                "phase":"failed",
+                "sessionId":1,
+                "profileId":null,
+                "detail":"Startup recovery remains blocked.",
+                "cleanupHealthy":false
+            },
             "recovery":{
                 "state":"blocked",
                 "journalInventoryComplete":true,
@@ -436,11 +471,34 @@ mod tests {
         let response = decode_agent_response(payload, "status-1").unwrap();
         assert_eq!(response.status, "rejected");
         assert!(response.detail.contains("startup recovery"));
+        let connection = response.connection.expect("the connection snapshot must be preserved");
+        assert_eq!(connection.phase, crate::connection_state::ConnectionPhase::Failed);
+        assert!(!connection.cleanup_healthy);
         let recovery = response.recovery.expect("the structured recovery payload must be preserved");
         assert!(matches!(recovery.state, crate::agent_protocol::AgentRecoveryState::Blocked));
         assert_eq!(recovery.total_sessions, 1);
         assert_eq!(recovery.sessions[0].dns.unknown, 1);
         assert!(recovery.journal_retained);
+    }
+
+    #[test]
+    fn rejects_oversized_or_inconsistent_connection_status() {
+        let oversized = serde_json::json!({
+            "version": 1,
+            "requestId": "status-1",
+            "status": "ok",
+            "connection": {
+                "phase": "disconnected",
+                "sessionId": null,
+                "profileId": "x".repeat(129),
+                "detail": null,
+                "cleanupHealthy": true
+            }
+        }).to_string();
+        assert!(decode_agent_response(oversized.as_bytes(), "status-1").is_err());
+
+        let inconsistent = br#"{"version":1,"requestId":"status-1","status":"ok","connection":{"phase":"disconnected","sessionId":9,"profileId":null,"detail":null,"cleanupHealthy":true}}"#;
+        assert!(decode_agent_response(inconsistent, "status-1").is_err());
     }
 
     #[test]

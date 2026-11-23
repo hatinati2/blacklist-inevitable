@@ -10,6 +10,7 @@ use tokio::time::timeout;
 
 use crate::agent_protocol::AgentRecoveryStatus;
 use crate::agent_client::AgentStatusResponse;
+use crate::connection_state::ConnectionSnapshot;
 use crate::engine::{EngineDescriptor, ENGINE_TARGETS};
 use crate::profile_store;
 use crate::process_supervisor::ProcessSupervisor;
@@ -88,6 +89,7 @@ pub struct AgentServiceStatus {
     available: bool,
     state: String,
     detail: String,
+    connection: Option<ConnectionSnapshot>,
     recovery: Option<AgentRecoveryStatus>,
 }
 
@@ -115,6 +117,7 @@ fn agent_service_status_from_result(
                 available: !response_failed && !recovery_blocked,
                 state: state.to_string(),
                 detail: response.detail,
+                connection: response.connection,
                 recovery: response.recovery,
             }
         }
@@ -132,6 +135,7 @@ fn agent_service_status_from_result(
                 available: false,
                 state: state.to_string(),
                 detail,
+                connection: None,
                 recovery: None,
             }
         }
@@ -494,12 +498,22 @@ mod agent_status_tests {
             Ok(AgentStatusResponse {
                 status: "rejected".into(),
                 detail: "Agent startup recovery is blocked: 1 unresolved recovery journal requires review.".into(),
+                connection: Some(ConnectionSnapshot {
+                    phase: crate::connection_state::ConnectionPhase::Failed,
+                    session_id: Some(1),
+                    profile_id: None,
+                    detail: Some("Startup recovery remains blocked.".into()),
+                    cleanup_healthy: false,
+                }),
                 recovery: Some(blocked_recovery_status(AgentRecoveryState::Blocked)),
             }),
             true,
         );
         assert!(!status.available);
         assert_eq!(status.state, "recoveryRequired");
+        let connection = status.connection.expect("connection snapshot must reach the UI");
+        assert_eq!(connection.phase, crate::connection_state::ConnectionPhase::Failed);
+        assert!(!connection.cleanup_healthy);
         let recovery = status.recovery.expect("recovery payload must reach the UI");
         assert_eq!(recovery.total_sessions, 1);
         assert_eq!(recovery.sessions[0].dns.unknown, 1);
@@ -513,6 +527,7 @@ mod agent_status_tests {
             Ok(AgentStatusResponse {
                 status: "rejected".into(),
                 detail: "Agent startup recovery is blocked pending journal disposition.".into(),
+                connection: None,
                 recovery: Some(blocked_recovery_status(
                     AgentRecoveryState::VerifiedCleanRetained,
                 )),
@@ -541,6 +556,13 @@ mod agent_status_tests {
             Ok(AgentStatusResponse {
                 status: "ok".into(),
                 detail: "Agent startup recovery is clean.".into(),
+                connection: Some(ConnectionSnapshot {
+                    phase: crate::connection_state::ConnectionPhase::Disconnected,
+                    session_id: None,
+                    profile_id: None,
+                    detail: None,
+                    cleanup_healthy: true,
+                }),
                 recovery: Some(recovery),
             }),
             true,

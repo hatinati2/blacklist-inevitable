@@ -1,3 +1,5 @@
+!include LogicLib.nsh
+
 !macro NSIS_HOOK_PREINSTALL
   ; Stop the existing Agent before NSIS replaces its executable during upgrade.
   ${If} ${FileExists} "$INSTDIR\resources\windows-agent-service.ps1"
@@ -13,7 +15,7 @@
   ; The helper refuses to register an unsigned service or an unpinned publisher.
   ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\resources\windows-agent-service.ps1" -Action Install -AgentPath "$INSTDIR\resources\blacklist-inevitable-agent.exe" -InstallerPath "$EXEPATH" -SignerThumbprintFile "$INSTDIR\resources\agent-publisher-thumbprint.txt"' $0
   ${If} $0 == 10
-    MessageBox MB_ICONINFORMATION "The desktop application was installed. This build has no configured trusted publisher signature, so the privileged Agent was intentionally left unregistered. VPN connection operations remain unavailable."
+    MessageBox MB_ICONINFORMATION "The desktop application was installed. This build did not register or start the privileged Agent because a trusted publisher signature is not configured. VPN connection operations remain unavailable."
   ${ElseIf} $0 != 0
     MessageBox MB_ICONEXCLAMATION "The desktop application was installed, but the privileged Agent could not be installed securely. The application will remain disconnected. Windows error code: $0"
   ${EndIf}

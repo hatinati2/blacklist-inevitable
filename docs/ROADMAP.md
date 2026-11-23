@@ -79,6 +79,8 @@ Naive import/config mapping is implemented for a bounded subset; remote authenti
 - [ ] Add a Rule/Global mode selector, rule-list management, protected rule-set cache/download, and user-editable domain/IP exceptions to the Windows UI and Agent.
 - [x] Define Windows split-tunnel policy modes (Full Tunnel, Direct Only, Include Selected, Exclude Selected, and per-app Custom VPN/Direct/Block) and map them to sing-box process-path route rules.
 - [ ] Add the split-tunnel policy editor and persistent settings in the Windows UI; enforce process-path matching and DNS behavior in the privileged agent.
+
+The desktop now provides a versioned, locally persisted editor for Global/Rule destination preferences, custom domain/IP actions, split-tunnel modes, and application path selections. This is saved configuration only: it is not handed to the Agent, does not download/cache rule sets, and does not apply process routing or change Windows networking. The M4 Agent enforcement, protected cache, DNS behavior, and live-routing checks remain open.
 - [x] Test signed install/start/status-query/uninstall and unsigned no-service behavior in Windows CI.
 - [ ] Test upgrade, UAC denial, service crash/recovery, server identity verification, and UI-agent authorization on clean Windows 10/11 machines.
 - [ ] Test repeated connect / disconnect, crashes, sleep / resume, and shutdown.

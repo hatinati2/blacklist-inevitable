@@ -145,6 +145,59 @@ function Set-AgentJournalDirectoryAcl {
     Set-TrustedDirectoryAcl -Path $journalDirectory
 }
 
+function Grant-AgentExecutableReadAccess {
+    if ([string]::IsNullOrWhiteSpace($AgentPath)) {
+        throw "AgentPath is required before setting service executable permissions."
+    }
+
+    $agentFullPath = [System.IO.Path]::GetFullPath($AgentPath)
+    $programFilesRoot = [System.IO.Path]::GetFullPath($env:ProgramFiles).TrimEnd('\')
+    $resourcesDirectory = Split-Path -Parent $agentFullPath
+    $applicationDirectory = Split-Path -Parent $resourcesDirectory
+    $serviceAccount = [System.Security.Principal.NTAccount]::new("NT SERVICE\$ServiceName")
+    $serviceSid = $serviceAccount.Translate([System.Security.Principal.SecurityIdentifier])
+    $allow = [System.Security.AccessControl.AccessControlType]::Allow
+    $rights = [System.Security.AccessControl.FileSystemRights]::ReadAndExecute
+    $propagation = [System.Security.AccessControl.PropagationFlags]::None
+
+    $programFilesAcl = Get-Acl -LiteralPath $programFilesRoot
+    $programFilesAcl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
+        $serviceSid,
+        $rights,
+        [System.Security.AccessControl.InheritanceFlags]::None,
+        $propagation,
+        $allow
+    ))
+    Set-Acl -LiteralPath $programFilesRoot -AclObject $programFilesAcl
+
+    foreach ($directoryPath in @($applicationDirectory, $resourcesDirectory)) {
+        $directory = Get-Item -LiteralPath $directoryPath -Force
+        if (($directory.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "The Agent executable directory must not be a reparse point: $directoryPath"
+        }
+        $acl = Get-Acl -LiteralPath $directoryPath
+        $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
+            $serviceSid,
+            $rights,
+            [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+                [System.Security.AccessControl.InheritanceFlags]::ObjectInherit,
+            $propagation,
+            $allow
+        ))
+        Set-Acl -LiteralPath $directoryPath -AclObject $acl
+    }
+
+    $fileAcl = Get-Acl -LiteralPath $agentFullPath
+    $fileAcl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
+        $serviceSid,
+        $rights,
+        [System.Security.AccessControl.InheritanceFlags]::None,
+        $propagation,
+        $allow
+    ))
+    Set-Acl -LiteralPath $agentFullPath -AclObject $fileAcl
+}
+
 function Install-AgentService {
     if ([string]::IsNullOrWhiteSpace($AgentPath) -or
         [string]::IsNullOrWhiteSpace($InstallerPath) -or
@@ -196,6 +249,7 @@ function Install-AgentService {
         Invoke-Sc @("sdset", $ServiceName, $ServiceSecurityDescriptor)
 
         Set-AgentJournalDirectoryAcl
+        Grant-AgentExecutableReadAccess
         Invoke-Sc @("config", $ServiceName, "start= auto")
         Start-Service -Name $ServiceName -ErrorAction Stop
 

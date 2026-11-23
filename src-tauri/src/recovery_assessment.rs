@@ -170,6 +170,17 @@ impl RecoveryIntentPlan {
     }
 }
 
+fn push_recovery_plan_blocker(
+    blockers: &mut Vec<RecoveryPlanBlocker>,
+    resource: RecoveryPlanResource,
+    disposition: ResourceDisposition,
+) {
+    blockers.push(RecoveryPlanBlocker {
+        resource,
+        disposition,
+    });
+}
+
 /// Convert an assessment into deterministic, review-only intents.
 ///
 /// This function performs no Windows API calls, process control, filesystem
@@ -185,20 +196,13 @@ pub fn build_recovery_intent_plan(
     let mut intents = Vec::new();
     let mut blockers = Vec::new();
 
-    let mut add_blocker = |resource: RecoveryPlanResource, disposition: ResourceDisposition| {
-        blockers.push(RecoveryPlanBlocker {
-            resource,
-            disposition,
-        });
-    };
-
     match assessment.engine {
         ResourceDisposition::VerifiedClean => {}
         ResourceDisposition::NeedsCleanup => match journal.engine.clone() {
             Some(process) if process.process_id != 0 && process.creation_time_100ns != 0 => {
                 intents.push(RecoveryIntent::StopEngine { process });
             }
-            _ => add_blocker(RecoveryPlanResource::Engine, ResourceDisposition::Unknown),
+            _ => push_recovery_plan_blocker(&mut blockers,RecoveryPlanResource::Engine, ResourceDisposition::Unknown),
         },
         disposition => add_blocker(RecoveryPlanResource::Engine, disposition),
     }
@@ -942,8 +946,8 @@ mod tests {
         assert!(plan.blockers.is_empty());
         assert!(!plan.journal_removal_authorized);
         assert!(matches!(
-            plan.intents[0],
-            RecoveryIntent::StopEngine { ref process } if process == journal.engine.as_ref().unwrap()
+            &plan.intents[0],
+            RecoveryIntent::StopEngine { process } if Some(process) == journal.engine.as_ref()
         ));
         assert!(plan.intents.iter().any(|intent| matches!(
             intent,

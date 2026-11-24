@@ -313,6 +313,137 @@ mod windows_service {
         STATUS_HANDLE.store(0, Ordering::Release);
     }
 
+    fn run_wfp_acl_probe_once() -> (bool, String) {
+        let mut engine = match crate::wfp_engine::WfpEngine::open_local() {
+            Ok(engine) => engine,
+            Err(error) => return (false, format!("FwpmEngineOpen0: {error}")),
+        };
+
+        // TEST-NET endpoints and a synthetic interface identity are used only
+        // to exercise BFE object access. The enclosing WFP transaction is
+        // aborted; no traffic filter is committed.
+        let spec = crate::wfp_policy::EgressPolicySpec {
+            physical_interfaces: vec![crate::wfp_policy::PhysicalInterface {
+                interface_luid: 1,
+                interface_index: 1,
+            }],
+            vpn_endpoints: vec![
+                crate::wfp_policy::VpnEndpoint {
+                    address: "198.51.100.7".parse().expect("valid TEST-NET-2 IPv4 address"),
+                    port: 443,
+                    protocol: crate::wfp_policy::TransportProtocol::Tcp,
+                },
+                crate::wfp_policy::VpnEndpoint {
+                    address: "2001:db8::7".parse().expect("valid documentation IPv6 address"),
+                    port: 443,
+                    protocol: crate::wfp_policy::TransportProtocol::Tcp,
+                },
+            ],
+        };
+
+        match engine.validate_egress_policy_transaction(&spec) {
+            Ok(report) => (
+                true,
+                format!(
+                    "The restricted Agent service token completed BFE add/read-back/exact-delete/abort for {} filters; {} were confirmed rolled back.",
+                    report.validated_filter_count, report.rolled_back_filter_count
+                ),
+            ),
+            Err(error) => (false, error),
+        }
+    }
+
+    fn wfp_acl_probe_report_path() -> Result<PathBuf, String> {
+        let program_data = std::env::var_os("ProgramData")
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "ProgramData is unavailable to the WFP ACL probe service.".to_string())?;
+        Ok(PathBuf::from(program_data)
+            .join("blacklist-inevitable")
+            .join("Agent")
+            .join("wfp-acl-probe.json"))
+    }
+
+    unsafe extern "system" fn wfp_acl_probe_service_main(
+        _argument_count: u32,
+        _arguments: *mut windows_sys::core::PWSTR,
+    ) {
+        let service_status_handle = unsafe {
+            RegisterServiceCtrlHandlerExW(
+                SERVICE_NAME.as_ptr(),
+                Some(control_handler),
+                std::ptr::null(),
+            )
+        };
+        if service_status_handle.is_null() {
+            return;
+        }
+        STATUS_HANDLE.store(service_status_handle as isize, Ordering::Release);
+
+        if !report_status(&status(SERVICE_START_PENDING, 0, 0, 0, 10_000))
+            || !report_status(&status(SERVICE_RUNNING, 0, 0, 0, 0))
+        {
+            STATUS_HANDLE.store(0, Ordering::Release);
+            return;
+        }
+
+        let (access_granted, detail) = run_wfp_acl_probe_once();
+        let report = serde_json::json!({
+            "schema_version": 1,
+            "service_name": "BlacklistInevitableAgent",
+            "service_account": "LocalSystem",
+            "service_sid_type": "RESTRICTED",
+            "outcome": if access_granted { "access_granted" } else { "access_blocked" },
+            "detail": detail,
+            "traffic_filters_committed": false
+        });
+
+        let write_result = wfp_acl_probe_report_path().and_then(|path| {
+            let parent = path
+                .parent()
+                .ok_or_else(|| "The WFP ACL probe report path has no parent directory.".to_string())?;
+            if !parent.is_dir() {
+                return Err("The WFP ACL probe report directory was not provisioned.".to_string());
+            }
+            let bytes = serde_json::to_vec_pretty(&report)
+                .map_err(|error| format!("Could not serialize WFP ACL probe report: {error}"))?;
+            std::fs::write(path, bytes)
+                .map_err(|error| format!("Could not write WFP ACL probe report: {error}"))
+        });
+
+        let (win32_exit, service_exit) = match write_result {
+            Ok(()) => (0, 0),
+            Err(error) => {
+                eprintln!("{error}");
+                (ERROR_GEN_FAILURE, 3)
+            }
+        };
+        report_status(&status(SERVICE_STOP_PENDING, 0, 0, 0, 1_000));
+        report_status(&status(SERVICE_STOPPED, 0, win32_exit, service_exit, 0));
+        STATUS_HANDLE.store(0, Ordering::Release);
+    }
+
+    pub fn run_wfp_acl_probe() -> Result<(), String> {
+        let table = [
+            SERVICE_TABLE_ENTRYW {
+                lpServiceName: SERVICE_NAME.as_ptr() as *mut u16,
+                lpServiceProc: Some(wfp_acl_probe_service_main),
+            },
+            SERVICE_TABLE_ENTRYW {
+                lpServiceName: std::ptr::null_mut(),
+                lpServiceProc: None,
+            },
+        ];
+
+        let started = unsafe { StartServiceCtrlDispatcherW(table.as_ptr()) };
+        if started == 0 {
+            let error = unsafe { GetLastError() };
+            return Err(format!(
+                "The WFP ACL probe could not connect to the Windows Service Control Manager (error {error})."
+            ));
+        }
+        Ok(())
+    }
+
     pub fn run() -> Result<(), String> {
         let table = [
             SERVICE_TABLE_ENTRYW {
@@ -359,6 +490,16 @@ mod windows_service {
             assert_eq!(running.dwControlsAccepted, SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN);
         }
     }
+}
+
+#[cfg(windows)]
+pub fn run_wfp_acl_probe_service() -> Result<(), String> {
+    windows_service::run_wfp_acl_probe()
+}
+
+#[cfg(not(windows))]
+pub fn run_wfp_acl_probe_service() -> Result<(), String> {
+    Err("The WFP ACL probe is supported only on Windows.".to_string())
 }
 
 #[cfg(windows)]

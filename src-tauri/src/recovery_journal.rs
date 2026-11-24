@@ -104,8 +104,11 @@ pub struct FirewallFilterRecord {
     #[serde(default)]
     pub filter_key: Option<String>,
     pub layer_key: String,
-    /// Runtime ID returned by BFE. Useful for diagnostics, but not a durable identity.
-    pub filter_id: u64,
+    /// Runtime ID returned by BFE after the filter is committed. This is
+    /// diagnostic only and may be absent in the durable intent checkpoint
+    /// written before the WFP mutation.
+    #[serde(default)]
+    pub filter_id: Option<u64>,
 }
 
 /// A non-secret snapshot of resources owned or changed by one VPN session.
@@ -211,8 +214,10 @@ impl RecoveryJournal {
                     return Err("The recovery journal contains a duplicate stable firewall filter key.".to_string());
                 }
             }
-            if filter.filter_id == 0 || !filter_ids.insert(filter.filter_id) {
-                return Err("The recovery journal contains an invalid or duplicate firewall filter ID.".to_string());
+            if let Some(filter_id) = filter.filter_id {
+                if filter_id == 0 || !filter_ids.insert(filter_id) {
+                    return Err("The recovery journal contains an invalid or duplicate firewall filter ID.".to_string());
+                }
             }
         }
         Ok(())
@@ -567,7 +572,7 @@ mod tests {
             provider_key: "4d36e972-e325-11ce-bfc1-08002be10318".to_string(),
             filter_key: Some("ac9af5e4-5e27-4dce-8b6a-19c175e233d1".to_string()),
             layer_key: "6d6f8e80-62d4-4b90-a1b8-10ac74e55e20".to_string(),
-            filter_id: 77,
+            filter_id: Some(77),
         });
         journal
     }
@@ -620,8 +625,25 @@ mod tests {
         assert!(journal.validate().is_err());
 
         let mut journal = example_journal(1, 1);
-        journal.firewall_filters[0].filter_id = 0;
+        journal.firewall_filters[0].filter_id = Some(0);
         assert!(journal.validate().is_err());
+    }
+
+    #[test]
+    fn accepts_pre_mutation_filter_intent_without_a_runtime_id() {
+        let mut journal = example_journal(70, 1);
+        journal.firewall_filters[0].filter_id = None;
+        journal.firewall_filters[0].filter_key =
+            Some("ac9af5e4-5e27-4dce-8b6a-19c175e233d1".to_string());
+
+        journal.validate().unwrap();
+        let encoded = serde_json::to_vec(&journal).unwrap();
+        let decoded: RecoveryJournal = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded.firewall_filters[0].filter_id, None);
+        assert_eq!(
+            decoded.firewall_filters[0].filter_key.as_deref(),
+            Some("ac9af5e4-5e27-4dce-8b6a-19c175e233d1")
+        );
     }
 
     #[test]
@@ -653,7 +675,7 @@ mod tests {
 
         let mut duplicate = example_journal(74, 1);
         duplicate.firewall_filters.push(duplicate.firewall_filters[0].clone());
-        duplicate.firewall_filters[1].filter_id = 78;
+        duplicate.firewall_filters[1].filter_id = Some(78);
         assert!(duplicate.validate().is_err());
     }
 

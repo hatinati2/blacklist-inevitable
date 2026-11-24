@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fmt;
 
 use base64::engine::general_purpose::{STANDARD, URL_SAFE, URL_SAFE_NO_PAD};
 use base64::Engine;
@@ -30,6 +31,16 @@ pub struct ParsedProfile {
     pub credentials: BTreeMap<String, String>,
 }
 
+impl fmt::Debug for ParsedProfile {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ParsedProfile")
+            .field("profile", &self.profile)
+            .field("credentials", &"[REDACTED]")
+            .finish()
+    }
+}
+
 impl Drop for ParsedProfile {
     fn drop(&mut self) {
         zeroize_credentials(&mut self.credentials);
@@ -52,6 +63,16 @@ pub struct ImportIssue {
 pub struct ParsedImport {
     pub profiles: Vec<ParsedProfile>,
     pub rejected: Vec<ImportIssue>,
+}
+
+impl fmt::Debug for ParsedImport {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ParsedImport")
+            .field("profile_count", &self.profiles.len())
+            .field("rejected_count", &self.rejected.len())
+            .finish()
+    }
 }
 
 pub fn parse_import_text(input: &str) -> Result<ParsedImport, String> {

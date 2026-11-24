@@ -107,7 +107,7 @@ pub fn create_listener() -> Result<HANDLE, String> {
 
 /// Serve one request per authenticated connection. The service-control layer
 /// owns cancellation of synchronous ConnectNamedPipe/ReadFile/WriteFile calls.
-pub fn serve(pipe: HANDLE, stop_event: HANDLE) -> Result<(), String> {
+pub fn serve(pipe: HANDLE, stop_event: HANDLE, startup_detail: &str) -> Result<(), String> {
     if pipe.is_null() || pipe == INVALID_HANDLE_VALUE || stop_event.is_null() {
         return Err("The Agent named pipe or stop event handle is invalid.".into());
     }
@@ -124,7 +124,7 @@ pub fn serve(pipe: HANDLE, stop_event: HANDLE) -> Result<(), String> {
         let request_result = if stop_requested(stop_event) {
             Ok(())
         } else {
-            handle_authenticated_connection(pipe, stop_event)
+            handle_authenticated_connection(pipe, stop_event, startup_detail)
         };
 
         // Continuing on a thread that failed to revert impersonation would risk
@@ -154,7 +154,11 @@ fn stop_requested(stop_event: HANDLE) -> bool {
     unsafe { WaitForSingleObject(stop_event, 0) == WAIT_OBJECT_0 }
 }
 
-fn handle_authenticated_connection(pipe: HANDLE, stop_event: HANDLE) -> Result<(), String> {
+fn handle_authenticated_connection(
+    pipe: HANDLE,
+    stop_event: HANDLE,
+    startup_detail: &str,
+) -> Result<(), String> {
     authenticate_active_console_client(pipe)?;
 
     let mut replay_guard = AgentRequestReplayGuard::default();
@@ -164,10 +168,7 @@ fn handle_authenticated_connection(pipe: HANDLE, stop_event: HANDLE) -> Result<(
     let response = match request.operation {
         AgentOperation::GetStatus | AgentOperation::GetDiagnostics => {
             let mut response = AgentResponse::ok(request.request_id, None);
-            response.detail = Some(
-                "The privileged Agent IPC host is running; VPN connection operations are not enabled yet."
-                    .to_string(),
-            );
+            response.detail = Some(startup_detail.to_string());
             response
         }
         AgentOperation::Connect { .. }

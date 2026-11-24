@@ -59,6 +59,45 @@ if (-not (Test-Path -LiteralPath $uninstallerPath -PathType Leaf)) {
 
 $installDirectory = Split-Path -Parent $uninstallerPath
 $appPath = Join-Path $installDirectory "blacklist-inevitable.exe"
+
+function Get-InstalledApplicationProcesses {
+    param([Parameter(Mandatory = $true)][string]$ExecutablePath)
+
+    return @(
+        Get-CimInstance -ClassName Win32_Process -Filter "Name='blacklist-inevitable.exe'" -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.ExecutablePath -and
+                [string]::Equals($_.ExecutablePath, $ExecutablePath, [System.StringComparison]::OrdinalIgnoreCase)
+            }
+    )
+}
+
+function Stop-InstalledApplicationProcesses {
+    param(
+        [Parameter(Mandatory = $true)][string]$ExecutablePath,
+        [int]$TimeoutSeconds = 20
+    )
+
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $taskkill = Join-Path $env:WINDIR "System32\taskkill.exe"
+    do {
+        $processes = @(Get-InstalledApplicationProcesses -ExecutablePath $ExecutablePath)
+        if ($processes.Count -eq 0) {
+            return
+        }
+        foreach ($process in $processes) {
+            & $taskkill /PID $process.ProcessId /T /F 2>&1 | Out-Null
+        }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $deadline)
+
+    $remaining = @(Get-InstalledApplicationProcesses -ExecutablePath $ExecutablePath)
+    if ($remaining.Count -gt 0) {
+        $ids = ($remaining | ForEach-Object { $_.ProcessId }) -join ", "
+        throw "The installed desktop application process could not be stopped before uninstall (PID(s): $ids)."
+    }
+}
+
 $resourcesDirectory = Join-Path $installDirectory "resources"
 $agentPath = Join-Path $resourcesDirectory "blacklist-inevitable-agent.exe"
 $serviceHelper = Join-Path $resourcesDirectory "windows-agent-service.ps1"
@@ -129,9 +168,14 @@ try {
 }
 finally {
     if (-not $appProcess.HasExited) {
-        Stop-Process -Id $appProcess.Id -Force -ErrorAction SilentlyContinue
-        Wait-Process -Id $appProcess.Id -Timeout 10 -ErrorAction SilentlyContinue
+        [void]$appProcess.CloseMainWindow()
+        if (-not $appProcess.WaitForExit(5000)) {
+            $taskkill = Join-Path $env:WINDIR "System32\taskkill.exe"
+            & $taskkill /PID $appProcess.Id /T /F 2>&1 | Out-Null
+            [void]$appProcess.WaitForExit(10000)
+        }
     }
+    Stop-InstalledApplicationProcesses -ExecutablePath $appPath
 }
 
 Write-Host "Uninstalling the application silently..."
@@ -142,6 +186,10 @@ if ($uninstallExitCode -ne 0) {
 }
 $uninstall.Dispose()
 
+$removalDeadline = [DateTime]::UtcNow.AddSeconds(15)
+while ((Test-Path -LiteralPath $appPath) -and [DateTime]::UtcNow -lt $removalDeadline) {
+    Start-Sleep -Milliseconds 250
+}
 if (Test-Path -LiteralPath $appPath) {
     throw "The application executable remains after uninstallation: $appPath"
 }

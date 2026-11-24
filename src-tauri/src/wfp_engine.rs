@@ -699,6 +699,24 @@ fn parse_canonical_wfp_guid(value: &str) -> Result<GUID, String> {
     Ok(GUID::from_u128(parsed.as_u128()))
 }
 
+#[cfg(all(test, windows))]
+mod recovery_guid_tests {
+    use super::parse_canonical_wfp_guid;
+
+    #[test]
+    fn parses_canonical_filter_guids_case_insensitively() {
+        let lower = parse_canonical_wfp_guid("ac9af5e4-5e27-4dce-8b6a-19c175e233d1").unwrap();
+        let upper = parse_canonical_wfp_guid("AC9AF5E4-5E27-4DCE-8B6A-19C175E233D1").unwrap();
+        assert_eq!(lower, upper);
+    }
+
+    #[test]
+    fn rejects_non_guid_and_non_canonical_representations() {
+        assert!(parse_canonical_wfp_guid("not-a-guid").is_err());
+        assert!(parse_canonical_wfp_guid("{ac9af5e4-5e27-4dce-8b6a-19c175e233d1}").is_err());
+    }
+}
+
 #[cfg(windows)]
 fn verify_staged_filter(
     engine: windows_sys::Win32::Foundation::HANDLE,

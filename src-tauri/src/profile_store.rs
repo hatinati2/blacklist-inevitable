@@ -199,7 +199,7 @@ pub fn remove_profile(app: &AppHandle, profile_id: &str) -> Result<(), String> {
 }
 
 #[cfg(windows)]
-pub fn get_credentials(profile_id: &str) -> Result<BTreeMap<String, String>, String> {
+pub fn get_credentials(profile_id: &str) -> Result<Zeroizing<BTreeMap<String, String>>, String> {
     let entry = keyring::Entry::new(SERVICE_NAME, profile_id)
         .map_err(|_| "Windows Credential Manager is not available.".to_string())?;
     let serialized = Zeroizing::new(
@@ -208,10 +208,11 @@ pub fn get_credentials(profile_id: &str) -> Result<BTreeMap<String, String>, Str
             .map_err(|_| "Credentials for this profile are missing from Windows Credential Manager.".to_string())?,
     );
     serde_json::from_str(&serialized)
+        .map(Zeroizing::new)
         .map_err(|_| "Stored profile credentials are corrupted.".to_string())
 }
 
 #[cfg(not(windows))]
-pub fn get_credentials(_profile_id: &str) -> Result<BTreeMap<String, String>, String> {
+pub fn get_credentials(_profile_id: &str) -> Result<Zeroizing<BTreeMap<String, String>>, String> {
     Err("Secure profile storage is currently supported on Windows only.".to_string())
 }

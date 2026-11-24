@@ -7,7 +7,7 @@
 #[cfg(windows)]
 mod windows_service {
     use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::Mutex;
 
     use crate::recovery_journal::RecoveryJournalStore;
@@ -98,7 +98,13 @@ mod windows_service {
         let program_data = std::env::var_os("ProgramData")
             .filter(|value| !value.is_empty())
             .ok_or_else(|| "The Windows ProgramData directory is unavailable to the Agent service.".to_string())?;
-        let journal_directory = PathBuf::from(program_data)
+        open_recovery_journal_store_at(&PathBuf::from(program_data))
+    }
+
+    fn open_recovery_journal_store_at(
+        program_data: &Path,
+    ) -> Result<(RecoveryJournalStore, usize), String> {
+        let journal_directory = program_data
             .join("blacklist-inevitable")
             .join("Agent");
         let store = RecoveryJournalStore::open(journal_directory)?;
@@ -119,7 +125,72 @@ mod windows_service {
 
     #[cfg(test)]
     mod recovery_startup_tests {
-        use super::recovery_diagnostics_detail;
+        use std::fs;
+        use std::path::Path;
+
+        use crate::recovery_journal::{RecoveryJournal, RecoveryJournalStore};
+
+        use super::{open_recovery_journal_store_at, recovery_diagnostics_detail};
+
+        fn test_program_data() -> std::path::PathBuf {
+            std::env::temp_dir().join(format!(
+                "blacklist-agent-recovery-bootstrap-{}",
+                uuid::Uuid::new_v4()
+            ))
+        }
+
+        fn create_journal_directory(program_data: &Path) {
+            fs::create_dir_all(program_data.join("blacklist-inevitable").join("Agent"))
+                .expect("create test journal directory");
+        }
+
+        #[test]
+        fn startup_opens_an_existing_empty_program_data_journal() {
+            let program_data = test_program_data();
+            create_journal_directory(&program_data);
+
+            let (_store, unresolved) =
+                open_recovery_journal_store_at(&program_data).expect("open empty recovery journal");
+            assert_eq!(unresolved, 0);
+
+            fs::remove_dir_all(program_data).expect("remove test ProgramData directory");
+        }
+
+        #[test]
+        fn startup_counts_unresolved_committed_sessions() {
+            let program_data = test_program_data();
+            create_journal_directory(&program_data);
+            let journal_directory = program_data.join("blacklist-inevitable").join("Agent");
+            let store = RecoveryJournalStore::open(&journal_directory).expect("open test store");
+            store
+                .persist(&RecoveryJournal::new(73))
+                .expect("persist unresolved recovery journal");
+            drop(store);
+
+            let (_store, unresolved) =
+                open_recovery_journal_store_at(&program_data).expect("load unresolved journal");
+            assert_eq!(unresolved, 1);
+
+            fs::remove_dir_all(program_data).expect("remove test ProgramData directory");
+        }
+
+        #[test]
+        fn startup_rejects_corrupt_committed_journal_files() {
+            let program_data = test_program_data();
+            create_journal_directory(&program_data);
+            let journal_directory = program_data.join("blacklist-inevitable").join("Agent");
+            fs::write(
+                journal_directory.join(
+                    "session-0000000000000049-revision-0000000000000001.json",
+                ),
+                b"{",
+            )
+            .expect("write corrupt committed journal");
+
+            assert!(open_recovery_journal_store_at(&program_data).is_err());
+
+            fs::remove_dir_all(program_data).expect("remove test ProgramData directory");
+        }
 
         #[test]
         fn startup_diagnostics_report_an_empty_journal_without_claiming_network_recovery() {

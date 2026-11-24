@@ -73,8 +73,7 @@ pub async fn submit_agent_connect_request(
         .into_iter()
         .find(|profile| profile.id == profile_id)
         .ok_or_else(|| "Profile not found.".to_string())?;
-    let mut credentials = profile_store::get_credentials(&profile.id)?;
-    let credentials = std::mem::take(&mut *credentials);
+    let credentials = profile_store::get_credentials(&profile.id)?.into_map();
     crate::agent_client::connect_profile(
         crate::agent_protocol::AgentProfile::from(profile),
         credentials,

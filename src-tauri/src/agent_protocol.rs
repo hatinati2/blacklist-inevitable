@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::sync::Mutex;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use zeroize::{Zeroize, Zeroizing};
 
 use serde::{Deserialize, Serialize};
 
@@ -53,6 +54,20 @@ impl From<AgentProfile> for ProfileSummary {
     }
 }
 
+impl From<ProfileSummary> for AgentProfile {
+    fn from(profile: ProfileSummary) -> Self {
+        Self {
+            id: profile.id,
+            name: profile.name,
+            protocol: profile.protocol,
+            server: profile.server,
+            port: profile.port,
+            options: profile.options,
+            unsupported_options: profile.unsupported_options,
+        }
+    }
+}
+
 /// The credential map is only accepted on a single Connect request. The
 /// service must use it in memory to build its per-session engine config and
 /// must never log, persist, or echo this object.
@@ -61,6 +76,15 @@ impl From<AgentProfile> for ProfileSummary {
 pub struct AgentConnectPayload {
     pub profile: AgentProfile,
     pub credentials: BTreeMap<String, String>,
+}
+
+impl Drop for AgentConnectPayload {
+    fn drop(&mut self) {
+        for secret in self.credentials.values_mut() {
+            secret.zeroize();
+        }
+        self.credentials.clear();
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -213,7 +237,7 @@ where
         return Err("The agent frame length is empty or exceeds the maximum message size.".to_string());
     }
 
-    let mut payload = vec![0u8; announced];
+    let mut payload = Zeroizing::new(vec![0u8; announced]);
     reader
         .read_exact(&mut payload)
         .await
@@ -459,7 +483,7 @@ mod tests {
         assert_eq!(payload.profile.protocol, "trojan");
         assert_eq!(payload.credentials.get("password").map(String::as_str), Some("one-shot-secret"));
 
-        let public_profile = serde_json::to_string(&ProfileSummary::from(payload.profile)).unwrap();
+        let public_profile = serde_json::to_string(&ProfileSummary::from(payload.profile.clone())).unwrap();
         assert!(!public_profile.contains("one-shot-secret"));
     }
 

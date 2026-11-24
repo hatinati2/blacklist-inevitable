@@ -580,6 +580,9 @@ mod tests {
 
         assert_eq!(parsed.profile.protocol, "trojan");
         assert_eq!(parsed.credentials.get("password").unwrap(), "super-secret");
+        let debug = format!("{parsed:?}");
+        assert!(!debug.contains("super-secret"));
+        assert!(debug.contains("[REDACTED]"));
         assert!(!serde_json::to_string(&parsed.profile).unwrap().contains("super-secret"));
     }
 

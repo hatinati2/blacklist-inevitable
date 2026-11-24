@@ -15,6 +15,7 @@
 - A replay guard is created after peer authentication. One request is handled per connection; malformed or unauthorized clients are dropped.
 - Only `GetStatus` and `GetDiagnostics` return a status-only response. `Connect`, `Disconnect`, and `Recover` are explicitly rejected.
 - The unelevated desktop now has a status-only named-pipe client with a five-second timeout, bounded response framing, and request/response correlation. It verifies the server PID and session 0 from the pipe handle, then verifies the process token SID (LocalSystem) when token inspection is available; for a standard user that cannot open the SYSTEM token, it fails over to reading the pipe object's owner SID and accepts only LocalSystem. It sends no credentials and no network-mutating operations.
+- A separate `submit_agent_connect_request` command retrieves credentials only from the current user's Windows Credential Manager and sends one typed `Connect` frame over the same authenticated local pipe. The profile/credential schema is bounded and protocol-specific; imported and loaded secret values, IPC frames, and individually deserialized credential strings use zeroizing cleanup, and debug output redacts them. The service currently rejects `Connect` and drops the payload without persistence or logging; this is a handoff foundation, not a working connection. See `WINDOWS_AGENT_CREDENTIAL_HANDOFF.md`.
 - The Windows CI builds this executable independently from the Tauri desktop installer.
 
 ## Installer and signed service deployment
@@ -43,7 +44,7 @@ The named-pipe DACL is only the first access gate. Authorization also compares t
 The installer/deployment foundation does not turn the status-only service into an operational VPN Agent. The service still:
 
 - rejects `Connect`, `Disconnect`, and `Recover`;
-- does not transfer profile credentials;
+- does not use profile credentials to start an engine session; it receives only a bounded one-shot handoff and rejects `Connect` until the runtime exists;
 - does not start sing-box, create TUN, change routes/DNS, or activate firewall policy;
 - does not load or reconcile the recovery journal and does not report a real VPN connection state;
 - does not provide an Agent-owned all-protocol physical-egress kill switch or prove packet-level leak prevention.
@@ -54,10 +55,9 @@ The desktop process does not launch the Agent directly. The per-machine NSIS ins
 
 ## Required next slices
 
-1. Add authenticated profile/credential handoff with one-shot memory handling and no secret logging/persistence.
-2. Integrate the recovery journal and WFP transaction backend. Persist exact state before OS mutations and verify it during startup recovery.
-3. Add the Agent-owned connection runtime only after authorization and crash recovery are tested.
-4. Add Windows 10/11 integration tests for user logon/logoff, session switching, remote-client rejection, unauthorized SID rejection, malformed/oversized/replayed frames, stop during blocked pipe connect/read, service crash/reboot, and packet-capture leak acceptance.
+1. Integrate the recovery journal and WFP transaction backend. Persist exact state before OS mutations and verify during startup recovery.
+2. Add the Agent-owned connection runtime only after authorization and crash recovery are tested.
+3. Add Windows 10/11 integration tests for user logon/logoff, session switching, remote-client rejection, unauthorized SID rejection, malformed/oversized/replayed frames, stop during blocked pipe connect/read, service crash/reboot, and packet-capture leak acceptance.
 
 A green service-host build proves only that the Windows binary compiles and its automated checks pass. It is not evidence of a registered service, a connected desktop client, an active kill switch, or leak prevention.
 

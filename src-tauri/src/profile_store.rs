@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs;
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -11,6 +12,34 @@ use crate::profiles::{ParsedProfile, ProfileSummary};
 
 const SERVICE_NAME: &str = "blacklist-inevitable";
 static PROFILE_STORE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+/// Credential map whose values are erased before their allocations are freed.
+pub struct SecretCredentials {
+    values: BTreeMap<String, String>,
+}
+
+impl SecretCredentials {
+    pub fn into_map(mut self) -> BTreeMap<String, String> {
+        std::mem::take(&mut self.values)
+    }
+}
+
+impl Deref for SecretCredentials {
+    type Target = BTreeMap<String, String>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.values
+    }
+}
+
+impl Drop for SecretCredentials {
+    fn drop(&mut self) {
+        for secret in self.values.values_mut() {
+            secret.zeroize();
+        }
+        self.values.clear();
+    }
+}
 
 fn lock_profile_store() -> Result<MutexGuard<'static, ()>, String> {
     PROFILE_STORE_LOCK
@@ -199,7 +228,7 @@ pub fn remove_profile(app: &AppHandle, profile_id: &str) -> Result<(), String> {
 }
 
 #[cfg(windows)]
-pub fn get_credentials(profile_id: &str) -> Result<Zeroizing<BTreeMap<String, String>>, String> {
+pub fn get_credentials(profile_id: &str) -> Result<SecretCredentials, String> {
     let entry = keyring::Entry::new(SERVICE_NAME, profile_id)
         .map_err(|_| "Windows Credential Manager is not available.".to_string())?;
     let serialized = Zeroizing::new(
@@ -207,12 +236,12 @@ pub fn get_credentials(profile_id: &str) -> Result<Zeroizing<BTreeMap<String, St
             .get_password()
             .map_err(|_| "Credentials for this profile are missing from Windows Credential Manager.".to_string())?,
     );
-    serde_json::from_str(&serialized)
-        .map(Zeroizing::new)
-        .map_err(|_| "Stored profile credentials are corrupted.".to_string())
+    let values = serde_json::from_str(&serialized)
+        .map_err(|_| "Stored profile credentials are corrupted.".to_string())?;
+    Ok(SecretCredentials { values })
 }
 
 #[cfg(not(windows))]
-pub fn get_credentials(_profile_id: &str) -> Result<Zeroizing<BTreeMap<String, String>>, String> {
+pub fn get_credentials(_profile_id: &str) -> Result<SecretCredentials, String> {
     Err("Secure profile storage is currently supported on Windows only.".to_string())
 }

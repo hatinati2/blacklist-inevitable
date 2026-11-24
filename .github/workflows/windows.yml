@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    branches: [main, feat/windows-agent-service-installer]
   workflow_dispatch:
 
 permissions:
@@ -17,7 +17,7 @@ concurrency:
 jobs:
   build:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 90
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -57,6 +57,11 @@ jobs:
           if ($version -notmatch "1\.14\.4") { throw "The config validator reports an unexpected sing-box version: $version" }
           "SING_BOX_VALIDATOR=$($binary.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
+      - name: Build dedicated Windows Agent service host
+        env:
+          BLACKLIST_AGENT_ONLY_BUILD: "1"
+        run: cargo build --locked --release --manifest-path src-tauri/Cargo.toml --bin blacklist-inevitable-agent
+
       - name: Format Rust sources
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --all
 
@@ -75,8 +80,10 @@ jobs:
       - name: Verify locked release dependency graph
         run: cargo build --locked --release --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc
 
-      - name: Build dedicated Windows Agent service host
-        run: cargo build --locked --release --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc --bin blacklist-inevitable-agent
+      - name: Prepare fail-closed Agent publisher pin
+        shell: pwsh
+        run: |
+          Set-Content -LiteralPath "src-tauri/windows/agent-publisher-thumbprint.txt" -Value "UNCONFIGURED" -NoNewline -Encoding ascii
 
       - name: Build Windows installer
         run: npm run tauri -- build

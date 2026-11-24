@@ -1,8 +1,8 @@
 use std::sync::{Mutex, MutexGuard};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ConnectionPhase {
     Disconnected,
@@ -15,7 +15,7 @@ pub enum ConnectionPhase {
     Failed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionSnapshot {
     pub phase: ConnectionPhase,

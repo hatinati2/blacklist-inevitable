@@ -1,5 +1,6 @@
 use tauri::Manager;
 
+pub mod agent_client;
 pub mod agent_protocol;
 pub mod agent_service;
 #[cfg(windows)]
@@ -39,6 +40,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_app_status,
+            commands::get_agent_status,
             commands::get_profiles,
             commands::import_profiles,
             commands::delete_profile,

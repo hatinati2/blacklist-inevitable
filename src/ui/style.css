@@ -129,3 +129,11 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 @media (max-width: 560px) {
   .settings-actions { align-items: flex-end; flex-direction: column; }
 }
+
+
+.agent-panel { margin-top: 18px; }
+.agent-state-tag { flex: 0 0 auto; padding: 7px 10px; border: 1px solid rgba(142, 164, 194, 0.18); border-radius: 999px; font-size: 10px; font-weight: 750; }
+.agent-state-tag.online { color: #9ce2c9; border-color: rgba(119, 211, 180, 0.24); background: rgba(119, 211, 180, 0.08); }
+.agent-state-tag.offline { color: #e6b5a5; border-color: rgba(224, 155, 125, 0.22); background: rgba(224, 155, 125, 0.07); }
+.agent-connection-line { display: flex; align-items: center; gap: 16px; padding-top: 10px; border-top: 1px solid rgba(142, 164, 194, 0.1); color: #aab9cb; font-size: 11px; }
+.agent-connection-line strong { color: #e1eaf5; text-transform: capitalize; }

@@ -7,7 +7,7 @@ param(
 $ErrorActionPreference = "Stop"
 $serviceName = "BlacklistInevitableAgent"
 $probeRoot = Join-Path $env:ProgramFiles "BlacklistInevitableWfpProbe"
-$probeExe = Join-Path $probeRoot "blacklist-inevitable-agent.exe"
+$probeExe = Join-Path $probeRoot "blacklist-inevitable-wfp-acl-probe.exe"
 $stateRoot = Join-Path $env:ProgramData "blacklist-inevitable"
 $reportDirectory = Join-Path $stateRoot "Agent"
 $reportPath = Join-Path $reportDirectory "wfp-acl-probe.json"
@@ -25,7 +25,7 @@ function Invoke-Icacls {
 
 try {
     if (-not (Test-Path -LiteralPath $AgentPath -PathType Leaf)) {
-        throw "The dedicated Agent service executable is missing: $AgentPath"
+        throw "The dedicated WFP ACL probe executable is missing: $AgentPath"
     }
     if (Get-Service -Name $serviceName -ErrorAction SilentlyContinue) {
         throw "A service named $serviceName already exists on the disposable CI runner."
@@ -36,7 +36,7 @@ try {
     New-Item -ItemType Directory -Path $reportDirectory -Force | Out-Null
     Remove-Item -LiteralPath $reportPath -Force -ErrorAction SilentlyContinue
 
-    $binaryPath = '"' + $probeExe + '" --wfp-acl-probe'
+    $binaryPath = '"' + $probeExe + '"'
     $createOutput = & (Join-Path $env:WINDIR "System32\sc.exe") create $serviceName "binPath= $binaryPath" "start= demand" "obj= LocalSystem" 2>&1
     if ($LASTEXITCODE -ne 0) {
         throw "Could not create the temporary Agent probe service: $($createOutput -join ' ')"

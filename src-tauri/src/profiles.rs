@@ -25,7 +25,6 @@ pub struct ProfileSummary {
     pub unsupported_options: Vec<String>,
 }
 
-#[derive()]
 pub struct ParsedProfile {
     pub profile: ProfileSummary,
     pub credentials: BTreeMap<String, String>,

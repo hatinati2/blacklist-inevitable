@@ -1,16 +1,20 @@
 //! Unelevated desktop client for the privileged Windows Agent.
 //!
-//! The first slice intentionally exposes status-only RPC. It validates the
-//! named-pipe server process token before sending any request and never sends
-//! profile credentials or network-mutating operations.
+//! Requests use a local authenticated named pipe. Connect credentials are
+//! sent only after verifying the LocalSystem service peer and are held in
+//! zeroizing containers for the one-shot request lifetime. The current Agent
+//! intentionally rejects Connect until its recovery and tunnel runtime exist.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use serde::Serialize;
+use zeroize::Zeroizing;
 
 use crate::agent_protocol::{
-    encode_agent_frame, AgentOperation, AgentRequest, AgentResponse, AgentResponseStatus,
-    AGENT_PROTOCOL_VERSION,
+    encode_agent_frame, AgentConnectPayload, AgentOperation, AgentProfile, AgentRequest,
+    AgentSecret,
+    AgentResponse, AgentResponseStatus, AGENT_PROTOCOL_VERSION,
 };
 
 const PIPE_NAME: &str = r"\\.\pipe\BlacklistInevitable.Agent.v1";
@@ -41,25 +45,66 @@ pub async fn get_status() -> DesktopAgentStatus {
     }
 }
 
+/// Send a single profile and its credentials to the authenticated Agent.
+/// The Agent currently rejects the operation; this transport slice establishes
+/// the bounded one-shot handoff without enabling network mutations.
+pub async fn connect_profile(
+    profile: AgentProfile,
+    credentials: BTreeMap<String, String>,
+) -> Result<AgentResponse, String> {
+    let credentials = credentials
+        .into_iter()
+        .map(|(name, value)| (name, AgentSecret::new(value)))
+        .collect();
+    let request = AgentRequest {
+        version: AGENT_PROTOCOL_VERSION,
+        request_id: uuid::Uuid::new_v4().simple().to_string(),
+        operation: AgentOperation::Connect {
+            payload: AgentConnectPayload {
+                profile,
+                credentials,
+            },
+        },
+    };
+    send_request(request).await
+}
+
 async fn request_status() -> Result<AgentResponse, String> {
+    let request = AgentRequest {
+        version: AGENT_PROTOCOL_VERSION,
+        request_id: uuid::Uuid::new_v4().simple().to_string(),
+        operation: AgentOperation::GetStatus,
+    };
+    let response = send_request(request).await?;
+    if response.status != AgentResponseStatus::Ok {
+        return Err(response
+            .detail
+            .unwrap_or_else(|| "The Agent rejected the status request.".to_string()));
+    }
+    Ok(response)
+}
+
+async fn send_request(request: AgentRequest) -> Result<AgentResponse, String> {
     #[cfg(windows)]
     {
-        request_status_windows().await
+        request_windows(request).await
     }
     #[cfg(not(windows))]
     {
+        drop(request);
         Err("The privileged Windows Agent is available only on Windows.".to_string())
     }
 }
 
 #[cfg(windows)]
-async fn request_status_windows() -> Result<AgentResponse, String> {
+async fn request_windows(request: AgentRequest) -> Result<AgentResponse, String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::windows::named_pipe::ClientOptions;
     use tokio::time::{sleep, timeout};
     use windows_sys::Win32::Foundation::ERROR_PIPE_BUSY;
 
-    timeout(CLIENT_TIMEOUT, async {
+    timeout(CLIENT_TIMEOUT, async move {
+        let expected_request_id = request.request_id.clone();
         // ClientOptions::open returns an already-connected client. Retry only
         // the transient busy condition while the single-instance Agent pipe is
         // serving another request; all other errors fail closed.
@@ -77,43 +122,36 @@ async fn request_status_windows() -> Result<AgentResponse, String> {
 
         verify_system_service_peer(&pipe)?;
 
-        let request_id = uuid::Uuid::new_v4().simple().to_string();
-        let request = AgentRequest {
-            version: AGENT_PROTOCOL_VERSION,
-            request_id: request_id.clone(),
-            operation: AgentOperation::GetStatus,
-        };
+        // The serialized request contains credentials for Connect. Zeroize it
+        // on every return path, including timeout and pipe errors.
         let frame = encode_agent_frame(&request)?;
         pipe.write_all(&frame)
             .await
-            .map_err(|_| "The Agent status request could not be written.".to_string())?;
+            .map_err(|_| "The Agent IPC request could not be written.".to_string())?;
         pipe.flush()
             .await
-            .map_err(|_| "The Agent status request could not be flushed.".to_string())?;
+            .map_err(|_| "The Agent IPC request could not be flushed.".to_string())?;
 
         let mut header = [0u8; 4];
         pipe.read_exact(&mut header)
             .await
-            .map_err(|_| "The Agent closed the pipe before returning a complete status response.".to_string())?;
+            .map_err(|_| "The Agent closed the pipe before returning a complete response.".to_string())?;
         let length = u32::from_le_bytes(header) as usize;
         if length == 0 || length > crate::agent_protocol::MAX_AGENT_REQUEST_BYTES {
-            return Err("The Agent status response exceeds the protocol size limit.".to_string());
+            return Err("The Agent response exceeds the protocol size limit.".to_string());
         }
 
-        let mut payload = vec![0u8; length];
+        let mut payload = Zeroizing::new(vec![0u8; length]);
         pipe.read_exact(&mut payload)
             .await
-            .map_err(|_| "The Agent status response was truncated.".to_string())?;
+            .map_err(|_| "The Agent response was truncated.".to_string())?;
         let response: AgentResponse = serde_json::from_slice(&payload)
-            .map_err(|_| "The Agent returned an invalid status response.".to_string())?;
+            .map_err(|_| "The Agent returned an invalid response.".to_string())?;
 
-        if response.version != AGENT_PROTOCOL_VERSION || response.request_id != request_id {
-            return Err("The Agent status response does not match the active protocol request.".to_string());
-        }
-        if response.status != AgentResponseStatus::Ok {
-            return Err(response
-                .detail
-                .unwrap_or_else(|| "The Agent rejected the status request.".to_string()));
+        if response.version != AGENT_PROTOCOL_VERSION
+            || response.request_id != expected_request_id
+        {
+            return Err("The Agent response does not match the active protocol request.".to_string());
         }
         Ok(response)
     })

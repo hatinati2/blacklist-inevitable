@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fmt;
 
 use base64::engine::general_purpose::{STANDARD, URL_SAFE, URL_SAFE_NO_PAD};
 use base64::Engine;
@@ -7,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use url::Url;
 use uuid::Uuid;
+use zeroize::Zeroize;
 
 const MAX_IMPORT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_IMPORT_LINES: usize = 500;
@@ -24,10 +26,31 @@ pub struct ProfileSummary {
     pub unsupported_options: Vec<String>,
 }
 
-#[derive(Debug)]
 pub struct ParsedProfile {
     pub profile: ProfileSummary,
     pub credentials: BTreeMap<String, String>,
+}
+
+impl fmt::Debug for ParsedProfile {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ParsedProfile")
+            .field("profile", &self.profile)
+            .field("credentials", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl Drop for ParsedProfile {
+    fn drop(&mut self) {
+        zeroize_credentials(&mut self.credentials);
+    }
+}
+
+fn zeroize_credentials(credentials: &mut BTreeMap<String, String>) {
+    for secret in credentials.values_mut() {
+        secret.zeroize();
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -37,10 +60,19 @@ pub struct ImportIssue {
     pub reason: String,
 }
 
-#[derive(Debug)]
 pub struct ParsedImport {
     pub profiles: Vec<ParsedProfile>,
     pub rejected: Vec<ImportIssue>,
+}
+
+impl fmt::Debug for ParsedImport {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ParsedImport")
+            .field("profile_count", &self.profiles.len())
+            .field("rejected_count", &self.rejected.len())
+            .finish()
+    }
 }
 
 pub fn parse_import_text(input: &str) -> Result<ParsedImport, String> {
@@ -548,6 +580,9 @@ mod tests {
 
         assert_eq!(parsed.profile.protocol, "trojan");
         assert_eq!(parsed.credentials.get("password").unwrap(), "super-secret");
+        let debug = format!("{parsed:?}");
+        assert!(!debug.contains("super-secret"));
+        assert!(debug.contains("[REDACTED]"));
         assert!(!serde_json::to_string(&parsed.profile).unwrap().contains("super-secret"));
     }
 

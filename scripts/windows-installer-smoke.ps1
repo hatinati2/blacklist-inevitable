@@ -9,11 +9,33 @@ if (-not $installer) {
     throw "No NSIS installer was found in $installerDirectory"
 }
 
-Write-Host "Installing $($installer.Name) silently..."
-$install = Start-Process -FilePath $installer.FullName -ArgumentList @("/S") -Wait -PassThru
-if ($install.ExitCode -ne 0) {
-    throw "The NSIS installer exited with code $($install.ExitCode)."
+function Wait-ForInstallerProcess {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Diagnostics.Process]$Process,
+        [Parameter(Mandatory = $true)]
+        [string]$Label,
+        [int]$TimeoutSeconds = 180
+    )
+
+    if (-not $Process.WaitForExit($TimeoutSeconds * 1000)) {
+        $processId = $Process.Id
+        $taskkill = Join-Path $env:WINDIR "System32\taskkill.exe"
+        & $taskkill /PID $processId /T /F | Out-Null
+        throw "$Label did not exit within $TimeoutSeconds seconds. The process tree was terminated to prevent a hung CI job."
+    }
+
+    $Process.Refresh()
+    return $Process.ExitCode
 }
+
+Write-Host "Installing $($installer.Name) silently..."
+$install = Start-Process -FilePath $installer.FullName -ArgumentList @("/S") -PassThru
+$installExitCode = Wait-ForInstallerProcess -Process $install -Label "The NSIS installer"
+if ($installExitCode -ne 0) {
+    throw "The NSIS installer exited with code $installExitCode."
+}
+$install.Dispose()
 
 $uninstallRoot = "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall"
 $entry = Get-ChildItem -Path $uninstallRoot -ErrorAction SilentlyContinue |
@@ -113,10 +135,12 @@ finally {
 }
 
 Write-Host "Uninstalling the application silently..."
-$uninstall = Start-Process -FilePath $uninstallerPath -ArgumentList @("/S") -Wait -PassThru
-if ($uninstall.ExitCode -ne 0) {
-    throw "The NSIS uninstaller exited with code $($uninstall.ExitCode)."
+$uninstall = Start-Process -FilePath $uninstallerPath -ArgumentList @("/S") -PassThru
+$uninstallExitCode = Wait-ForInstallerProcess -Process $uninstall -Label "The NSIS uninstaller"
+if ($uninstallExitCode -ne 0) {
+    throw "The NSIS uninstaller exited with code $uninstallExitCode."
 }
+$uninstall.Dispose()
 
 if (Test-Path -LiteralPath $appPath) {
     throw "The application executable remains after uninstallation: $appPath"

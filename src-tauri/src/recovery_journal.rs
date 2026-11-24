@@ -213,6 +213,8 @@ impl RecoveryJournal {
                 if !filter_keys.insert(filter_key.as_str()) {
                     return Err("The recovery journal contains a duplicate stable firewall filter key.".to_string());
                 }
+            } else if filter.filter_id.is_none() {
+                return Err("A pre-mutation WFP intent must include a stable filter GUID before the runtime ID exists.".to_string());
             }
             if let Some(filter_id) = filter.filter_id {
                 if filter_id == 0 || !filter_ids.insert(filter_id) {
@@ -626,6 +628,14 @@ mod tests {
 
         let mut journal = example_journal(1, 1);
         journal.firewall_filters[0].filter_id = Some(0);
+        assert!(journal.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_pre_mutation_filter_intents_without_a_stable_guid() {
+        let mut journal = example_journal(69, 1);
+        journal.firewall_filters[0].filter_key = None;
+        journal.firewall_filters[0].filter_id = None;
         assert!(journal.validate().is_err());
     }
 

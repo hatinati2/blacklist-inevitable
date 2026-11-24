@@ -37,7 +37,7 @@ try {
     Remove-Item -LiteralPath $reportPath -Force -ErrorAction SilentlyContinue
 
     $binaryPath = '"' + $probeExe + '" --wfp-acl-probe'
-    $createOutput = & (Join-Path $env:WINDIR "System32\sc.exe") create $serviceName "binPath= $binaryPath" "type= own" "start= demand" "obj= LocalSystem" 2>&1
+    $createOutput = & (Join-Path $env:WINDIR "System32\sc.exe") create $serviceName "binPath= $binaryPath" "start= demand" "obj= LocalSystem" 2>&1
     if ($LASTEXITCODE -ne 0) {
         throw "Could not create the temporary Agent probe service: $($createOutput -join ' ')"
     }

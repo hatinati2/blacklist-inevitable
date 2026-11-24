@@ -60,7 +60,7 @@ jobs:
       - name: Build dedicated Windows Agent service host
         env:
           BLACKLIST_AGENT_ONLY_BUILD: "1"
-        run: cargo build --locked --release --manifest-path src-tauri/Cargo.toml --bins
+        run: cargo build --locked --release --manifest-path src-tauri/Cargo.toml --bin blacklist-inevitable-agent --bin blacklist-inevitable-wfp-acl-probe
 
       - name: Format Rust sources
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --all

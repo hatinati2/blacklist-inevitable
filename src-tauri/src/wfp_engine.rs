@@ -296,12 +296,14 @@ impl WfpEngine {
     }
 
     /// Ask BFE to validate a complete dual-stack policy plan inside one explicit
-    /// write transaction, read every filter back, then ABORT the transaction.
+    /// write transaction: add each filter, read it back, delete it by its stable
+    /// key, then ABORT the transaction.
     ///
     /// No traffic policy is committed or left installed. The former design tried
     /// to add FWPM_FILTER_FLAG_DISABLED, but Microsoft documents that this flag
-    /// cannot be supplied when adding a new filter. A rollback-only transaction is
-    /// used instead to validate filter structures without changing packet handling.
+    /// cannot be supplied when adding a new filter. A rollback-only transaction
+    /// exercises both the add/read-back and exact-key delete APIs without changing
+    /// packet handling.
     pub fn validate_egress_policy_transaction(
         &mut self,
         spec: &crate::wfp_policy::EgressPolicySpec,
@@ -323,6 +325,18 @@ impl WfpEngine {
                 let key = GUID::from_u128(uuid::Uuid::new_v4().as_u128());
                 generated_keys.push(key);
                 self.add_and_verify_planned_filter(key, planned)?;
+
+                let deletion = unsafe {
+                    windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FwpmFilterDeleteByKey0(
+                        self.handle,
+                        &key,
+                    )
+                };
+                if deletion != 0 {
+                    return Err(format!(
+                        "FwpmFilterDeleteByKey0 failed during rollback-only WFP validation with Windows status 0x{deletion:08X}."
+                    ));
+                }
             }
             Ok(())
         })();
@@ -821,6 +835,49 @@ mod recovery_guid_tests {
     fn rejects_non_guid_and_non_canonical_representations() {
         assert!(parse_canonical_wfp_guid("not-a-guid").is_err());
         assert!(parse_canonical_wfp_guid("{ac9af5e4-5e27-4dce-8b6a-19c175e233d1}").is_err());
+    }
+}
+
+#[cfg(all(test, windows))]
+mod live_bfe_transaction_tests {
+    use super::WfpEngine;
+    use crate::wfp_policy::{
+        EgressPolicySpec, PhysicalInterface, TransportProtocol, VpnEndpoint,
+    };
+
+    /// This test deliberately runs only on a disposable, elevated Windows runner.
+    /// It creates the Agent's persistent provider/sublayer metadata, but every
+    /// traffic filter is added, read back, deleted, and then rolled back in one
+    /// uncommitted BFE transaction. No packet policy is committed.
+    #[test]
+    #[ignore = "requires an elevated disposable Windows runner with BFE running"]
+    fn live_bfe_adds_reads_deletes_and_aborts_a_dual_stack_filter_plan() {
+        let spec = EgressPolicySpec {
+            physical_interfaces: vec![PhysicalInterface {
+                interface_luid: 1,
+                interface_index: 1,
+            }],
+            vpn_endpoints: vec![
+                VpnEndpoint {
+                    address: "198.51.100.7".parse().expect("valid TEST-NET-2 IPv4 address"),
+                    port: 443,
+                    protocol: TransportProtocol::Tcp,
+                },
+                VpnEndpoint {
+                    address: "2001:db8::7".parse().expect("valid documentation IPv6 address"),
+                    port: 443,
+                    protocol: TransportProtocol::Tcp,
+                },
+            ],
+        };
+
+        let mut engine = WfpEngine::open_local().expect("open local BFE as the test runner");
+        let report = engine
+            .validate_egress_policy_transaction(&spec)
+            .expect("BFE should add, read back, delete, and roll back the test filters");
+
+        assert_eq!(report.validated_filter_count, report.rolled_back_filter_count);
+        assert_eq!(report.validated_filter_count, 4);
     }
 }
 

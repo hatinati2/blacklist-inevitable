@@ -48,7 +48,11 @@ The installer configures the Agent service with `SERVICE_SID_TYPE_RESTRICTED`. T
 
 Before WFP operations are enabled, the provisioned ACLs must cover the complete operation set: `FWPM_ACTRL_OPEN` and `FWPM_ACTRL_BEGIN_WRITE_TXN` on the BFE engine; `FWPM_ACTRL_ADD` on the filter container; `FWPM_ACTRL_ADD_LINK` on the Agent provider, target ALE layers, and sublayer; and `FWPM_ACTRL_READ` plus standard `DELETE` on every Agent-owned filter. These are distinct access checks; granting only filter deletion is insufficient. ACL provisioning must preserve existing BFE permissions and be verified under the actual restricted service token before the service calls WFP.
 
-The rollback-only WFP smoke test in Windows CI runs as the hosted runner's administrative account. It verifies the live BFE add/read-back/exact-delete/abort sequence, but does not validate the restricted service SID's effective permissions. The WFP backend remains disconnected from service startup until that separate service-token ACL test passes.
+The rollback-only WFP smoke test in Windows CI runs as the hosted runner's administrative account. It verifies the live BFE add/read-back/exact-delete/abort sequence, but does not validate the restricted service SID's effective permissions.
+
+The Windows workflow now creates a disposable service using the exact production service name, runs the Agent executable as LocalSystem with `SERVICE_SID_TYPE_RESTRICTED`, and invokes a probe-only entry point. The probe calls the same WFP namespace and rollback-only filter validation path from that real SCM-created service token. Its JSON artifact reports either `access_granted` or `access_blocked` and includes the first failing WFP operation. The test service is deleted after the probe. No traffic filter is committed; the live probe only commits provider/sublayer metadata on the disposable hosted runner.
+
+This is an access-discovery test, not an authorization pass gate: CI remains green when the probe reports `access_blocked`, because that result is the evidence needed to design and provision the missing ACLs safely. A green workflow proves that the restricted-token probe ran and produced a report; only `access_granted` proves that the current WFP lifecycle path completed under the restricted service token. The WFP backend remains disconnected from production service startup until required rights are provisioned, verified, and covered by a hard-failing acceptance test.
 
 ## Deliberate non-goals
 

@@ -10,11 +10,11 @@ A journal records only the resource identities and exact previous settings neede
 - TUN adapter GUID, interface index, alias, MTU, and assigned addresses.
 - Each route state applied by the session and the previous route state, if one existed.
 - DNS mode and server list applied to each interface, plus the previous DHCP/static configuration.
-- WFP provider/layer GUIDs, stable filter GUIDs when available, and BFE runtime filter IDs owned by the session. The stable filter GUID is the deletion/read-back key; the runtime ID is diagnostic only.
+- WFP provider/layer GUIDs, stable filter GUIDs, and optional BFE runtime filter IDs owned by the session. The stable filter GUID is the only supported deletion/read-back key. The runtime ID is diagnostic only and may be absent in a pre-mutation intent checkpoint.
 
 The schema does not contain profile credentials, share links, engine JSON, command lines, executable paths, or arbitrary filesystem paths. All collections and the serialized file size have explicit upper bounds. Unknown fields and unsupported schema versions are rejected.
 
-`FirewallFilterRecord.filterKey` is optional only for compatibility with older version-1 records that predate stable filter-key recording. Newly created WFP filter records must always include a canonical filter GUID. Recovery must never attempt to delete a legacy filter using only its runtime ID; it must enumerate and reconcile exact provider-owned filters or leave policy cleanup unconfirmed.
+`FirewallFilterRecord.filterKey` is optional only for compatibility with older version-1 records that predate stable filter-key recording. Newly created WFP filter records must always include a canonical filter GUID. `filterId` is optional so a complete stable-key intent can be persisted before adding a filter; after a successful BFE read-back, a later journal revision may attach the runtime ID for diagnostics. Recovery must never attempt to delete a legacy filter using only its runtime ID; it must enumerate and reconcile exact provider-owned filters or leave policy cleanup unconfirmed.
 
 ## Storage and recovery semantics
 
@@ -25,6 +25,14 @@ For each checkpoint, the store validates the full record, creates a unique pendi
 `load_unresolved` returns the newest committed revision for each session. A new revision must be greater than the prior committed revision. The service must reconcile every returned session against actual process, adapter, route, DNS, and WFP state before accepting a new Connect request.
 
 `remove_session` is idempotent, but it must only be called after the service has independently verified engine exit, TUN teardown, route/DNS restoration, and WFP filter cleanup. A journal is not a substitute for checking the real operating-system state.
+
+## WFP exact-removal backend foundation
+
+The Windows-only `WfpEngine::remove_owned_filters` primitive accepts only journalled stable filter GUIDs. It refuses legacy runtime-ID-only entries, non-Agent provider GUIDs, unsupported layers, duplicate keys, and any read-back whose provider, sublayer, layer, persistence flag, or recorded runtime ID differs from the journal. It performs all exact deletions in one WFP transaction, commits once, then queries every key again and requires each to be absent.
+
+The optional runtime ID supports the crash window between writing a stable-key intent checkpoint and obtaining the BFE ID. A filter that is already absent is treated as idempotently cleaned, but journal removal is still the caller's responsibility after all other resource types are restored and independently verified.
+
+This primitive is not yet wired into Agent startup reconciliation, does not install filters, and does not activate a kill switch. No WFP cleanup is attempted automatically until process, TUN, route, DNS, and WFP inventory reconciliation is complete.
 
 ## Security boundary and remaining work
 

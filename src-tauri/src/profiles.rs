@@ -6,6 +6,7 @@ use percent_encoding::percent_decode_str;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use url::Url;
+use zeroize::Zeroize;
 use uuid::Uuid;
 
 const MAX_IMPORT_BYTES: usize = 2 * 1024 * 1024;
@@ -28,6 +29,18 @@ pub struct ProfileSummary {
 pub struct ParsedProfile {
     pub profile: ProfileSummary,
     pub credentials: BTreeMap<String, String>,
+}
+
+impl Drop for ParsedProfile {
+    fn drop(&mut self) {
+        zeroize_credentials(&mut self.credentials);
+    }
+}
+
+fn zeroize_credentials(credentials: &mut BTreeMap<String, String>) {
+    for secret in credentials.values_mut() {
+        secret.zeroize();
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]

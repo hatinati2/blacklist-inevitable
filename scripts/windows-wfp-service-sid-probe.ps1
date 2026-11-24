@@ -50,10 +50,10 @@ try {
     # Reproduce the installer's minimum executable read access and add only the
     # test service SID to this disposable runner's probe paths.
     $programFilesRoot = [System.IO.Path]::GetFullPath($env:ProgramFiles).TrimEnd('\')
-    Invoke-Icacls @($programFilesRoot, "/grant", "*\${sidText}:(RX)", "/C")
-    Invoke-Icacls @($probeRoot, "/grant", "*\${sidText}:(OI)(CI)(RX)", "/T", "/C")
-    Invoke-Icacls @($stateRoot, "/grant", "*\${sidText}:(OI)(CI)(RX)", "/T", "/C")
-    Invoke-Icacls @($reportDirectory, "/grant", "*\${sidText}:(OI)(CI)(M)", "/T", "/C")
+    Invoke-Icacls @($programFilesRoot, "/grant", ("*" + $sidText + ":(RX)"), "/C")
+    Invoke-Icacls @($probeRoot, "/grant", ("*" + $sidText + ":(OI)(CI)(RX)"), "/T", "/C")
+    Invoke-Icacls @($stateRoot, "/grant", ("*" + $sidText + ":(OI)(CI)(RX)"), "/T", "/C")
+    Invoke-Icacls @($reportDirectory, "/grant", ("*" + $sidText + ":(OI)(CI)(M)"), "/T", "/C")
 
     $sidTypeOutput = & (Join-Path $env:WINDIR "System32\sc.exe") sidtype $serviceName restricted 2>&1
     if ($LASTEXITCODE -ne 0) {

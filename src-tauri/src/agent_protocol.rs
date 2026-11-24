@@ -206,16 +206,18 @@ pub fn decode_agent_request(bytes: &[u8]) -> Result<AgentRequest, String> {
 
 /// Encode exactly one message for a byte-stream transport such as a Windows
 /// named pipe. The four-byte little-endian prefix is the JSON payload length.
-pub fn encode_agent_frame(request: &AgentRequest) -> Result<Vec<u8>, String> {
+pub fn encode_agent_frame(request: &AgentRequest) -> Result<Zeroizing<Vec<u8>>, String> {
     validate_agent_request(request)?;
-    let payload = serde_json::to_vec(request)
-        .map_err(|_| "The agent request could not be serialized.".to_string())?;
+    let payload = Zeroizing::new(
+        serde_json::to_vec(request)
+            .map_err(|_| "The agent request could not be serialized.".to_string())?,
+    );
     if payload.is_empty() || payload.len() > MAX_AGENT_REQUEST_BYTES {
         return Err("The agent request is empty or exceeds the maximum message size.".to_string());
     }
     let length = u32::try_from(payload.len())
         .map_err(|_| "The agent request exceeds the framing limit.".to_string())?;
-    let mut frame = Vec::with_capacity(AGENT_FRAME_HEADER_BYTES + payload.len());
+    let mut frame = Zeroizing::new(Vec::with_capacity(AGENT_FRAME_HEADER_BYTES + payload.len()));
     frame.extend_from_slice(&length.to_le_bytes());
     frame.extend_from_slice(&payload);
     Ok(frame)

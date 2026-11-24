@@ -50,6 +50,7 @@ The installer/deployment foundation does not turn the status-only service into a
 - does not use profile credentials to start an engine session; it receives only a bounded one-shot handoff and rejects `Connect` until the runtime exists;
 - does not start sing-box, create TUN, change routes/DNS, or activate firewall policy;
 - loads and validates recovery journal checkpoints at startup, but does not yet reconcile or restore the recorded operating-system resources and does not report a real VPN connection state;
+- has an exact-key, transactional WFP filter-removal primitive in the WFP backend, but it is not wired into startup recovery or an active policy lifecycle;
 - does not provide an Agent-owned all-protocol physical-egress kill switch or prove packet-level leak prevention.
 
 A successful unsigned CI smoke test proves resource packaging and the fail-closed no-service path only. It is not evidence that a trusted signed service was installed. The positive signed path still needs a release certificate and clean Windows 10/11 integration testing for service SID restrictions, LocalSystem token access, failed-upgrade rollback, service crash/reboot, and packet-capture leak acceptance.

@@ -7,7 +7,10 @@
 #[cfg(windows)]
 mod windows_service {
     use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+    use std::path::PathBuf;
     use std::sync::Mutex;
+
+    use crate::recovery_journal::RecoveryJournalStore;
 
     use windows_sys::Win32::Foundation::{
         CloseHandle, GetLastError, ERROR_CALL_NOT_IMPLEMENTED, ERROR_GEN_FAILURE, HANDLE,
@@ -91,6 +94,49 @@ mod windows_service {
         }
     }
 
+    fn open_recovery_journal_store() -> Result<(RecoveryJournalStore, usize), String> {
+        let program_data = std::env::var_os("ProgramData")
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "The Windows ProgramData directory is unavailable to the Agent service.".to_string())?;
+        let journal_directory = PathBuf::from(program_data)
+            .join("blacklist-inevitable")
+            .join("Agent");
+        let store = RecoveryJournalStore::open(journal_directory)?;
+        let unresolved = store.load_unresolved()?;
+        Ok((store, unresolved.len()))
+    }
+
+    fn recovery_diagnostics_detail(unresolved_sessions: usize) -> String {
+        let journal_state = if unresolved_sessions == 0 {
+            "no unresolved committed sessions were found".to_string()
+        } else {
+            format!("{unresolved_sessions} unresolved session(s) require recovery")
+        };
+        format!(
+            "The privileged Agent is running in status-only mode. Recovery journal validation completed: {journal_state}. No automatic network recovery is performed, and VPN connection operations remain disabled."
+        )
+    }
+
+    #[cfg(test)]
+    mod recovery_startup_tests {
+        use super::recovery_diagnostics_detail;
+
+        #[test]
+        fn startup_diagnostics_report_an_empty_journal_without_claiming_network_recovery() {
+            let detail = recovery_diagnostics_detail(0);
+            assert!(detail.contains("no unresolved committed sessions were found"));
+            assert!(detail.contains("No automatic network recovery is performed"));
+            assert!(detail.contains("VPN connection operations remain disabled"));
+        }
+
+        #[test]
+        fn startup_diagnostics_surface_unresolved_session_count() {
+            let detail = recovery_diagnostics_detail(3);
+            assert!(detail.contains("3 unresolved session(s) require recovery"));
+            assert!(detail.contains("VPN connection operations remain disabled"));
+        }
+    }
+
     unsafe extern "system" fn service_main(
         _argument_count: u32,
         _arguments: *mut windows_sys::core::PWSTR,
@@ -127,8 +173,29 @@ mod windows_service {
             let _guard = EVENT_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             STOP_EVENT.store(stop_event as isize, Ordering::Release);
         }
-        // The service is not reported as RUNNING until its protected, local-only
-        // pipe endpoint exists. A missing/invalid ACL therefore fails startup.
+        // The installer provisions this directory with a protected DACL for
+        // SYSTEM, Administrators, and this restricted service SID. Open it before
+        // accepting clients; a missing, corrupt, oversized, or unsafe journal
+        // blocks service startup rather than being silently ignored.
+        let (_recovery_journal_store, unresolved_sessions) = match open_recovery_journal_store() {
+            Ok(state) => state,
+            Err(error) => {
+                eprintln!("Agent recovery journal validation failed; service startup is blocked: {error}");
+                close_owned_handles(std::ptr::null_mut(), stop_event);
+                report_status(&status(SERVICE_STOPPED, 0, ERROR_GEN_FAILURE, 2, 0));
+                STATUS_HANDLE.store(0, Ordering::Release);
+                return;
+            }
+        };
+        if unresolved_sessions > 0 {
+            eprintln!(
+                "Agent recovery journal contains {unresolved_sessions} unresolved session(s); network operations remain disabled."
+            );
+        }
+        let startup_detail = recovery_diagnostics_detail(unresolved_sessions);
+
+        // The service is not reported as RUNNING until both its recovery journal
+        // and its protected, local-only pipe endpoint have been validated.
         let pipe = match crate::agent_pipe::create_listener() {
             Ok(pipe) => pipe,
             Err(error) => {
@@ -155,7 +222,7 @@ mod windows_service {
                 signal_stop();
                 exit_code = ERROR_GEN_FAILURE;
             } else if !STOP_REQUESTED.load(Ordering::Acquire) {
-                if let Err(error) = crate::agent_pipe::serve(pipe, stop_event) {
+                if let Err(error) = crate::agent_pipe::serve(pipe, stop_event, &startup_detail) {
                     if error.starts_with(crate::agent_pipe::FATAL_REVERT_ERROR_PREFIX) {
                         // The service thread may still carry a client impersonation
                         // token. Do not run any further cleanup/status code under it.

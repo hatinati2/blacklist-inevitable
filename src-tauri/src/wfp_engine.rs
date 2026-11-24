@@ -364,45 +364,13 @@ impl WfpEngine {
             FWPM_FILTER_FLAG_PERSISTENT,
         };
 
-        const MAX_OWNED_FILTERS: usize = 256;
-        const FWP_E_FILTER_NOT_FOUND: u32 = 0x8032_0003;
-
         self.ensure_open()?;
-        if records.len() > MAX_OWNED_FILTERS {
-            return Err("The recovery journal contains too many WFP filter identities.".into());
-        }
-        if records.is_empty() {
+        let exact_keys = validate_owned_filter_records(records)?;
+        if exact_keys.is_empty() {
             return Ok(FilterRemovalReport {
                 removed_filter_count: 0,
                 already_absent_filter_count: 0,
             });
-        }
-
-        let mut seen_keys = std::collections::BTreeSet::new();
-        let mut exact_keys = Vec::with_capacity(records.len());
-        for record in records {
-            let provider = parse_canonical_wfp_guid(&record.provider_key)?;
-            if !guid_eq(&provider, &PROVIDER_KEY) {
-                return Err("A recovery record names a WFP provider not owned by this Agent.".into());
-            }
-
-            let filter_key_text = record.filter_key.as_deref().ok_or_else(|| {
-                "A legacy WFP recovery record has no stable filter GUID; runtime IDs are not safe deletion keys.".to_string()
-            })?;
-            let filter_key = parse_canonical_wfp_guid(filter_key_text)?;
-            let layer_key = parse_canonical_wfp_guid(&record.layer_key)?;
-            let v4_layer = wfp_layer_guid(crate::wfp_policy::WfpLayer::AleAuthConnectV4);
-            let v6_layer = wfp_layer_guid(crate::wfp_policy::WfpLayer::AleAuthConnectV6);
-            if !guid_eq(&layer_key, &v4_layer) && !guid_eq(&layer_key, &v6_layer) {
-                return Err("A recovery record names a WFP layer outside the Agent's supported egress policy.".into());
-            }
-            if record.filter_id == Some(0) {
-                return Err("A recovery record contains an invalid zero WFP runtime filter ID.".into());
-            }
-            if !seen_keys.insert(guid_to_u128(&filter_key)) {
-                return Err("The recovery journal contains a duplicate stable WFP filter GUID.".into());
-            }
-            exact_keys.push((filter_key, layer_key, record.filter_id));
         }
 
         let begin = unsafe { FwpmTransactionBegin0(self.handle, 0) };
@@ -413,7 +381,8 @@ impl WfpEngine {
         let mut removed_filter_count = 0usize;
         let mut already_absent_filter_count = 0usize;
         let operation = (|| -> Result<(), String> {
-            for (key, expected_layer, expected_id) in &exact_keys {
+            for identity in &exact_keys {
+                let key = &identity.filter_key;
                 let mut filter_ptr = std::ptr::null_mut();
                 let lookup = unsafe { FwpmFilterGetByKey0(self.handle, key, &mut filter_ptr) };
                 if lookup == FWP_E_FILTER_NOT_FOUND {
@@ -437,9 +406,9 @@ impl WfpEngine {
                         || filter.filterId == 0
                         || !provider_matches
                         || !guid_eq(&filter.subLayerKey, &SUBLAYER_KEY)
-                        || !guid_eq(&filter.layerKey, expected_layer)
+                        || !guid_eq(&filter.layerKey, &identity.layer_key)
                         || filter.flags & FWPM_FILTER_FLAG_PERSISTENT == 0
-                        || expected_id.is_some_and(|id| id != filter.filterId)
+                        || identity.expected_runtime_id.is_some_and(|id| id != filter.filterId)
                     {
                         return Err("A journalled WFP filter key resolved to an object whose provider, sublayer, layer, persistence, or runtime identity did not match; deletion was refused.".into());
                     }
@@ -476,8 +445,8 @@ impl WfpEngine {
             };
         }
 
-        for (key, _, _) in &exact_keys {
-            verify_filter_absent(self.handle, key)?;
+        for identity in &exact_keys {
+            verify_filter_absent(self.handle, &identity.filter_key)?;
         }
 
         Ok(FilterRemovalReport {
@@ -691,6 +660,63 @@ impl WfpEngine {
 }
 
 #[cfg(windows)]
+#[derive(Clone, Copy)]
+struct OwnedFilterIdentity {
+    filter_key: GUID,
+    layer_key: GUID,
+    expected_runtime_id: Option<u64>,
+}
+
+/// Validate and canonicalize recovery identities without opening or mutating BFE.
+/// This keeps malformed, legacy, foreign-provider, and duplicate records out of
+/// the transactional deletion path and makes those boundaries unit-testable.
+#[cfg(windows)]
+fn validate_owned_filter_records(
+    records: &[crate::recovery_journal::FirewallFilterRecord],
+) -> Result<Vec<OwnedFilterIdentity>, String> {
+    const MAX_OWNED_FILTERS: usize = 256;
+
+    if records.len() > MAX_OWNED_FILTERS {
+        return Err("The recovery journal contains too many WFP filter identities.".into());
+    }
+
+    let v4_layer = wfp_layer_guid(crate::wfp_policy::WfpLayer::AleAuthConnectV4);
+    let v6_layer = wfp_layer_guid(crate::wfp_policy::WfpLayer::AleAuthConnectV6);
+    let mut seen_keys = std::collections::BTreeSet::new();
+    let mut validated = Vec::with_capacity(records.len());
+
+    for record in records {
+        let provider = parse_canonical_wfp_guid(&record.provider_key)?;
+        if !guid_eq(&provider, &PROVIDER_KEY) {
+            return Err("A recovery record names a WFP provider not owned by this Agent.".into());
+        }
+
+        let filter_key_text = record.filter_key.as_deref().ok_or_else(|| {
+            "A legacy WFP recovery record has no stable filter GUID; runtime IDs are not safe deletion keys.".to_string()
+        })?;
+        let filter_key = parse_canonical_wfp_guid(filter_key_text)?;
+        let layer_key = parse_canonical_wfp_guid(&record.layer_key)?;
+        if !guid_eq(&layer_key, &v4_layer) && !guid_eq(&layer_key, &v6_layer) {
+            return Err("A recovery record names a WFP layer outside the Agent's supported egress policy.".into());
+        }
+        if record.filter_id == Some(0) {
+            return Err("A recovery record contains an invalid zero WFP runtime filter ID.".into());
+        }
+        if !seen_keys.insert(guid_to_u128(&filter_key)) {
+            return Err("The recovery journal contains a duplicate stable WFP filter GUID.".into());
+        }
+
+        validated.push(OwnedFilterIdentity {
+            filter_key,
+            layer_key,
+            expected_runtime_id: record.filter_id,
+        });
+    }
+
+    Ok(validated)
+}
+
+#[cfg(windows)]
 fn parse_canonical_wfp_guid(value: &str) -> Result<GUID, String> {
     let parsed = uuid::Uuid::parse_str(value)
         .map_err(|_| "A recovery record contains an invalid WFP GUID.".to_string())?;
@@ -698,6 +724,84 @@ fn parse_canonical_wfp_guid(value: &str) -> Result<GUID, String> {
         return Err("A recovery record contains a non-canonical WFP GUID.".into());
     }
     Ok(GUID::from_u128(parsed.as_u128()))
+}
+
+#[cfg(all(test, windows))]
+mod owned_filter_validation_tests {
+    use super::{
+        guid_to_u128, validate_owned_filter_records, wfp_layer_guid, PROVIDER_KEY,
+    };
+    use crate::recovery_journal::FirewallFilterRecord;
+    use crate::wfp_policy::WfpLayer;
+
+    fn guid_string(value: &windows_sys::core::GUID) -> String {
+        uuid::Uuid::from_u128(guid_to_u128(value)).to_string()
+    }
+
+    fn record(key: u128, layer: WfpLayer) -> FirewallFilterRecord {
+        FirewallFilterRecord {
+            provider_key: guid_string(&PROVIDER_KEY),
+            filter_key: Some(uuid::Uuid::from_u128(key).to_string()),
+            layer_key: guid_string(&wfp_layer_guid(layer)),
+            filter_id: Some(42),
+        }
+    }
+
+    #[test]
+    fn accepts_stable_intent_without_runtime_id() {
+        let mut value = record(
+            0xac9a_f5e4_5e27_4dce_8b6a_19c175e233d1,
+            WfpLayer::AleAuthConnectV4,
+        );
+        value.filter_id = None;
+        let validated = validate_owned_filter_records(&[value]).unwrap();
+        assert_eq!(validated.len(), 1);
+        assert_eq!(validated[0].expected_runtime_id, None);
+    }
+
+    #[test]
+    fn rejects_legacy_runtime_id_only_record() {
+        let mut value = record(
+            0xac9a_f5e4_5e27_4dce_8b6a_19c175e233d1,
+            WfpLayer::AleAuthConnectV4,
+        );
+        value.filter_key = None;
+        assert!(validate_owned_filter_records(&[value]).is_err());
+    }
+
+    #[test]
+    fn rejects_foreign_provider_and_unsupported_layer() {
+        let mut foreign = record(
+            0xac9a_f5e4_5e27_4dce_8b6a_19c175e233d1,
+            WfpLayer::AleAuthConnectV4,
+        );
+        foreign.provider_key = "4d36e972-e325-11ce-bfc1-08002be10318".to_string();
+        assert!(validate_owned_filter_records(&[foreign]).is_err());
+
+        let mut unsupported = record(
+            0xac9a_f5e4_5e27_4dce_8b6a_19c175e233d1,
+            WfpLayer::AleAuthConnectV4,
+        );
+        unsupported.layer_key =
+            "4d36e972-e325-11ce-bfc1-08002be10318".to_string();
+        assert!(validate_owned_filter_records(&[unsupported]).is_err());
+    }
+
+    #[test]
+    fn rejects_duplicate_filter_keys_and_zero_runtime_ids() {
+        let value = record(
+            0xac9a_f5e4_5e27_4dce_8b6a_19c175e233d1,
+            WfpLayer::AleAuthConnectV4,
+        );
+        assert!(validate_owned_filter_records(&[value.clone(), value]).is_err());
+
+        let mut zero_id = record(
+            0xac9a_f5e4_5e27_4dce_8b6a_19c175e233d1,
+            WfpLayer::AleAuthConnectV4,
+        );
+        zero_id.filter_id = Some(0);
+        assert!(validate_owned_filter_records(&[zero_id]).is_err());
+    }
 }
 
 #[cfg(all(test, windows))]

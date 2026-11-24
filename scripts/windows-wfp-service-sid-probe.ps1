@@ -137,7 +137,7 @@ namespace BlacklistInevitable {
                 ExplicitAccessW entry = new ExplicitAccessW();
                 entry.grfAccessPermissions = accessMask;
                 entry.grfAccessMode = 1; // GRANT_ACCESS
-                entry.grfInheritance = 0; // NO_INHERITANCE; BFE manages WFP object inheritance.
+                entry.grfInheritance = 3; // CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE; cascade through WFP containers and objects.
                 entry.Trustee = new TrusteeW {
                     pMultipleTrustee = IntPtr.Zero,
                     MultipleTrusteeOperation = 0, // NO_MULTIPLE_TRUSTEE

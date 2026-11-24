@@ -32,6 +32,7 @@ pub struct AgentSecret(String);
 impl AgentSecret {
     pub fn new(value: String) -> Self { Self(value) }
     pub fn expose_secret(&self) -> &str { &self.0 }
+    pub fn into_string(mut self) -> String { std::mem::take(&mut self.0) }
 }
 
 impl Drop for AgentSecret {

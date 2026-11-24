@@ -79,7 +79,7 @@ function Stop-InstalledApplicationProcesses {
     )
 
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
-    $taskkill = Join-Path $env:WINDIR "System32\\taskkill.exe"
+    $taskkill = Join-Path $env:WINDIR "System32\taskkill.exe"
     do {
         $processes = @(Get-InstalledApplicationProcesses -ExecutablePath $ExecutablePath)
         if ($processes.Count -eq 0) {
@@ -170,7 +170,7 @@ finally {
     if (-not $appProcess.HasExited) {
         [void]$appProcess.CloseMainWindow()
         if (-not $appProcess.WaitForExit(5000)) {
-            $taskkill = Join-Path $env:WINDIR "System32\\taskkill.exe"
+            $taskkill = Join-Path $env:WINDIR "System32\taskkill.exe"
             & $taskkill /PID $appProcess.Id /T /F 2>&1 | Out-Null
             [void]$appProcess.WaitForExit(10000)
         }

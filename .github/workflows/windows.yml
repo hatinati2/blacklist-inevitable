@@ -71,6 +71,15 @@ jobs:
       - name: Run Rust tests
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc
 
+      - name: Run live WFP rollback-only integration smoke test
+        shell: pwsh
+        run: |
+          $bfe = Get-Service -Name BFE -ErrorAction Stop
+          if ($bfe.Status -ne [System.ServiceProcess.ServiceControllerStatus]::Running) {
+            throw "The Base Filtering Engine must be running for the WFP integration smoke test."
+          }
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc live_bfe_transaction_tests -- --ignored --nocapture
+
       - name: Check Rust
         run: cargo check --locked --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc
 

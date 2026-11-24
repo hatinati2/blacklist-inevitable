@@ -14,6 +14,8 @@
 - IPC frames use the shared four-byte little-endian length prefix, are bounded to 128 KiB, and have a finite 30-second read deadline. The implementation drains the pipe buffer incrementally so a payload larger than the kernel buffer cannot deadlock.
 - A replay guard is created after peer authentication. One request is handled per connection; malformed or unauthorized clients are dropped.
 - Only `GetStatus` and `GetDiagnostics` return a status-only response. `Connect`, `Disconnect`, and `Recover` are explicitly rejected.
+- Before reporting the service as running, the Agent opens the existing `%ProgramData%\\blacklist-inevitable\\Agent` recovery-journal directory provisioned by the signed installer and loads every committed checkpoint. Missing, unsafe, oversized, filename-mismatched, or corrupt journal state blocks service startup; malformed committed state is never skipped.
+- The validated journal store remains alive for the service lifetime. Status/diagnostics include the number of unresolved sessions. An unresolved journal does not trigger guessed cleanup: all VPN network operations remain disabled and the service explicitly reports that automatic network recovery is not implemented.
 - The unelevated desktop now has a status-only named-pipe client with a five-second timeout, bounded response framing, and request/response correlation. It verifies the server PID and session 0 from the pipe handle, then verifies the process token SID (LocalSystem) when token inspection is available; for a standard user that cannot open the SYSTEM token, it fails over to reading the pipe object's owner SID and accepts only LocalSystem. It sends no credentials and no network-mutating operations.
 - A separate `submit_agent_connect_request` command retrieves credentials only from the current user's Windows Credential Manager and sends one typed `Connect` frame over the same authenticated local pipe. The profile/credential schema is bounded and protocol-specific; imported and loaded secret values, IPC frames, and individually deserialized credential strings use zeroizing cleanup, and debug output redacts them. The service currently rejects `Connect` and drops the payload without persistence or logging; this is a handoff foundation, not a working connection. See `WINDOWS_AGENT_CREDENTIAL_HANDOFF.md`.
 - The Windows CI builds this executable independently from the Tauri desktop installer.
@@ -41,12 +43,12 @@ The named-pipe DACL is only the first access gate. Authorization also compares t
 
 ## Deliberate non-goals
 
-The installer/deployment foundation does not turn the status-only service into an operational VPN Agent. The service still:
+The installer/deployment foundation does not turn the status-only service into an operational VPN Agent. The service performs a fail-closed recovery-journal bootstrap only; it does not yet run recovery actions. The service still:
 
 - rejects `Connect`, `Disconnect`, and `Recover`;
 - does not use profile credentials to start an engine session; it receives only a bounded one-shot handoff and rejects `Connect` until the runtime exists;
 - does not start sing-box, create TUN, change routes/DNS, or activate firewall policy;
-- does not load or reconcile the recovery journal and does not report a real VPN connection state;
+- loads and validates recovery journal checkpoints at startup, but does not yet reconcile or restore the recorded operating-system resources and does not report a real VPN connection state;
 - does not provide an Agent-owned all-protocol physical-egress kill switch or prove packet-level leak prevention.
 
 A successful unsigned CI smoke test proves resource packaging and the fail-closed no-service path only. It is not evidence that a trusted signed service was installed. The positive signed path still needs a release certificate and clean Windows 10/11 integration testing for service SID restrictions, LocalSystem token access, failed-upgrade rollback, service crash/reboot, and packet-capture leak acceptance.

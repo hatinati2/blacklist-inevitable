@@ -2,7 +2,7 @@ name: Windows build
 
 on:
   push:
-    branches: [main, feat/wfp-transactional-removal-smoke, feat/wfp-restricted-service-sid-probe]
+    branches: [main, feat/wfp-transactional-removal-smoke, feat/wfp-restricted-service-sid-probe, feat/wfp-restricted-sid-minimum-acl]
   pull_request:
     branches: [main, feat/windows-agent-service-installer, feat/agent-credential-handoff, feat/agent-recovery-journal-bootstrap]
   workflow_dispatch:
@@ -71,15 +71,6 @@ jobs:
       - name: Run Rust tests
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc
 
-      - name: Run live WFP rollback-only integration smoke test
-        shell: pwsh
-        run: |
-          $bfe = Get-Service -Name BFE -ErrorAction Stop
-          if ($bfe.Status -ne [System.ServiceProcess.ServiceControllerStatus]::Running) {
-            throw "The Base Filtering Engine must be running for the WFP integration smoke test."
-          }
-          cargo test --locked --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc live_bfe_transaction_tests -- --ignored --nocapture
-
       - name: Probe WFP access under the restricted Agent service SID
         shell: pwsh
         run: ./scripts/windows-wfp-service-sid-probe.ps1 -AgentPath "src-tauri/target/release/blacklist-inevitable-wfp-acl-probe.exe"
@@ -92,6 +83,15 @@ jobs:
           path: ${{ runner.temp }}/wfp-service-sid-probe.json
           if-no-files-found: warn
           retention-days: 14
+
+      - name: Run live WFP rollback-only integration smoke test
+        shell: pwsh
+        run: |
+          $bfe = Get-Service -Name BFE -ErrorAction Stop
+          if ($bfe.Status -ne [System.ServiceProcess.ServiceControllerStatus]::Running) {
+            throw "The Base Filtering Engine must be running for the WFP integration smoke test."
+          }
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc live_bfe_transaction_tests -- --ignored --nocapture
 
       - name: Check Rust
         run: cargo check --locked --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc

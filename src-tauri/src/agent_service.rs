@@ -313,10 +313,10 @@ mod windows_service {
         STATUS_HANDLE.store(0, Ordering::Release);
     }
 
-    fn run_wfp_acl_probe_once() -> (bool, String) {
+    fn run_wfp_acl_probe_once() -> (bool, String, usize, usize) {
         let mut engine = match crate::wfp_engine::WfpEngine::open_local() {
             Ok(engine) => engine,
-            Err(error) => return (false, format!("FwpmEngineOpen0: {error}")),
+            Err(error) => return (false, format!("FwpmEngineOpen0: {error}"), 0, 0),
         };
 
         // TEST-NET endpoints and a synthetic interface identity are used only
@@ -348,8 +348,10 @@ mod windows_service {
                     "The restricted Agent service token completed BFE add/read-back/exact-delete/abort for {} filters; {} were confirmed rolled back.",
                     report.validated_filter_count, report.rolled_back_filter_count
                 ),
+                report.validated_filter_count,
+                report.rolled_back_filter_count,
             ),
-            Err(error) => (false, error),
+            Err(error) => (false, error, 0, 0),
         }
     }
 
@@ -386,7 +388,8 @@ mod windows_service {
             return;
         }
 
-        let (access_granted, detail) = run_wfp_acl_probe_once();
+        let (access_granted, detail, validated_filter_count, rolled_back_filter_count) =
+            run_wfp_acl_probe_once();
         let report = serde_json::json!({
             "schema_version": 1,
             "service_name": "BlacklistInevitableAgent",
@@ -394,6 +397,8 @@ mod windows_service {
             "service_sid_type": "RESTRICTED",
             "outcome": if access_granted { "access_granted" } else { "access_blocked" },
             "detail": detail,
+            "validated_filter_count": if access_granted { Some(validated_filter_count) } else { None },
+            "rolled_back_filter_count": if access_granted { Some(rolled_back_filter_count) } else { None },
             "traffic_filters_committed": false
         });
 

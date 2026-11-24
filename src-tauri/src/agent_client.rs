@@ -48,10 +48,13 @@ pub async fn get_status() -> DesktopAgentStatus {
 /// Send a single profile and its credentials to the authenticated Agent.
 /// The Agent currently rejects the operation; this transport slice establishes
 /// the bounded one-shot handoff without enabling network mutations.
-pub async fn connect_profile(
+pub fn connect_profile(
     profile: AgentProfile,
     credentials: BTreeMap<String, String>,
-) -> Result<AgentResponse, String> {
+) -> impl std::future::Future<Output = Result<AgentResponse, String>> {
+    // Convert to wiping values synchronously, before constructing the async
+    // transport future. Dropping an unpolled/cancelled future must not leave
+    // the input credential map in ordinary String allocations.
     let credentials = credentials
         .into_iter()
         .map(|(name, value)| (name, AgentSecret::new(value)))
@@ -66,7 +69,7 @@ pub async fn connect_profile(
             },
         },
     };
-    send_request(request).await
+    send_request(request)
 }
 
 async fn request_status() -> Result<AgentResponse, String> {

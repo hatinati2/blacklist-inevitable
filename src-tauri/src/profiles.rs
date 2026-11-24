@@ -6,8 +6,8 @@ use percent_encoding::percent_decode_str;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use url::Url;
-use zeroize::Zeroize;
 use uuid::Uuid;
+use zeroize::Zeroize;
 
 const MAX_IMPORT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_IMPORT_LINES: usize = 500;
@@ -25,7 +25,7 @@ pub struct ProfileSummary {
     pub unsupported_options: Vec<String>,
 }
 
-#[derive(Debug)]
+#[derive()]
 pub struct ParsedProfile {
     pub profile: ProfileSummary,
     pub credentials: BTreeMap<String, String>,
@@ -50,7 +50,6 @@ pub struct ImportIssue {
     pub reason: String,
 }
 
-#[derive(Debug)]
 pub struct ParsedImport {
     pub profiles: Vec<ParsedProfile>,
     pub rejected: Vec<ImportIssue>,

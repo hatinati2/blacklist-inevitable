@@ -15,7 +15,7 @@
 - A replay guard is created after peer authentication. One request is handled per connection; malformed or unauthorized clients are dropped.
 - Only `GetStatus` and `GetDiagnostics` return a status-only response. `Connect`, `Disconnect`, and `Recover` are explicitly rejected.
 - Before reporting the service as running, the Agent opens the existing `%ProgramData%\\blacklist-inevitable\\Agent` recovery-journal directory provisioned by the signed installer and loads every committed checkpoint. Missing, unsafe, oversized, filename-mismatched, or corrupt journal state blocks service startup; malformed committed state is never skipped.
-- The validated journal store remains alive for the service lifetime. Status/diagnostics include the number of unresolved sessions. An unresolved journal does not trigger guessed cleanup: all VPN network operations remain disabled and the service explicitly reports that automatic network recovery is not implemented.
+- Startup status/diagnostics include the number of unresolved sessions found. An unresolved journal does not trigger guessed cleanup: all VPN network operations remain disabled and the service explicitly reports that automatic network recovery is not implemented.
 - The unelevated desktop now has a status-only named-pipe client with a five-second timeout, bounded response framing, and request/response correlation. It verifies the server PID and session 0 from the pipe handle, then verifies the process token SID (LocalSystem) when token inspection is available; for a standard user that cannot open the SYSTEM token, it fails over to reading the pipe object's owner SID and accepts only LocalSystem. It sends no credentials and no network-mutating operations.
 - A separate `submit_agent_connect_request` command retrieves credentials only from the current user's Windows Credential Manager and sends one typed `Connect` frame over the same authenticated local pipe. The profile/credential schema is bounded and protocol-specific; imported and loaded secret values, IPC frames, and individually deserialized credential strings use zeroizing cleanup, and debug output redacts them. The service currently rejects `Connect` and drops the payload without persistence or logging; this is a handoff foundation, not a working connection. See `WINDOWS_AGENT_CREDENTIAL_HANDOFF.md`.
 - The Windows CI builds this executable independently from the Tauri desktop installer.
@@ -57,7 +57,7 @@ The desktop process does not launch the Agent directly. The per-machine NSIS ins
 
 ## Required next slices
 
-1. Integrate the recovery journal and WFP transaction backend. Persist exact state before OS mutations and verify during startup recovery.
+1. Implement exact startup reconciliation and rollback for recorded engine, TUN, route, DNS, and WFP resources; add durable WFP filter transactions with stable filter identities. The bootstrap now loads and validates the journal but deliberately performs no network cleanup or mutation.
 2. Add the Agent-owned connection runtime only after authorization and crash recovery are tested.
 3. Add Windows 10/11 integration tests for user logon/logoff, session switching, remote-client rejection, unauthorized SID rejection, malformed/oversized/replayed frames, stop during blocked pipe connect/read, service crash/reboot, and packet-capture leak acceptance.
 

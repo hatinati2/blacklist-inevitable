@@ -2,7 +2,7 @@ name: Windows build
 
 on:
   push:
-    branches: [main, feat/wfp-transactional-removal-smoke]
+    branches: [main, feat/wfp-transactional-removal-smoke, feat/wfp-restricted-service-sid-probe]
   pull_request:
     branches: [main, feat/windows-agent-service-installer, feat/agent-credential-handoff, feat/agent-recovery-journal-bootstrap]
   workflow_dispatch:
@@ -60,7 +60,7 @@ jobs:
       - name: Build dedicated Windows Agent service host
         env:
           BLACKLIST_AGENT_ONLY_BUILD: "1"
-        run: cargo build --locked --release --manifest-path src-tauri/Cargo.toml --bin blacklist-inevitable-agent
+        run: cargo build --locked --release --manifest-path src-tauri/Cargo.toml --bin blacklist-inevitable-agent --bin blacklist-inevitable-wfp-acl-probe
 
       - name: Format Rust sources
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --all
@@ -79,6 +79,19 @@ jobs:
             throw "The Base Filtering Engine must be running for the WFP integration smoke test."
           }
           cargo test --locked --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc live_bfe_transaction_tests -- --ignored --nocapture
+
+      - name: Probe WFP access under the restricted Agent service SID
+        shell: pwsh
+        run: ./scripts/windows-wfp-service-sid-probe.ps1 -AgentPath "src-tauri/target/release/blacklist-inevitable-wfp-acl-probe.exe"
+
+      - name: Upload restricted service SID WFP probe report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: wfp-restricted-service-sid-probe
+          path: ${{ runner.temp }}/wfp-service-sid-probe.json
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Check Rust
         run: cargo check --locked --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc

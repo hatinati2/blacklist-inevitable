@@ -36,6 +36,8 @@ The Windows CI now has an opt-in live-BFE smoke test that adds test filters, rea
 
 Before this primitive is wired into the service, the complete restricted-token access model still needs verification: opening the BFE engine and beginning a write transaction; ADD on the filter container; ADD_LINK on the Agent provider, target layers, and sublayer; and READ/DELETE on each Agent-owned filter. The installer currently does not provision these WFP ACLs.
 
+The Windows workflow now runs a diagnostic pass using a disposable SCM service with the exact Agent service name, LocalSystem account, and `SERVICE_SID_TYPE_RESTRICTED`. It invokes the same WFP validation path under that service token and records the first denied operation or confirms the full add/read-back/delete/abort path. The report is uploaded as a CI artifact. A blocked result is intentionally reported rather than treated as a passing WFP permission gate; workflow success only means the probe ran safely. No traffic filters are committed, and the temporary service is removed.
+
 This primitive is not yet wired into Agent startup reconciliation, does not install filters, and does not activate a kill switch. No WFP cleanup is attempted automatically until process, TUN, route, DNS, and WFP inventory reconciliation is complete.
 
 ## Security boundary and remaining work

@@ -37,11 +37,13 @@ try {
     Remove-Item -LiteralPath $reportPath -Force -ErrorAction SilentlyContinue
 
     $binaryPath = '"' + $probeExe + '"'
-    $createOutput = & (Join-Path $env:WINDIR "System32\sc.exe") create $serviceName "binPath= $binaryPath" "start= demand" "obj= LocalSystem" 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "Could not create the temporary Agent probe service: $($createOutput -join ' ')"
-    }
+    New-Service -Name $serviceName -DisplayName "blacklist-inevitable WFP ACL probe" -BinaryPathName $binaryPath -StartupType Manual -ErrorAction Stop | Out-Null
     $serviceCreated = $true
+
+    $serviceConfiguration = Get-CimInstance -ClassName Win32_Service -Filter "Name='$serviceName'"
+    if ($null -eq $serviceConfiguration -or $serviceConfiguration.StartName -ne "LocalSystem") {
+        throw "The temporary WFP probe service was not registered as LocalSystem."
+    }
 
     $account = [System.Security.Principal.NTAccount]::new("NT SERVICE\$serviceName")
     $serviceSid = $account.Translate([System.Security.Principal.SecurityIdentifier])
@@ -64,7 +66,7 @@ try {
         throw "SCM did not confirm SERVICE_SID_TYPE_RESTRICTED: $($queryOutput -join ' ')"
     }
 
-    $startOutput = & (Join-Path $env:WINDIR "System32\sc.exe") start $serviceName 2>&1
+    Start-Service -Name $serviceName -ErrorAction Stop
     $deadline = [DateTime]::UtcNow.AddSeconds(60)
     while ([DateTime]::UtcNow -lt $deadline) {
         if (Test-Path -LiteralPath $reportPath -PathType Leaf) { break }
@@ -72,7 +74,7 @@ try {
     }
     if (-not (Test-Path -LiteralPath $reportPath -PathType Leaf)) {
         $serviceQuery = & (Join-Path $env:WINDIR "System32\sc.exe") query $serviceName 2>&1
-        throw "The restricted Agent service did not produce its WFP ACL report. Start output: $($startOutput -join ' '). Service state: $($serviceQuery -join ' ')"
+        throw "The restricted Agent service did not produce its WFP ACL report. Service state: $($serviceQuery -join ' ')"
     }
 
     $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
@@ -92,7 +94,7 @@ try {
 }
 finally {
     if ($serviceCreated) {
-        & (Join-Path $env:WINDIR "System32\sc.exe") stop $serviceName 2>&1 | Out-Null
+        Stop-Service -Name $serviceName -Force -ErrorAction SilentlyContinue
         & (Join-Path $env:WINDIR "System32\sc.exe") delete $serviceName 2>&1 | Out-Null
         $deadline = [DateTime]::UtcNow.AddSeconds(15)
         while ([DateTime]::UtcNow -lt $deadline) {

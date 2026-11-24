@@ -434,6 +434,7 @@ impl WfpEngine {
                     let provider_matches = !filter.providerKey.is_null()
                         && guid_eq(unsafe { &*filter.providerKey }, &PROVIDER_KEY);
                     if !guid_eq(&filter.filterKey, key)
+                        || filter.filterId == 0
                         || !provider_matches
                         || !guid_eq(&filter.subLayerKey, &SUBLAYER_KEY)
                         || !guid_eq(&filter.layerKey, expected_layer)

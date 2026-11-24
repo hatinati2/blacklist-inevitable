@@ -30,7 +30,7 @@ For each checkpoint, the store validates the full record, creates a unique pendi
 
 The Windows-only `WfpEngine::remove_owned_filters` primitive accepts only journalled stable filter GUIDs. It refuses legacy runtime-ID-only entries, non-Agent provider GUIDs, unsupported layers, duplicate keys, and any read-back whose provider, sublayer, layer, persistence flag, or recorded runtime ID differs from the journal. It performs all exact deletions in one WFP transaction, commits once, then queries every key again and requires each to be absent.
 
-The optional runtime ID supports the crash window between writing a stable-key intent checkpoint and obtaining the BFE ID. A filter that is already absent is treated as idempotently cleaned, but journal removal is still the caller's responsibility after all other resource types are restored and independently verified.
+The optional runtime ID supports the crash window between writing a stable-key intent checkpoint and obtaining the BFE ID. A filter that is already absent is treated as idempotently cleaned, but journal removal is still the caller's responsibility after all other resource types are restored and independently verified. Microsoft documents that `FwpmFilterDeleteByKey0` requires DELETE access to the filter; before this primitive is wired into the restricted LocalSystem service, its WFP object security descriptors must be verified to grant the restricted Agent service SID the required read/delete access.
 
 This primitive is not yet wired into Agent startup reconciliation, does not install filters, and does not activate a kill switch. No WFP cleanup is attempted automatically until process, TUN, route, DNS, and WFP inventory reconciliation is complete.
 

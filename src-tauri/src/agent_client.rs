@@ -13,6 +13,7 @@ use zeroize::Zeroizing;
 
 use crate::agent_protocol::{
     encode_agent_frame, AgentConnectPayload, AgentOperation, AgentProfile, AgentRequest,
+    AgentSecret,
     AgentResponse, AgentResponseStatus, AGENT_PROTOCOL_VERSION,
 };
 
@@ -51,6 +52,10 @@ pub async fn connect_profile(
     profile: AgentProfile,
     credentials: BTreeMap<String, String>,
 ) -> Result<AgentResponse, String> {
+    let credentials = credentials
+        .into_iter()
+        .map(|(name, value)| (name, AgentSecret::new(value)))
+        .collect();
     let request = AgentRequest {
         version: AGENT_PROTOCOL_VERSION,
         request_id: uuid::Uuid::new_v4().simple().to_string(),

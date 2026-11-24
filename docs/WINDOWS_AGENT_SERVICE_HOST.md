@@ -42,6 +42,14 @@ The active user's reference token is queried with `WTSQueryUserToken`. Microsoft
 
 The named-pipe DACL is only the first access gate. Authorization also compares the actual impersonated client SID and session ID; it does not trust the DACL alone. The thread is reverted before response dispatch. No privileged filesystem or networking operation is performed while impersonating the client.
 
+### Restricted service SID and WFP access
+
+The installer configures the Agent service with `SERVICE_SID_TYPE_RESTRICTED`. This causes Windows to evaluate both the normal token SIDs and the token's restricted SID list on protected-object access checks. WFP's default engine ACL does not by itself prove that this restricted token can run the Agent's future filter lifecycle.
+
+Before WFP operations are enabled, the provisioned ACLs must cover the complete operation set: `FWPM_ACTRL_OPEN` and `FWPM_ACTRL_BEGIN_WRITE_TXN` on the BFE engine; `FWPM_ACTRL_ADD` on the filter container; `FWPM_ACTRL_ADD_LINK` on the Agent provider, target ALE layers, and sublayer; and `FWPM_ACTRL_READ` plus standard `DELETE` on every Agent-owned filter. These are distinct access checks; granting only filter deletion is insufficient. ACL provisioning must preserve existing BFE permissions and be verified under the actual restricted service token before the service calls WFP.
+
+The rollback-only WFP smoke test in Windows CI runs as the hosted runner's administrative account. It verifies the live BFE add/read-back/exact-delete/abort sequence, but does not validate the restricted service SID's effective permissions. The WFP backend remains disconnected from service startup until that separate service-token ACL test passes.
+
 ## Deliberate non-goals
 
 The installer/deployment foundation does not turn the status-only service into an operational VPN Agent. The service performs a fail-closed recovery-journal bootstrap only; it does not yet run recovery actions. The service still:

@@ -124,7 +124,7 @@ async fn request_windows(request: AgentRequest) -> Result<AgentResponse, String>
 
         // The serialized request contains credentials for Connect. Zeroize it
         // on every return path, including timeout and pipe errors.
-        let frame = Zeroizing::new(encode_agent_frame(&request)?);
+        let frame = encode_agent_frame(&request)?;
         pipe.write_all(&frame)
             .await
             .map_err(|_| "The Agent IPC request could not be written.".to_string())?;

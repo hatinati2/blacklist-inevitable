@@ -808,13 +808,13 @@ mod owned_filter_validation_tests {
 
 #[cfg(all(test, windows))]
 mod recovery_guid_tests {
-    use super::parse_canonical_wfp_guid;
+    use super::{guid_eq, parse_canonical_wfp_guid};
 
     #[test]
     fn parses_canonical_filter_guids_case_insensitively() {
         let lower = parse_canonical_wfp_guid("ac9af5e4-5e27-4dce-8b6a-19c175e233d1").unwrap();
         let upper = parse_canonical_wfp_guid("AC9AF5E4-5E27-4DCE-8B6A-19C175E233D1").unwrap();
-        assert_eq!(lower, upper);
+        assert!(guid_eq(&lower, &upper));
     }
 
     #[test]

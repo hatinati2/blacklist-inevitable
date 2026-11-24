@@ -30,7 +30,7 @@ For each checkpoint, the store validates the full record, creates a unique pendi
 
 The journal is not an authentication or integrity mechanism. Its trust depends on the service-owned directory ACL and the service's validation of every record. The service must not open a user-writable directory as its journal root. Reparse-point entries are rejected, and files are never selected using a caller-supplied path.
 
-The current code is not yet connected to `ConnectionCoordinator` or a Windows service. The following are still release-blocking work:
+The Windows Agent now opens this journal during service startup and fails closed if committed state is missing, unsafe, or corrupt. It reports unresolved-session counts but does not yet reconcile those records with `ConnectionCoordinator` or restore operating-system resources. The following are still release-blocking work:
 
 - Provision and verify the service-owned directory DACL during agent installation.
 - Wire a checkpoint before each OS mutation and after each successful mutation.

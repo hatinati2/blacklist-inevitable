@@ -60,7 +60,7 @@ jobs:
       - name: Build dedicated Windows Agent service host
         env:
           BLACKLIST_AGENT_ONLY_BUILD: "1"
-        run: cargo build --locked --release --manifest-path src-tauri/Cargo.toml --bin blacklist-inevitable-agent
+        run: cargo build --locked --release --manifest-path src-tauri/Cargo.toml --bins
 
       - name: Format Rust sources
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --all
@@ -82,7 +82,7 @@ jobs:
 
       - name: Probe WFP access under the restricted Agent service SID
         shell: pwsh
-        run: ./scripts/windows-wfp-service-sid-probe.ps1 -AgentPath "src-tauri/target/release/blacklist-inevitable-agent.exe"
+        run: ./scripts/windows-wfp-service-sid-probe.ps1 -AgentPath "src-tauri/target/release/blacklist-inevitable-wfp-acl-probe.exe"
 
       - name: Upload restricted service SID WFP probe report
         if: always()

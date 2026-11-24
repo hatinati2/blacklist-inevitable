@@ -498,6 +498,17 @@ mod tests {
     }
 
     #[test]
+    fn agent_secret_serializes_as_a_string_but_debug_is_redacted() {
+        let secret = AgentSecret::new("never-log-this".to_string());
+        assert_eq!(serde_json::to_string(&secret).unwrap(), "\"never-log-this\"");
+        assert_eq!(format!("{secret:?}"), "[REDACTED]");
+
+        let decoded: AgentSecret = serde_json::from_str("\"round-trip-secret\"").unwrap();
+        assert_eq!(decoded.expose_secret(), "round-trip-secret");
+        assert_eq!(format!("{decoded:?}"), "[REDACTED]");
+    }
+
+    #[test]
     fn decodes_a_valid_connect_request_without_putting_secrets_in_profile_metadata() {
         let bytes = serde_json::to_vec(&connect_request()).unwrap();
         let request = decode_agent_request(&bytes).unwrap();

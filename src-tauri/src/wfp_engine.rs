@@ -364,6 +364,8 @@ impl WfpEngine {
             FWPM_FILTER_FLAG_PERSISTENT,
         };
 
+        const FWP_E_FILTER_NOT_FOUND: u32 = 0x8032_0003;
+
         self.ensure_open()?;
         let exact_keys = validate_owned_filter_records(records)?;
         if exact_keys.is_empty() {

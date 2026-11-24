@@ -236,8 +236,13 @@ pub fn get_credentials(profile_id: &str) -> Result<SecretCredentials, String> {
             .get_password()
             .map_err(|_| "Credentials for this profile are missing from Windows Credential Manager.".to_string())?,
     );
-    let values = serde_json::from_str(&serialized)
-        .map_err(|_| "Stored profile credentials are corrupted.".to_string())?;
+    let secret_values: BTreeMap<String, crate::agent_protocol::AgentSecret> =
+        serde_json::from_str(&serialized)
+            .map_err(|_| "Stored profile credentials are corrupted.".to_string())?;
+    let values = secret_values
+        .into_iter()
+        .map(|(name, secret)| (name, secret.into_string()))
+        .collect();
     Ok(SecretCredentials { values })
 }
 

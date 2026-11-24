@@ -1,10 +1,11 @@
 use std::collections::{BTreeMap, HashSet};
+use std::fmt;
 use std::sync::Mutex;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use zeroize::{Zeroize, Zeroizing};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::connection_state::ConnectionSnapshot;
 use crate::profiles::ProfileSummary;
@@ -23,6 +24,39 @@ const MAX_OPTION_VALUE_BYTES: usize = 4096;
 const MAX_CREDENTIALS: usize = 4;
 const MAX_CREDENTIAL_KEY_BYTES: usize = 32;
 const MAX_CREDENTIAL_VALUE_BYTES: usize = 8192;
+
+/// A credential string that erases its owned bytes when dropped. Deserializing
+/// each value into this type also protects partially decoded Connect requests.
+pub struct AgentSecret(String);
+
+impl AgentSecret {
+    pub fn new(value: String) -> Self { Self(value) }
+    pub fn expose_secret(&self) -> &str { &self.0 }
+}
+
+impl Drop for AgentSecret {
+    fn drop(&mut self) { self.0.zeroize(); }
+}
+
+impl fmt::Debug for AgentSecret {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("[REDACTED]")
+    }
+}
+
+impl Serialize for AgentSecret {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where S: Serializer {
+        serializer.serialize_str(self.expose_secret())
+    }
+}
+
+impl<'de> Deserialize<'de> for AgentSecret {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: Deserializer<'de> {
+        String::deserialize(deserializer).map(Self::new)
+    }
+}
 
 /// A strict, secret-free profile representation supplied by the unelevated UI.
 /// The agent re-validates this data and never accepts an arbitrary engine JSON,
@@ -75,16 +109,7 @@ impl From<ProfileSummary> for AgentProfile {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentConnectPayload {
     pub profile: AgentProfile,
-    pub credentials: BTreeMap<String, String>,
-}
-
-impl Drop for AgentConnectPayload {
-    fn drop(&mut self) {
-        for secret in self.credentials.values_mut() {
-            secret.zeroize();
-        }
-        self.credentials.clear();
-    }
+    pub credentials: BTreeMap<String, AgentSecret>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -156,7 +181,7 @@ impl AgentResponse {
         request_id: String,
         connection: Option<ConnectionSnapshot>,
         detail: impl Into<String>,
-        credentials: &BTreeMap<String, String>,
+        credentials: &BTreeMap<String, AgentSecret>,
     ) -> Self {
         Self {
             version: AGENT_PROTOCOL_VERSION,
@@ -388,15 +413,15 @@ fn validate_profile(profile: &AgentProfile) -> Result<(), String> {
 
 fn validate_credentials(
     protocol: &str,
-    credentials: &BTreeMap<String, String>,
+    credentials: &BTreeMap<String, AgentSecret>,
 ) -> Result<(), String> {
     if credentials.len() > MAX_CREDENTIALS {
         return Err("The profile contains too many credential fields.".to_string());
     }
     for (key, value) in credentials {
         if key.len() > MAX_CREDENTIAL_KEY_BYTES
-            || value.is_empty()
-            || value.len() > MAX_CREDENTIAL_VALUE_BYTES
+            || value.expose_secret().is_empty()
+            || value.expose_secret().len() > MAX_CREDENTIAL_VALUE_BYTES
         {
             return Err("A profile credential is empty or exceeds the size limit.".to_string());
         }
@@ -429,10 +454,10 @@ fn validate_credentials(
 
 fn sanitize_detail(
     mut detail: String,
-    credentials: &BTreeMap<String, String>,
+    credentials: &BTreeMap<String, AgentSecret>,
 ) -> String {
-    for secret in credentials.values().filter(|value| !value.is_empty()) {
-        detail = detail.replace(secret, "[redacted]");
+    for secret in credentials.values().filter(|value| !value.expose_secret().is_empty()) {
+        detail = detail.replace(secret.expose_secret(), "[redacted]");
     }
     detail
         .chars()
@@ -465,7 +490,7 @@ mod tests {
                     },
                     credentials: BTreeMap::from([(
                         "password".to_string(),
-                        "one-shot-secret".to_string(),
+                        AgentSecret::new("one-shot-secret".to_string()),
                     )]),
                 },
             },
@@ -481,7 +506,7 @@ mod tests {
             panic!("expected Connect operation");
         };
         assert_eq!(payload.profile.protocol, "trojan");
-        assert_eq!(payload.credentials.get("password").map(String::as_str), Some("one-shot-secret"));
+        assert_eq!(payload.credentials.get("password").map(AgentSecret::expose_secret), Some("one-shot-secret"));
 
         let public_profile = serde_json::to_string(&ProfileSummary::from(payload.profile.clone())).unwrap();
         assert!(!public_profile.contains("one-shot-secret"));
@@ -518,7 +543,7 @@ mod tests {
     fn rejects_credentials_not_allowed_for_the_selected_protocol() {
         let mut request = connect_request();
         if let AgentOperation::Connect { payload } = &mut request.operation {
-            payload.credentials.insert("uuid".to_string(), "unexpected".to_string());
+            payload.credentials.insert("uuid".to_string(), AgentSecret::new("unexpected".to_string()));
         }
         assert!(validate_agent_request(&request).is_err());
     }
@@ -533,7 +558,7 @@ mod tests {
 
         let mut request = connect_request();
         if let AgentOperation::Connect { payload } = &mut request.operation {
-            payload.credentials.insert("password".to_string(), "x".repeat(MAX_CREDENTIAL_VALUE_BYTES + 1));
+            payload.credentials.insert("password".to_string(), AgentSecret::new("x".repeat(MAX_CREDENTIAL_VALUE_BYTES + 1)));
         }
         assert!(validate_agent_request(&request).is_err());
     }
@@ -654,8 +679,10 @@ mod tests {
 
     #[test]
     fn agent_response_does_not_include_credentials() {
-        let credentials =
-            BTreeMap::from([("password".to_string(), "sensitive-passphrase".to_string())]);
+        let credentials = BTreeMap::from([(
+            "password".to_string(),
+            AgentSecret::new("sensitive-passphrase".to_string()),
+        )]);
         let response = AgentResponse::failed_redacted(
             "request-01".to_string(),
             None,

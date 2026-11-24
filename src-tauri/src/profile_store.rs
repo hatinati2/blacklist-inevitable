@@ -1,15 +1,45 @@
 use std::collections::BTreeMap;
 use std::fs;
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::profiles::{ParsedProfile, ProfileSummary};
 
 const SERVICE_NAME: &str = "blacklist-inevitable";
 static PROFILE_STORE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+/// Credential map whose values are erased before their allocations are freed.
+pub struct SecretCredentials {
+    values: BTreeMap<String, String>,
+}
+
+impl SecretCredentials {
+    pub fn into_map(mut self) -> BTreeMap<String, String> {
+        std::mem::take(&mut self.values)
+    }
+}
+
+impl Deref for SecretCredentials {
+    type Target = BTreeMap<String, String>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.values
+    }
+}
+
+impl Drop for SecretCredentials {
+    fn drop(&mut self) {
+        for secret in self.values.values_mut() {
+            secret.zeroize();
+        }
+        self.values.clear();
+    }
+}
 
 fn lock_profile_store() -> Result<MutexGuard<'static, ()>, String> {
     PROFILE_STORE_LOCK
@@ -77,8 +107,10 @@ fn write_file(path: &Path, file: &ProfileFile) -> Result<(), String> {
 fn store_credentials(profile_id: &str, credentials: &std::collections::BTreeMap<String, String>) -> Result<(), String> {
     let entry = keyring::Entry::new(SERVICE_NAME, profile_id)
         .map_err(|_| "Windows Credential Manager is not available.".to_string())?;
-    let serialized = serde_json::to_string(credentials)
-        .map_err(|_| "Could not encode profile credentials.".to_string())?;
+    let serialized = Zeroizing::new(
+        serde_json::to_string(credentials)
+            .map_err(|_| "Could not encode profile credentials.".to_string())?,
+    );
     entry
         .set_password(&serialized)
         .map_err(|_| "Windows Credential Manager could not store this profile's credentials.".to_string())
@@ -145,7 +177,7 @@ pub fn add_profiles(app: &AppHandle, incoming: Vec<ParsedProfile>) -> Result<Vec
             };
         }
         file.profiles.push(parsed.profile.clone());
-        added.push(parsed.profile);
+        added.push(parsed.profile.clone());
     }
 
     if let Err(error) = write_file(&path, &file) {
@@ -196,17 +228,25 @@ pub fn remove_profile(app: &AppHandle, profile_id: &str) -> Result<(), String> {
 }
 
 #[cfg(windows)]
-pub fn get_credentials(profile_id: &str) -> Result<BTreeMap<String, String>, String> {
+pub fn get_credentials(profile_id: &str) -> Result<SecretCredentials, String> {
     let entry = keyring::Entry::new(SERVICE_NAME, profile_id)
         .map_err(|_| "Windows Credential Manager is not available.".to_string())?;
-    let serialized = entry
-        .get_password()
-        .map_err(|_| "Credentials for this profile are missing from Windows Credential Manager.".to_string())?;
-    serde_json::from_str(&serialized)
-        .map_err(|_| "Stored profile credentials are corrupted.".to_string())
+    let serialized = Zeroizing::new(
+        entry
+            .get_password()
+            .map_err(|_| "Credentials for this profile are missing from Windows Credential Manager.".to_string())?,
+    );
+    let secret_values: BTreeMap<String, crate::agent_protocol::AgentSecret> =
+        serde_json::from_str(&serialized)
+            .map_err(|_| "Stored profile credentials are corrupted.".to_string())?;
+    let values = secret_values
+        .into_iter()
+        .map(|(name, secret)| (name, secret.into_string()))
+        .collect();
+    Ok(SecretCredentials { values })
 }
 
 #[cfg(not(windows))]
-pub fn get_credentials(_profile_id: &str) -> Result<BTreeMap<String, String>, String> {
+pub fn get_credentials(_profile_id: &str) -> Result<SecretCredentials, String> {
     Err("Secure profile storage is currently supported on Windows only.".to_string())
 }

@@ -7,6 +7,7 @@ use tokio::net::TcpStream;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio::time::timeout;
+use zeroize::Zeroizing;
 
 use crate::engine::{EngineDescriptor, ENGINE_TARGETS};
 use crate::profile_store;
@@ -60,6 +61,26 @@ pub async fn get_agent_status() -> crate::agent_client::DesktopAgentStatus {
     crate::agent_client::get_status().await
 }
 
+/// Send the selected profile and its one-shot credentials to the authenticated
+/// Windows Agent. The current Agent rejects Connect until recovery and tunnel
+/// runtime support is implemented; this command does not establish a VPN.
+#[tauri::command]
+pub async fn submit_agent_connect_request(
+    app: AppHandle,
+    profile_id: String,
+) -> Result<crate::agent_protocol::AgentResponse, String> {
+    let profile = profile_store::list_profiles(&app)?
+        .into_iter()
+        .find(|profile| profile.id == profile_id)
+        .ok_or_else(|| "Profile not found.".to_string())?;
+    let credentials = profile_store::get_credentials(&profile.id)?.into_map();
+    crate::agent_client::connect_profile(
+        crate::agent_protocol::AgentProfile::from(profile),
+        credentials,
+    )
+    .await
+}
+
 #[tauri::command]
 pub async fn get_app_status(app: AppHandle) -> AppStatus {
     let supervisor = app.state::<ProcessSupervisor>().inner().clone();
@@ -92,6 +113,7 @@ pub fn get_profiles(app: AppHandle) -> Result<Vec<ProfileSummary>, String> {
 
 #[tauri::command]
 pub fn import_profiles(app: AppHandle, input: String) -> Result<ImportResponse, String> {
+    let input = Zeroizing::new(input);
     let parsed = parse_import_text(&input)?;
     let rejected = parsed.rejected;
     let imported = profile_store::add_profiles(&app, parsed.profiles)?;

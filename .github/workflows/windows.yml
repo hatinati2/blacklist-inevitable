@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main, feat/windows-agent-service-installer]
+    branches: [main, feat/windows-agent-service-installer, feat/agent-credential-handoff, feat/agent-recovery-journal-bootstrap]
   workflow_dispatch:
 
 permissions:

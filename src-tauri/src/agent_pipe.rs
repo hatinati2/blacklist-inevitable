@@ -6,6 +6,7 @@
 
 use std::slice;
 use std::time::{Duration, Instant};
+use zeroize::Zeroizing;
 
 use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, LocalFree, ERROR_IO_PENDING, ERROR_OPERATION_ABORTED,
@@ -391,7 +392,7 @@ fn read_one_request(pipe: HANDLE, stop_event: HANDLE) -> Result<crate::agent_pro
         return Err("The Agent IPC frame length is invalid.".into());
     }
 
-    let mut payload = vec![0u8; announced];
+    let mut payload = Zeroizing::new(vec![0u8; announced]);
     read_exact_pipe(pipe, stop_event, &mut payload, deadline)?;
 
     crate::agent_protocol::decode_agent_request(&payload)

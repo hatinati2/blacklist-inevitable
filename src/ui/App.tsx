@@ -195,7 +195,7 @@ export default function App() {
   }, [refreshStatus, refreshAgentStatus, refreshLocalProxyStatus, refreshProfiles, refreshRealDelaySettings]);
 
   const engines = status?.engines ?? [
-    { kind: "sing-box", binaryName: "sing-box", integrationStage: "implemented · preflight only" },
+    { kind: "sing-box", binaryName: "sing-box", integrationStage: "local SOCKS5 + preflight" },
     { kind: "Xray-core", binaryName: "xray", integrationStage: "planned" },
     { kind: "Mihomo", binaryName: "mihomo", integrationStage: "planned" },
   ];

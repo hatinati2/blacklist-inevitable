@@ -98,6 +98,7 @@
     "resources": {
       "target/release/blacklist-inevitable-agent.exe": "resources/blacklist-inevitable-agent.exe",
       "../scripts/windows-agent-service.ps1": "resources/windows-agent-service.ps1",
+      "../scripts/windows-agent-wfp-acl.ps1": "resources/windows-agent-wfp-acl.ps1",
       "windows/agent-publisher-thumbprint.txt": "resources/agent-publisher-thumbprint.txt"
     },
     "windows": {

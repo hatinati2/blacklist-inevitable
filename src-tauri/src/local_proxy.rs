@@ -79,34 +79,36 @@ pub struct LocalProxyRuntime {
 impl LocalProxyRuntime {
     pub async fn status(&self, supervisor: &ProcessSupervisor) -> LocalProxyStatus {
         let mut inner = self.inner.lock().await;
-        if let Some(session) = inner.active.as_mut() {
-            match session.child.try_wait() {
-                Ok(Some(_)) => {
-                    let mut exited = inner.active.take().expect("the exited session was present");
-                    let config_path = exited.config_path.clone();
-                    drop(inner);
-                    if remove_config_file(&config_path, supervisor).is_err() {
-                        supervisor.mark_cleanup_unhealthy();
-                        return LocalProxyStatus::inactive(
-                            "The proxy engine exited, but its credential-bearing config could not be removed; engine cleanup is blocked.",
-                        );
-                    }
-                    exited.username.zeroize();
-                    exited.password.zeroize();
-                    drop(exited);
-                    self.changed.notify_waiters();
-                    return LocalProxyStatus::inactive(
-                        "The local proxy engine exited. Its temporary configuration was removed.",
-                    );
-                }
-                Ok(None) => {}
-                Err(_) => {
+        let process_state = inner
+            .active
+            .as_mut()
+            .map(|session| session.child.try_wait());
+        match process_state {
+            Some(Ok(Some(_))) => {
+                let mut exited = inner.active.take().expect("the exited session was present");
+                let config_path = exited.config_path.clone();
+                drop(inner);
+                if remove_config_file(&config_path, supervisor).is_err() {
                     supervisor.mark_cleanup_unhealthy();
                     return LocalProxyStatus::inactive(
-                        "The local proxy process state could not be verified; engine cleanup is blocked.",
+                        "The proxy engine exited, but its credential-bearing config could not be removed; engine cleanup is blocked.",
                     );
                 }
+                exited.username.zeroize();
+                exited.password.zeroize();
+                drop(exited);
+                self.changed.notify_one();
+                return LocalProxyStatus::inactive(
+                    "The local proxy engine exited. Its temporary configuration was removed.",
+                );
             }
+            Some(Err(_)) => {
+                supervisor.mark_cleanup_unhealthy();
+                return LocalProxyStatus::inactive(
+                    "The local proxy process state could not be verified; engine cleanup is blocked.",
+                );
+            }
+            Some(Ok(None)) | None => {}
         }
 
         match inner.active.as_ref() {
@@ -173,7 +175,7 @@ impl LocalProxyRuntime {
             Err(error) => Err(error),
         };
         drop(inner);
-        self.changed.notify_waiters();
+        self.changed.notify_one();
         response
     }
 
@@ -233,8 +235,10 @@ impl LocalProxyRuntime {
                 .map_err(|_| "Could not encode the local proxy configuration.".to_string())?,
         );
         zeroize_json(&mut config);
-        fs::write(&config_path, &bytes)
-            .map_err(|_| "Could not write the temporary local proxy configuration.".to_string())?;
+        if fs::write(&config_path, &bytes).is_err() {
+            let _ = remove_config_file(&config_path, supervisor);
+            return Err("Could not write the temporary local proxy configuration.".to_string());
+        }
 
         let mut command = Command::new(&binary);
         command
@@ -255,9 +259,11 @@ impl LocalProxyRuntime {
         };
 
         if let Err(error) = supervisor.assign_child(&mut child).await {
-            let _ = child.start_kill();
-            let _ = timeout(STOP_TIMEOUT, child.wait()).await;
-            let _ = remove_config_file(&config_path, supervisor);
+            if stop_child(&mut child).await {
+                let _ = remove_config_file(&config_path, supervisor);
+            } else {
+                supervisor.mark_cleanup_unhealthy();
+            }
             return Err(error);
         }
 
@@ -318,7 +324,7 @@ impl LocalProxyRuntime {
         }
 
         drop(session);
-        self.changed.notify_waiters();
+        self.changed.notify_one();
         Ok(LocalProxyStatus::inactive("The local proxy was stopped and its temporary configuration was removed."))
     }
 }
@@ -522,3 +528,86 @@ pub fn recover_stale_configs(app: &AppHandle) -> Result<(), String> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zeroize_json_clears_nested_credential_strings() {
+        let mut value = serde_json::json!({
+            "inbounds": [{"users": [{"username": "local-user", "password": "local-password"}]}],
+            "nested": ["another-secret", {"token": "test-token"}]
+        });
+        zeroize_json(&mut value);
+        assert_eq!(value["inbounds"][0]["users"][0]["username"], "");
+        assert_eq!(value["inbounds"][0]["users"][0]["password"], "");
+        assert_eq!(value["nested"][0], "");
+        assert_eq!(value["nested"][1]["token"], "");
+    }
+
+    #[test]
+    fn loopback_port_reservation_returns_an_available_local_port() {
+        let port = reserve_loopback_port().expect("reserve a loopback port");
+        assert_ne!(port, 0);
+        let listener = TcpListener::bind(("127.0.0.1", port))
+            .expect("the returned port is released and bindable");
+        drop(listener);
+    }
+
+    #[tokio::test]
+    async fn startup_probe_requires_and_verifies_socks_username_password() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind mock SOCKS listener");
+        let port = listener.local_addr().expect("read mock address").port();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept probe");
+            let mut greeting = [0u8; 3];
+            stream.read_exact(&mut greeting).await.expect("read greeting");
+            assert_eq!(greeting, [0x05, 0x01, 0x02]);
+            stream.write_all(&[0x05, 0x02]).await.expect("select auth");
+
+            let mut version_and_user_len = [0u8; 2];
+            stream.read_exact(&mut version_and_user_len).await.expect("read auth header");
+            assert_eq!(version_and_user_len[0], 0x01);
+            let mut username = vec![0u8; version_and_user_len[1] as usize];
+            stream.read_exact(&mut username).await.expect("read username");
+            let mut password_len = [0u8; 1];
+            stream.read_exact(&mut password_len).await.expect("read password length");
+            let mut password = vec![0u8; password_len[0] as usize];
+            stream.read_exact(&mut password).await.expect("read password");
+            assert_eq!(username, b"local-user");
+            assert_eq!(password, b"local-password");
+            username.fill(0);
+            password.fill(0);
+            stream.write_all(&[0x01, 0x00]).await.expect("accept auth");
+        });
+
+        verify_socks_authentication(port, "local-user", "local-password")
+            .await
+            .expect("SOCKS server accepts generated credentials");
+        server.await.expect("mock SOCKS task completes");
+    }
+
+    #[tokio::test]
+    async fn startup_probe_rejects_a_listener_without_username_password_auth() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind mock SOCKS listener");
+        let port = listener.local_addr().expect("read mock address").port();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept probe");
+            let mut greeting = [0u8; 3];
+            stream.read_exact(&mut greeting).await.expect("read greeting");
+            stream.write_all(&[0x05, 0x00]).await.expect("select no auth");
+        });
+
+        let result = verify_socks_authentication(port, "local-user", "local-password").await;
+        assert!(result
+            .expect_err("unauthenticated listener is rejected")
+            .contains("did not require username/password"));
+        server.await.expect("mock SOCKS task completes");
+    }
+}
+

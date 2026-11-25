@@ -11,7 +11,7 @@ mod windows_service {
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
 
-    use crate::connection_state::{ConnectionCoordinator, ConnectionPhase};
+    use crate::connection_state::ConnectionCoordinator;
     use crate::recovery_journal::RecoveryJournalStore;
 
     use windows_sys::Win32::Foundation::{

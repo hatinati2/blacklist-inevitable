@@ -67,6 +67,7 @@ impl Drop for Session {
 #[derive(Default)]
 struct Inner {
     starting: bool,
+    stopping: bool,
     active: Option<Session>,
 }
 
@@ -140,7 +141,7 @@ impl LocalProxyRuntime {
     ) -> Result<LocalProxyStatus, String> {
         {
             let mut inner = self.inner.lock().await;
-            if inner.starting || inner.active.is_some() {
+            if inner.starting || inner.stopping || inner.active.is_some() {
                 return Err(
                     "A local proxy session is already starting or running. Stop it before starting another profile."
                         .to_string(),
@@ -297,40 +298,42 @@ impl LocalProxyRuntime {
         let session = loop {
             let notified = self.changed.notified();
             let mut inner = self.inner.lock().await;
-            if inner.starting {
+            if inner.starting || inner.stopping {
                 drop(inner);
                 notified.await;
                 continue;
             }
+            inner.stopping = true;
             break inner.active.take();
         };
 
-        let Some(mut session) = session else {
-            return Ok(LocalProxyStatus::inactive("No local proxy session is running."));
+        let result = if let Some(mut session) = session {
+            if !stop_child(&mut session.child).await {
+                supervisor.mark_cleanup_unhealthy();
+                // The config contains credentials. Keep it in place until engine exit
+                // is confirmed; the Job Object remains the final process containment.
+                Err(
+                    "The local proxy engine did not stop within the cleanup deadline. New engine work is blocked."
+                        .to_string(),
+                )
+            } else {
+                remove_config_file(&session.config_path, supervisor)?;
+                drop(session);
+                Ok(LocalProxyStatus::inactive(
+                    "The local proxy was stopped and its temporary configuration was removed.",
+                ))
+            }
+        } else {
+            Ok(LocalProxyStatus::inactive("No local proxy session is running."))
         };
 
-        if !stop_child(&mut session.child).await {
-            supervisor.mark_cleanup_unhealthy();
-            // The config contains credentials. Keep it in place until engine exit
-            // is confirmed; the Job Object remains the final process containment.
-            return Err(
-                "The local proxy engine did not stop within the cleanup deadline. New engine work is blocked."
-                    .to_string(),
-            );
-        }
-
-        if let Err(error) = remove_config_file(&session.config_path, supervisor) {
-            supervisor.mark_cleanup_unhealthy();
-            return Err(error);
-        }
-
-        drop(session);
+        let mut inner = self.inner.lock().await;
+        inner.stopping = false;
+        drop(inner);
         self.changed.notify_one();
-        Ok(LocalProxyStatus::inactive("The local proxy was stopped and its temporary configuration was removed."))
+        result
     }
 }
-
-
 
 fn configure_local_socks_auth(
     config: &mut serde_json::Value,

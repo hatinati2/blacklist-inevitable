@@ -44,13 +44,26 @@ This proves the current scoped ACL and journaled exact-filter-removal path under
 
 Agent startup now performs a narrowly scoped WFP-only reconciliation before exposing its status pipe. A journal is eligible only when it contains one or more firewall filter records and has no engine process, TUN interface, route, or DNS records. For each eligible session, the service opens BFE and calls `WfpEngine::remove_owned_filters`, which validates provider ownership, sublayer, layer, persistence, stable filter GUID, and any recorded runtime ID; it clears the journal only after the exact keys are independently confirmed absent. If access is denied, identity validation fails, or journal cleanup fails, the session remains unresolved and startup diagnostics report the failure. Journals containing any engine, TUN, route, or DNS state are deliberately deferred without partial cleanup. The Agent remains status-only: this recovery path does not install filters, start sing-box, change routes/DNS, or activate a kill switch.
 
+## Production installer WFP ACL provisioning
+
+The per-machine Agent installer now bundles `scripts/windows-agent-wfp-acl.ps1`. After creating the LocalSystem service and enabling its restricted service SID, the installer invokes the helper to verify or create the persistent Agent provider/sublayer namespace and provision six non-inheriting object-scoped grants:
+
+- Engine: `BEGIN_WRITE_TXN` only.
+- Agent provider and sublayer: `READ | ADD_LINK`.
+- ALE_AUTH_CONNECT_V4 and ALE_AUTH_CONNECT_V6 layer objects: `ADD_LINK` only.
+- Filter container: `ADD` only; no inheritance.
+
+The helper preserves the existing DACL by adding only the Agent service SID ACE. It refuses NULL DACLs and verifies the provider/sublayer identity and persistence flags before granting access. If provisioning fails part-way, it attempts to remove the grants it just applied and the installer does not start the service. Uninstall/upgrade stops the service, removes only that service SID's six ACEs, then deletes the SCM service. Persistent provider/sublayer metadata is intentionally left in place; no traffic filters are installed or removed by the installer helper.
+
+The Windows restricted-SID acceptance probe now calls this same provision/remove helper, then exercises the service's journaled WFP filter add/read/delete path. The harness snapshots all six DACLs and restores them byte-for-byte after the test. This validates the helper's WFP ACL operations on a disposable hosted runner. It does not exercise the signed production installer because the repository's publisher thumbprint remains `UNCONFIGURED`; a trusted signed install and clean Windows 10/11 verification remain release gates.
+
 ## Security boundary and remaining work
 
 The journal is not an authentication or integrity mechanism. Its trust depends on the service-owned directory ACL and the service's validation of every record. The service must not open a user-writable directory as its journal root. Reparse-point entries are rejected, and files are never selected using a caller-supplied path.
 
 The Windows Agent now opens this journal during service startup, before making its authenticated pipe available, and fails closed if committed state is missing, unsafe, or corrupt. It reports unresolved-session counts but does not yet reconcile those records with `ConnectionCoordinator` or restore operating-system resources. This is a startup inventory check, not periodic reconciliation or proof that the network was restored. The following are still release-blocking work:
 
-- Provision and verify the service-owned directory DACL during agent installation.
+- [x] Provision the service-owned journal directory and the six limited WFP ACL grants through the signed per-machine Agent installer; remove only the service SID ACEs on upgrade/uninstall.
 - Wire a checkpoint before each OS mutation and after each successful mutation.
 - [x] Reconcile isolated WFP-only startup journals by exact stable filter key; retain the journal on any WFP or journal-cleanup failure.
 - Implement full startup reconciliation against actual process, TUN, route, DNS, and mixed WFP state; mixed-resource sessions remain deferred until reverse-order cleanup is implemented.

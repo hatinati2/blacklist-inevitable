@@ -54,9 +54,15 @@ impl FilterSecurityDescriptor {
     fn for_service_sid(service_sid: &str) -> Result<Self, String> {
         use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
 
-        if !service_sid.starts_with("S-1-5-80-")
-            || service_sid.len() > 128
-            || !service_sid.bytes().all(|byte| byte.is_ascii_digit() || byte == b'-')
+        let service_sid_suffix = service_sid.strip_prefix("S-1-5-80-");
+        if service_sid.len() > 128
+            || service_sid_suffix.is_none_or(|suffix| {
+                let parts: Vec<_> = suffix.split('-').collect();
+                parts.len() != 5
+                    || parts.iter().any(|part| {
+                        part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit())
+                    })
+            })
         {
             return Err("The restricted Agent service SID has an invalid service-SID representation.".into());
         }

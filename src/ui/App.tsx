@@ -298,6 +298,8 @@ export default function App() {
       setMessage(typeof error === "string" ? error : "Could not start the local SOCKS5 proxy.");
       await refreshLocalProxyStatus();
     } finally {
+      await refreshRuntimeStatus();
+      await refreshLocalProxyStatus();
       setBusy(false);
     }
   };
@@ -312,6 +314,8 @@ export default function App() {
       setMessage(typeof error === "string" ? error : "Could not stop the local SOCKS5 proxy safely.");
       await refreshLocalProxyStatus();
     } finally {
+      await refreshRuntimeStatus();
+      await refreshLocalProxyStatus();
       setBusy(false);
     }
   };

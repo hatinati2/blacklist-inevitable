@@ -208,16 +208,6 @@ impl LocalProxyRuntime {
         crate::engine::sing_box::validate_profile_config(app, profile, credentials, supervisor)
             .await?;
 
-        let port = reserve_loopback_port()?;
-        let mut config = crate::engine::sing_box::build_probe_config(profile, credentials, port)?;
-        // The listener is loopback-only and additionally requires a per-session
-        // credential so another local Windows user cannot reuse the proxy.
-        let username = uuid::Uuid::new_v4().simple().to_string();
-        let password = uuid::Uuid::new_v4().simple().to_string();
-        config["inbounds"][0]["users"] = serde_json::json!([{
-            "username": username,
-            "password": password
-        }]);
         let config_directory = app
             .path()
             .app_data_dir()
@@ -230,11 +220,22 @@ impl LocalProxyRuntime {
             "session-{}.json",
             uuid::Uuid::new_v4().simple()
         ));
-        let bytes = Zeroizing::new(
-            serde_json::to_vec(&config)
-                .map_err(|_| "Could not encode the local proxy configuration.".to_string())?,
-        );
+        let port = reserve_loopback_port()?;
+        let mut config = crate::engine::sing_box::build_probe_config(profile, credentials, port)?;
+        // The listener is loopback-only and additionally requires a per-session
+        // credential so another local Windows user cannot reuse the proxy.
+        let username = uuid::Uuid::new_v4().simple().to_string();
+        let password = uuid::Uuid::new_v4().simple().to_string();
+        config["inbounds"][0]["users"] = serde_json::json!([{
+            "username": username,
+            "password": password
+        }]);
+        let encoded = serde_json::to_vec(&config);
+        // Clear every generated config field before propagating a serialization error.
         zeroize_json(&mut config);
+        let bytes = Zeroizing::new(
+            encoded.map_err(|_| "Could not encode the local proxy configuration.".to_string())?,
+        );
         if fs::write(&config_path, &bytes).is_err() {
             let _ = remove_config_file(&config_path, supervisor);
             return Err("Could not write the temporary local proxy configuration.".to_string());

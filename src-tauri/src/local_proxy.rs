@@ -333,31 +333,40 @@ impl LocalProxyRuntime {
             break inner.active.take();
         };
 
-        let result = if let Some(mut session) = session {
+        let (result, retained_session) = if let Some(mut session) = session {
             if !stop_child(&mut session.child).await {
                 supervisor.mark_cleanup_unhealthy();
-                // The config contains credentials. Keep it in place until engine exit
-                // is confirmed; the Job Object remains the final process containment.
-                Err(
-                    "The local proxy engine did not stop within the cleanup deadline. New engine work is blocked."
-                        .to_string(),
+                (
+                    Err(
+                        "The local proxy engine did not stop within the cleanup deadline. New engine work is blocked."
+                            .to_string(),
+                    ),
+                    Some(session),
                 )
             } else {
                 match remove_config_file(&session.config_path, supervisor) {
                     Ok(()) => {
                         drop(session);
-                        Ok(LocalProxyStatus::inactive(
-                            "The local proxy was stopped and its temporary configuration was removed.",
-                        ))
+                        (
+                            Ok(LocalProxyStatus::inactive(
+                                "The local proxy was stopped and its temporary configuration was removed.",
+                            )),
+                            None,
+                        )
                     }
-                    Err(error) => Err(error),
+                    Err(error) => (Err(error), Some(session)),
                 }
             }
         } else {
-            Ok(LocalProxyStatus::inactive("No local proxy session is running."))
+            (
+                Ok(LocalProxyStatus::inactive("No local proxy session is running.")),
+                None,
+            )
         };
 
         let mut inner = self.inner.lock().await;
+        // Keep ownership of the child and credential-bearing config path on failure.
+        inner.active = retained_session;
         inner.stopping = false;
         drop(inner);
         self.changed.notify_one();
@@ -654,6 +663,53 @@ mod tests {
         let listener = TcpListener::bind(("127.0.0.1", port))
             .expect("the returned port is released and bindable");
         drop(listener);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn failed_config_cleanup_retains_session_for_a_later_stop_retry() {
+        use tokio::process::Command;
+
+        let supervisor = ProcessSupervisor::default();
+        let lease = supervisor.begin_operation().expect("register local proxy session");
+        let mut child = Command::new("cmd.exe")
+            .args(["/C", "exit", "0"])
+            .spawn()
+            .expect("start short-lived Windows child");
+        child.wait().await.expect("wait for child exit");
+
+        let config_path = std::env::temp_dir().join(format!(
+            "blacklist-local-proxy-cleanup-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&config_path).expect("create directory that cannot be removed as a file");
+
+        let runtime = LocalProxyRuntime::default();
+        runtime.inner.lock().await.active = Some(Session {
+            profile_id: "cleanup-retry".to_string(),
+            port: 12345,
+            username: "temporary-user".to_string(),
+            password: "temporary-password".to_string(),
+            child,
+            config_path: config_path.clone(),
+            _lease: lease,
+        });
+
+        assert!(runtime.stop(&supervisor).await.is_err());
+        assert!(
+            runtime.inner.lock().await.active.is_some(),
+            "session ownership must survive cleanup failure"
+        );
+        assert!(
+            supervisor.begin_operation().is_err(),
+            "uncertain cleanup must block new engine work"
+        );
+
+        fs::remove_dir(&config_path).expect("remove test directory");
+        fs::write(&config_path, b"temporary credentials").expect("create removable config file");
+        runtime.stop(&supervisor).await.expect("retry cleanup");
+        assert!(runtime.inner.lock().await.active.is_none());
+        assert!(!config_path.exists());
     }
 
     #[tokio::test]

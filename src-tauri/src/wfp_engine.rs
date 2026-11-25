@@ -83,9 +83,12 @@ impl FilterSecurityDescriptor {
             )
         };
         if converted == 0 || descriptor.is_null() || descriptor_size == 0 {
+            let error = unsafe { windows_sys::Win32::Foundation::GetLastError() };
+            if !descriptor.is_null() {
+                unsafe { windows_sys::Win32::Foundation::LocalFree(descriptor) };
+            }
             return Err(format!(
-                "ConvertStringSecurityDescriptorToSecurityDescriptorW failed with Windows error {}.",
-                unsafe { windows_sys::Win32::Foundation::GetLastError() }
+                "ConvertStringSecurityDescriptorToSecurityDescriptorW failed with Windows error {error}."
             ));
         }
         Ok(Self(descriptor))

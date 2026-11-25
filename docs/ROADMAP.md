@@ -74,8 +74,10 @@ Naive import/config mapping is implemented for a bounded subset; remote authenti
 - [ ] Add a Rule/Global mode selector, rule-list management, protected rule-set cache/download, and user-editable domain/IP exceptions to the Windows UI and Agent.
 - [x] Define Windows split-tunnel policy modes (Full Tunnel, Direct Only, Include Selected, Exclude Selected, and per-app Custom VPN/Direct/Block) and map them to sing-box process-path route rules.
 - [ ] Add the split-tunnel policy editor and persistent settings in the Windows UI; enforce process-path matching and DNS behavior in the privileged agent.
+- [x] Reconcile isolated WFP-only recovery journals during Agent startup, deleting only exact Agent-owned filter keys and retaining journals on any failure.
 - [ ] Test agent install/upgrade/uninstall, UAC denial, service crash/recovery, and UI-agent IPC authorization.
 - [ ] Test repeated connect / disconnect, crashes, sleep / resume, and shutdown.
+- [ ] Reconcile mixed engine/TUN/route/DNS/WFP journals in reverse mutation order before allowing Connect; current startup recovery handles WFP-only journals and defers all mixed-resource sessions.
 - [ ] Block normal Connect if prior runtime cleanup is uncertain.
 - [ ] Verify DNS handling and traffic routing without leaking traffic outside the selected tunnel.
 - [ ] Implement Agent-owned WFP physical-egress kill switch independent of sing-box's dynamic strict-route filters; retain protection across engine failure and define Agent-crash/reboot persistence and recovery.

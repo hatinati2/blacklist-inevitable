@@ -11,7 +11,7 @@ use tauri::{AppHandle, Manager};
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, Notify};
 use tokio::time::{sleep, timeout};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::process_supervisor::{OperationLease, ProcessSupervisor};
 use crate::profiles::ProfileSummary;
@@ -54,6 +54,13 @@ struct Session {
     child: Child,
     config_path: PathBuf,
     _lease: OperationLease,
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        self.username.zeroize();
+        self.password.zeroize();
+    }
 }
 
 #[derive(Default)]
@@ -194,6 +201,7 @@ impl LocalProxyRuntime {
             serde_json::to_vec(&config)
                 .map_err(|_| "Could not encode the local proxy configuration.".to_string())?,
         );
+        zeroize_json(&mut config);
         fs::write(&config_path, &bytes)
             .map_err(|_| "Could not write the temporary local proxy configuration.".to_string())?;
 
@@ -281,6 +289,24 @@ impl LocalProxyRuntime {
         drop(session._lease);
         self.changed.notify_waiters();
         Ok(LocalProxyStatus::inactive("The local proxy was stopped and its temporary configuration was removed."))
+    }
+}
+
+
+fn zeroize_json(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::String(value) => value.zeroize(),
+        serde_json::Value::Array(values) => {
+            for value in values {
+                zeroize_json(value);
+            }
+        }
+        serde_json::Value::Object(values) => {
+            for value in values.values_mut() {
+                zeroize_json(value);
+            }
+        }
+        _ => {}
     }
 }
 

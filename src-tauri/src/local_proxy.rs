@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 use tauri::{AppHandle, Manager};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, Notify};
 use tokio::time::{sleep, timeout};
@@ -76,8 +77,38 @@ pub struct LocalProxyRuntime {
 }
 
 impl LocalProxyRuntime {
-    pub async fn status(&self) -> LocalProxyStatus {
-        let inner = self.inner.lock().await;
+    pub async fn status(&self, supervisor: &ProcessSupervisor) -> LocalProxyStatus {
+        let mut inner = self.inner.lock().await;
+        if let Some(session) = inner.active.as_mut() {
+            match session.child.try_wait() {
+                Ok(Some(_)) => {
+                    let mut exited = inner.active.take().expect("the exited session was present");
+                    let config_path = exited.config_path.clone();
+                    drop(inner);
+                    if remove_config_file(&config_path, supervisor).is_err() {
+                        supervisor.mark_cleanup_unhealthy();
+                        return LocalProxyStatus::inactive(
+                            "The proxy engine exited, but its credential-bearing config could not be removed; engine cleanup is blocked.",
+                        );
+                    }
+                    exited.username.zeroize();
+                    exited.password.zeroize();
+                    drop(exited);
+                    self.changed.notify_waiters();
+                    return LocalProxyStatus::inactive(
+                        "The local proxy engine exited. Its temporary configuration was removed.",
+                    );
+                }
+                Ok(None) => {}
+                Err(_) => {
+                    supervisor.mark_cleanup_unhealthy();
+                    return LocalProxyStatus::inactive(
+                        "The local proxy process state could not be verified; engine cleanup is blocked.",
+                    );
+                }
+            }
+        }
+
         match inner.active.as_ref() {
             Some(session) => LocalProxyStatus {
                 active: true,
@@ -87,7 +118,7 @@ impl LocalProxyRuntime {
                 username: Some(session.username.clone()),
                 password: Some(session.password.clone()),
                 detail: format!(
-                    "Local SOCKS5 proxy is listening on 127.0.0.1:{}; system routing and TUN are unchanged.",
+                    "Authenticated local SOCKS5 proxy is listening on 127.0.0.1:{}; system routing and TUN are unchanged.",
                     session.port
                 ),
             },
@@ -230,7 +261,7 @@ impl LocalProxyRuntime {
             return Err(error);
         }
 
-        let ready = wait_for_proxy(&mut child, port).await;
+        let ready = wait_for_proxy(&mut child, port, &username, &password).await;
         if let Err(error) = ready {
             let stopped = stop_child(&mut child).await;
             if !stopped {
@@ -286,7 +317,7 @@ impl LocalProxyRuntime {
             return Err(error);
         }
 
-        drop(session._lease);
+        drop(session);
         self.changed.notify_waiters();
         Ok(LocalProxyStatus::inactive("The local proxy was stopped and its temporary configuration was removed."))
     }
@@ -319,7 +350,12 @@ fn reserve_loopback_port() -> Result<u16, String> {
         .map_err(|_| "The selected loopback port could not be read.".to_string())
 }
 
-async fn wait_for_proxy(child: &mut Child, port: u16) -> Result<(), String> {
+async fn wait_for_proxy(
+    child: &mut Child,
+    port: u16,
+    username: &str,
+    password: &str,
+) -> Result<(), String> {
     timeout(START_TIMEOUT, async {
         loop {
             match child.try_wait() {
@@ -335,19 +371,75 @@ async fn wait_for_proxy(child: &mut Child, port: u16) -> Result<(), String> {
                 }
             }
 
-            if tokio::net::TcpStream::connect(("127.0.0.1", port))
-                .await
-                .is_ok()
+            match timeout(
+                Duration::from_millis(500),
+                verify_socks_authentication(port, username, password),
+            )
+            .await
             {
-                return Ok(());
+                Ok(Ok(())) => return Ok(()),
+                Ok(Err(_)) | Err(_) => sleep(Duration::from_millis(100)).await,
             }
-            sleep(Duration::from_millis(100)).await;
         }
     })
     .await
     .unwrap_or_else(|_| {
         Err("sing-box did not open its local SOCKS5 listener within 8 seconds.".to_string())
     })
+}
+
+
+async fn verify_socks_authentication(
+    port: u16,
+    username: &str,
+    password: &str,
+) -> Result<(), String> {
+    if username.is_empty()
+        || password.is_empty()
+        || username.len() > u8::MAX as usize
+        || password.len() > u8::MAX as usize
+    {
+        return Err("The generated local proxy credentials are invalid.".to_string());
+    }
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .map_err(|_| "The local SOCKS5 listener is not accepting connections.".to_string())?;
+
+    stream
+        .write_all(&[0x05, 0x01, 0x02])
+        .await
+        .map_err(|_| "The local SOCKS5 authentication negotiation failed.".to_string())?;
+    let mut method = [0u8; 2];
+    stream
+        .read_exact(&mut method)
+        .await
+        .map_err(|_| "The local SOCKS5 authentication negotiation was incomplete.".to_string())?;
+    if method != [0x05, 0x02] {
+        return Err("The local SOCKS5 listener did not require username/password authentication.".to_string());
+    }
+
+    let mut auth = Vec::with_capacity(3 + username.len() + password.len());
+    auth.push(0x01);
+    auth.push(username.len() as u8);
+    auth.extend_from_slice(username.as_bytes());
+    auth.push(password.len() as u8);
+    auth.extend_from_slice(password.as_bytes());
+    stream
+        .write_all(&auth)
+        .await
+        .map_err(|_| "The local SOCKS5 credential check could not be sent.".to_string())?;
+    auth.fill(0);
+
+    let mut result = [0u8; 2];
+    stream
+        .read_exact(&mut result)
+        .await
+        .map_err(|_| "The local SOCKS5 credential check did not complete.".to_string())?;
+    if result == [0x01, 0x00] {
+        Ok(())
+    } else {
+        Err("The local SOCKS5 listener rejected its generated credentials.".to_string())
+    }
 }
 
 async fn stop_child(child: &mut Child) -> bool {

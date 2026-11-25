@@ -14,6 +14,7 @@ pub mod wfp_engine;
 pub mod split_tunnel;
 mod commands;
 mod engine;
+mod local_proxy;
 mod process_supervisor;
 mod profile_store;
 mod profiles;
@@ -22,6 +23,7 @@ mod real_delay_settings;
 pub fn run() {
     let app = tauri::Builder::default()
         .manage(process_supervisor::ProcessSupervisor::for_app())
+        .manage(local_proxy::LocalProxyRuntime::default())
         .setup(|app| {
             let supervisor = app
                 .state::<process_supervisor::ProcessSupervisor>()
@@ -36,11 +38,18 @@ pub fn run() {
             {
                 eprintln!("Stale preflight recovery failed; engine startup remains blocked: {error}");
             }
+            if let Err(error) = crate::local_proxy::recover_stale_configs(app.handle()) {
+                eprintln!("Stale local proxy recovery failed; engine startup remains blocked: {error}");
+                supervisor.mark_cleanup_unhealthy();
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_app_status,
             commands::get_agent_status,
+            commands::get_local_proxy_status,
+            commands::start_local_proxy,
+            commands::stop_local_proxy,
             commands::submit_agent_connect_request,
             commands::get_profiles,
             commands::import_profiles,
@@ -61,6 +70,10 @@ pub fn run() {
                 .state::<process_supervisor::ProcessSupervisor>()
                 .inner()
                 .clone();
+            let local_proxy = app_handle
+                .state::<local_proxy::LocalProxyRuntime>()
+                .inner()
+                .clone();
 
             // The second exit request is issued only after all supervised operations
             // have completed their cleanup.
@@ -72,9 +85,11 @@ pub fn run() {
             if supervisor.request_shutdown() {
                 let app_handle = app_handle.clone();
                 tauri::async_runtime::spawn(async move {
-                    // Real Delay workers receive cancellation, stop and reap their
-                    // sing-box child, remove temporary data, then release their lease.
-                    // Short config-check commands are bounded by their own timeout.
+                    // Stop the long-lived local proxy before waiting for all
+                    // supervised children and short-lived preflight workers.
+                    if let Err(error) = local_proxy.stop(&supervisor).await {
+                        eprintln!("Local proxy shutdown cleanup failed: {error}");
+                    }
                     let _cleanup_healthy = supervisor.wait_for_idle().await;
                     app_handle.exit(code.unwrap_or(0));
                 });

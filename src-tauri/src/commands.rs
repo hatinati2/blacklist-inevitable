@@ -56,6 +56,51 @@ pub struct EndpointTestResult {
     detail: String,
 }
 
+
+#[tauri::command]
+pub async fn get_local_proxy_status(
+    app: AppHandle,
+) -> Result<crate::local_proxy::LocalProxyStatus, String> {
+    let runtime = app
+        .state::<crate::local_proxy::LocalProxyRuntime>()
+        .inner()
+        .clone();
+    let supervisor = app.state::<ProcessSupervisor>().inner().clone();
+    Ok(runtime.status(&supervisor).await)
+}
+
+#[tauri::command]
+pub async fn start_local_proxy(
+    app: AppHandle,
+    profile_id: String,
+) -> Result<crate::local_proxy::LocalProxyStatus, String> {
+    let profile = profile_store::list_profiles(&app)?
+        .into_iter()
+        .find(|profile| profile.id == profile_id)
+        .ok_or_else(|| "Profile not found.".to_string())?;
+    let credentials = profile_store::get_credentials(&profile.id)?;
+    let runtime = app
+        .state::<crate::local_proxy::LocalProxyRuntime>()
+        .inner()
+        .clone();
+    let supervisor = app.state::<ProcessSupervisor>().inner().clone();
+    runtime
+        .start(&app, profile, &credentials, &supervisor)
+        .await
+}
+
+#[tauri::command]
+pub async fn stop_local_proxy(
+    app: AppHandle,
+) -> Result<crate::local_proxy::LocalProxyStatus, String> {
+    let runtime = app
+        .state::<crate::local_proxy::LocalProxyRuntime>()
+        .inner()
+        .clone();
+    let supervisor = app.state::<ProcessSupervisor>().inner().clone();
+    runtime.stop(&supervisor).await
+}
+
 #[tauri::command]
 pub async fn get_agent_status() -> crate::agent_client::DesktopAgentStatus {
     crate::agent_client::get_status().await
@@ -95,7 +140,7 @@ pub async fn get_app_status(app: AppHandle) -> AppStatus {
     AppStatus {
         app_name: "blacklist-inevitable",
         version: env!("CARGO_PKG_VERSION"),
-        development_stage: "sing-box preflight with supervised shutdown",
+        development_stage: "sing-box local SOCKS5 proxy and preflight",
         connection_implemented: false,
         preflight_testing_implemented: true,
         profile_management_implemented: true,

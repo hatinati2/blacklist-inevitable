@@ -98,16 +98,29 @@ impl LocalProxyRuntime {
             Some(Ok(Some(_))) => {
                 let mut exited = inner.active.take().expect("the exited session was present");
                 let config_path = exited.config_path.clone();
+                // Serialize reconciliation with Stop and Start. Do not allow a
+                // new session while the old credential-bearing config is pending.
+                inner.stopping = true;
                 drop(inner);
-                if remove_config_file(&config_path, supervisor).is_err() {
+
+                let cleanup = remove_config_file(&config_path, supervisor);
+                let mut inner = self.inner.lock().await;
+                inner.stopping = false;
+                if cleanup.is_err() {
                     supervisor.mark_cleanup_unhealthy();
+                    // Preserve the exited session and config path for a later retry.
+                    inner.active = Some(exited);
+                    drop(inner);
+                    self.changed.notify_one();
                     return LocalProxyStatus::inactive(
                         "The proxy engine exited, but its credential-bearing config could not be removed; engine cleanup is blocked.",
                     );
                 }
+
                 exited.username.zeroize();
                 exited.password.zeroize();
                 drop(exited);
+                drop(inner);
                 self.changed.notify_one();
                 return LocalProxyStatus::inactive(
                     "The local proxy engine exited. Its temporary configuration was removed.",
@@ -695,10 +708,17 @@ mod tests {
             _lease: lease,
         });
 
+        let status = runtime.status(&supervisor).await;
+        assert!(!status.active, "an exited child must not be reported as running");
+        assert!(
+            runtime.inner.lock().await.active.is_some(),
+            "status reconciliation must retain the session when config cleanup fails"
+        );
+
         assert!(runtime.stop(&supervisor).await.is_err());
         assert!(
             runtime.inner.lock().await.active.is_some(),
-            "session ownership must survive cleanup failure"
+            "Stop must retain session ownership after cleanup failure"
         );
         assert!(
             supervisor.begin_operation().is_err(),

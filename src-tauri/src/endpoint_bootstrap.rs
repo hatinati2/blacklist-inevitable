@@ -391,7 +391,7 @@ mod tests {
     fn parses_a_and_aaaa_records() {
         let a = query_response("proxy.example.org", RecordType::A, &[(1, vec![203, 0, 113, 8])]);
         assert_eq!(parse_response(&a, "proxy.example.org", RecordType::A).unwrap(),
-            QueryAnswer::Addresses(vec!["203.0.113.8".parse().unwrap()]));
+            QueryAnswer::Addresses(vec!["203.0.113.8".parse::<IpAddr>().unwrap()]));
         let aaaa = query_response("proxy.example.org", RecordType::Aaaa,
             &[(28, "2001:db8::8".parse::<Ipv6Addr>().unwrap().octets().to_vec())]);
         assert_eq!(parse_response(&aaaa, "proxy.example.org", RecordType::Aaaa).unwrap(),

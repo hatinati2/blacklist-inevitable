@@ -111,6 +111,16 @@ impl Drop for FilterSecurityDescriptor {
 
 #[cfg(windows)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JournaledFilterRecoveryReport {
+    pub installed_filter_count: usize,
+    pub removed_filter_count: usize,
+    pub already_absent_filter_count: usize,
+    pub runtime_ids_checkpointed: bool,
+    pub journal_removed: bool,
+}
+
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FilterRemovalReport {
     /// Filters deleted inside the committed WFP transaction and confirmed absent.
     pub removed_filter_count: usize,
@@ -442,6 +452,160 @@ impl WfpEngine {
         })
     }
 
+    /// Exercise the persistent filter lifecycle under the restricted service
+    /// SID on a disposable Windows runner: persist stable-key intent first,
+    /// commit synthetic persistent filters, checkpoint their runtime IDs,
+    /// reload the journal, remove only those exact owned filters in a second
+    /// transaction, verify idempotent absence, and finally remove the journal.
+    ///
+    /// This is a CI acceptance primitive only. Callers must use TEST-NET
+    /// endpoints and a non-existent synthetic interface identity; it must not
+    /// be wired to the production connection path.
+    pub fn exercise_journaled_filter_recovery_for_service_sid(
+        &mut self,
+        spec: &crate::wfp_policy::EgressPolicySpec,
+        service_sid: &str,
+        journal_store: &crate::recovery_journal::RecoveryJournalStore,
+        session_id: u64,
+    ) -> Result<JournaledFilterRecoveryReport, String> {
+        use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::{
+            FwpmTransactionBegin0, FwpmTransactionCommit0,
+        };
+
+        if session_id == 0 {
+            return Err("The WFP recovery acceptance test requires a non-zero journal session ID.".into());
+        }
+        self.ensure_open()?;
+        let plan = spec.compile_plan()?;
+        if plan.filters.is_empty() || plan.filters.len() > 4 {
+            return Err("The WFP recovery acceptance test requires a bounded four-filter dual-stack plan.".into());
+        }
+        self.ensure_persistent_namespace()?;
+        let descriptor = FilterSecurityDescriptor::for_service_sid(service_sid)?;
+
+        let mut keys = Vec::with_capacity(plan.filters.len());
+        let mut journal = crate::recovery_journal::RecoveryJournal::new(session_id);
+        journal.phase = crate::recovery_journal::JournalPhase::Preparing;
+        for planned in &plan.filters {
+            let key = GUID::from_u128(uuid::Uuid::new_v4().as_u128());
+            keys.push(key);
+            journal.firewall_filters.push(crate::recovery_journal::FirewallFilterRecord {
+                provider_key: uuid::Uuid::from_u128(guid_to_u128(&PROVIDER_KEY)).to_string(),
+                filter_key: Some(uuid::Uuid::from_u128(guid_to_u128(&key)).to_string()),
+                layer_key: uuid::Uuid::from_u128(guid_to_u128(&wfp_layer_guid(planned.layer))).to_string(),
+                filter_id: None,
+            });
+        }
+
+        // The stable GUID intent must be durable before the first BFE filter
+        // mutation. A crash after commit but before the runtime-ID revision
+        // remains recoverable because exact-key deletion does not require ID.
+        journal_store.persist(&journal)?;
+
+        let begin = unsafe { FwpmTransactionBegin0(self.handle, 0) };
+        if begin != 0 {
+            let error = format!("FwpmTransactionBegin0 failed before the journaled filter install (0x{begin:08X}).");
+            return match journal_store.remove_session(session_id) {
+                Ok(()) => Err(error),
+                Err(cleanup) => Err(format!("{error} The unused intent journal was retained because cleanup failed: {cleanup}")),
+            };
+        }
+
+        let mut runtime_ids = Vec::with_capacity(plan.filters.len());
+        let operation = (|| -> Result<(), String> {
+            for (planned, key) in plan.filters.iter().zip(keys.iter()) {
+                let runtime_id = self.add_and_verify_planned_filter(*key, planned, descriptor.as_ptr())?;
+                runtime_ids.push(runtime_id);
+            }
+            Ok(())
+        })();
+
+        if let Err(error) = operation {
+            let abort = self.abort_transaction_or_poison();
+            if abort.is_ok() {
+                let all_absent = keys.iter().all(|key| verify_filter_absent(self.handle, key).is_ok());
+                if all_absent {
+                    if let Err(cleanup) = journal_store.remove_session(session_id) {
+                        return Err(format!("{error} The pre-mutation journal could not be removed after verified rollback: {cleanup}"));
+                    }
+                }
+            }
+            return match abort {
+                Ok(()) => Err(error),
+                Err(abort_error) => Err(format!("{error} {abort_error} The journal is retained for reconciliation.")),
+            };
+        }
+
+        let commit = unsafe { FwpmTransactionCommit0(self.handle) };
+        if commit != 0 {
+            let error = format!("FwpmTransactionCommit0 failed during the journaled test install (0x{commit:08X}).");
+            let abort = self.abort_transaction_or_poison();
+            if abort.is_ok() {
+                let all_absent = keys.iter().all(|key| verify_filter_absent(self.handle, key).is_ok());
+                if all_absent {
+                    if let Err(cleanup) = journal_store.remove_session(session_id) {
+                        return Err(format!("{error} The intent journal was retained because cleanup failed: {cleanup}"));
+                    }
+                }
+            }
+            return match abort {
+                Ok(()) => Err(error),
+                Err(abort_error) => Err(format!("{error} {abort_error} The journal is retained for reconciliation.")),
+            };
+        }
+
+        let mut runtime_checkpoint = journal.clone();
+        runtime_checkpoint.revision = 2;
+        for (record, runtime_id) in runtime_checkpoint.firewall_filters.iter_mut().zip(runtime_ids.iter()) {
+            record.filter_id = Some(*runtime_id);
+        }
+        let runtime_ids_checkpointed = journal_store.persist(&runtime_checkpoint).is_ok();
+
+        // Reload the committed journal rather than deleting from in-memory
+        // construction data. This deliberately exercises the same disk parser
+        // and stable-key validation used by startup recovery.
+        let loaded = journal_store.load_unresolved()?;
+        let loaded_journal = loaded.iter()
+            .find(|item| item.session_id == session_id)
+            .ok_or_else(|| "The newly committed WFP recovery journal was not found after reload.".to_string())?;
+        let loaded_keys_match = loaded_journal.firewall_filters.len() == keys.len()
+            && loaded_journal.firewall_filters.iter().zip(keys.iter()).all(|(record, key)| {
+                record.filter_key.as_deref().is_some_and(|record_key| {
+                    record_key.eq_ignore_ascii_case(
+                        &uuid::Uuid::from_u128(guid_to_u128(key)).to_string()
+                    )
+                })
+            });
+        if !loaded_keys_match {
+            return Err("The reloaded WFP recovery journal did not preserve the exact stable filter keys.".into());
+        }
+
+        let removal = self.remove_owned_filters(&loaded_journal.firewall_filters)?;
+        if removal.removed_filter_count != keys.len() || removal.already_absent_filter_count != 0 {
+            return Err("The first journaled recovery pass did not delete every committed test filter exactly once.".into());
+        }
+
+        let idempotent = self.remove_owned_filters(&loaded_journal.firewall_filters)?;
+        if idempotent.removed_filter_count != 0 || idempotent.already_absent_filter_count != keys.len() {
+            return Err("The second journaled recovery pass did not confirm every filter was already absent.".into());
+        }
+
+        journal_store.remove_session(session_id)?;
+        let journal_removed = !journal_store.load_unresolved()?.iter()
+            .any(|item| item.session_id == session_id);
+        if !journal_removed {
+            return Err("WFP filters are absent, but the acceptance journal remains unresolved.".into());
+        }
+
+        Ok(JournaledFilterRecoveryReport {
+            installed_filter_count: keys.len(),
+            removed_filter_count: removal.removed_filter_count,
+            already_absent_filter_count: idempotent.already_absent_filter_count,
+            runtime_ids_checkpointed,
+            journal_removed,
+        })
+    }
+
     /// Remove only exact, persistent filters owned by this Agent provider.
     ///
     /// The caller must load these records from the protected recovery journal.
@@ -559,7 +723,7 @@ impl WfpEngine {
         filter_key: GUID,
         planned: &crate::wfp_policy::PlannedFilter,
         filter_security_descriptor: *mut core::ffi::c_void,
-    ) -> Result<(), String> {
+    ) -> Result<u64, String> {
         use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::{
             FwpmFilterAdd0, FWPM_ACTION0, FWPM_ACTION0_0, FWPM_DISPLAY_DATA0,
             FWPM_FILTER0, FWPM_FILTER0_0, FWPM_FILTER_FLAG_PERSISTENT,
@@ -714,7 +878,8 @@ impl WfpEngine {
             action,
             weight,
             &expected,
-        )
+        )?;
+        Ok(filter_id)
     }
 
     /// Remove only this product's WFP provider and sublayer after a separate

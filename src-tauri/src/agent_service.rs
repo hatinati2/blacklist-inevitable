@@ -323,26 +323,60 @@ mod windows_service {
             .join("wfp-acl-probe-service-sid.txt"))
     }
 
-    fn run_wfp_acl_probe_once() -> (bool, String, usize, usize) {
+    #[derive(Default)]
+    struct WfpAclProbeOutcome {
+        access_granted: bool,
+        detail: String,
+        installed_filter_count: usize,
+        removed_filter_count: usize,
+        already_absent_filter_count: usize,
+        runtime_ids_checkpointed: bool,
+        journal_removed: bool,
+        synthetic_filters_may_remain: bool,
+    }
+
+    fn run_wfp_acl_probe_once() -> WfpAclProbeOutcome {
         let service_sid = match wfp_acl_probe_service_sid_path()
             .and_then(|path| std::fs::read_to_string(path)
-                .map_err(|error| format!("Could not read the restricted service SID supplied by the disposable test harness: {error}")))
+                .map_err(|error| format!("Could not read the restricted Agent service SID supplied by the disposable test harness: {error}")))
         {
             Ok(value) => value.trim().to_string(),
-            Err(error) => return (false, error, 0, 0),
+            Err(error) => return WfpAclProbeOutcome { detail: error, ..Default::default() },
         };
+        let program_data = match std::env::var_os("ProgramData").filter(|value| !value.is_empty()) {
+            Some(value) => PathBuf::from(value),
+            None => return WfpAclProbeOutcome {
+                detail: "ProgramData is unavailable to the WFP recovery acceptance probe.".into(),
+                ..Default::default()
+            },
+        };
+        let (journal_store, unresolved) = match open_recovery_journal_store_at(&program_data) {
+            Ok(value) => value,
+            Err(error) => return WfpAclProbeOutcome { detail: error, ..Default::default() },
+        };
+        if unresolved != 0 {
+            return WfpAclProbeOutcome {
+                detail: format!("The disposable WFP probe runner unexpectedly contains {unresolved} unresolved recovery session(s); refusing to share its journal namespace."),
+                ..Default::default()
+            };
+        }
+
         let mut engine = match crate::wfp_engine::WfpEngine::open_local() {
             Ok(engine) => engine,
-            Err(error) => return (false, format!("FwpmEngineOpen0: {error}"), 0, 0),
+            Err(error) => return WfpAclProbeOutcome {
+                detail: format!("FwpmEngineOpen0: {error}"),
+                ..Default::default()
+            },
         };
 
-        // TEST-NET endpoints and a synthetic interface identity are used only
-        // to exercise BFE object access. The enclosing WFP transaction is
-        // aborted; no traffic filter is committed.
+        // Test-only persistent filters use TEST-NET destinations and an
+        // intentionally non-existent synthetic LUID/index. They are committed
+        // only on the disposable CI runner, then exact-key removed in a
+        // separate transaction using the reloaded recovery journal.
         let spec = crate::wfp_policy::EgressPolicySpec {
             physical_interfaces: vec![crate::wfp_policy::PhysicalInterface {
-                interface_luid: 1,
-                interface_index: 1,
+                interface_luid: u64::MAX,
+                interface_index: u32::MAX,
             }],
             vpn_endpoints: vec![
                 crate::wfp_policy::VpnEndpoint {
@@ -357,18 +391,37 @@ mod windows_service {
                 },
             ],
         };
-
-        match engine.validate_egress_policy_transaction_for_service_sid(&spec, &service_sid) {
-            Ok(report) => (
-                true,
-                format!(
-                    "The restricted Agent service token completed BFE add/read-back/exact-delete/abort for {} filters; {} were confirmed rolled back.",
-                    report.validated_filter_count, report.rolled_back_filter_count
+        let session_id = (uuid::Uuid::new_v4().as_u128() as u64).max(1);
+        match engine.exercise_journaled_filter_recovery_for_service_sid(
+            &spec,
+            &service_sid,
+            &journal_store,
+            session_id,
+        ) {
+            Ok(report) => WfpAclProbeOutcome {
+                access_granted: true,
+                detail: format!(
+                    "The restricted Agent SID persisted stable-key intent, committed {}, reloaded the journal, removed {}, confirmed {} already absent on an idempotent second pass, and removed the journal. Runtime-ID checkpoint: {}.",
+                    report.installed_filter_count,
+                    report.removed_filter_count,
+                    report.already_absent_filter_count,
+                    report.runtime_ids_checkpointed
                 ),
-                report.validated_filter_count,
-                report.rolled_back_filter_count,
-            ),
-            Err(error) => (false, error, 0, 0),
+                installed_filter_count: report.installed_filter_count,
+                removed_filter_count: report.removed_filter_count,
+                already_absent_filter_count: report.already_absent_filter_count,
+                runtime_ids_checkpointed: report.runtime_ids_checkpointed,
+                journal_removed: report.journal_removed,
+                synthetic_filters_may_remain: false,
+            },
+            Err(error) => WfpAclProbeOutcome {
+                detail: error,
+                // A failure after the commit point may leave test filters in
+                // the ephemeral hosted runner. Keep the journal; never claim
+                // cleanup unless exact-key absence was independently proven.
+                synthetic_filters_may_remain: true,
+                ..Default::default()
+            },
         }
     }
 
@@ -405,18 +458,21 @@ mod windows_service {
             return;
         }
 
-        let (access_granted, detail, validated_filter_count, rolled_back_filter_count) =
-            run_wfp_acl_probe_once();
+        let outcome = run_wfp_acl_probe_once();
         let report = serde_json::json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "service_name": "BlacklistInevitableAgent",
             "service_account": "LocalSystem",
             "service_sid_type": "RESTRICTED",
-            "outcome": if access_granted { "access_granted" } else { "access_blocked" },
-            "detail": detail,
-            "validated_filter_count": if access_granted { Some(validated_filter_count) } else { None },
-            "rolled_back_filter_count": if access_granted { Some(rolled_back_filter_count) } else { None },
-            "traffic_filters_committed": false
+            "outcome": if outcome.access_granted { "access_granted" } else { "access_blocked" },
+            "detail": outcome.detail,
+            "installed_filter_count": outcome.installed_filter_count,
+            "removed_filter_count": outcome.removed_filter_count,
+            "already_absent_filter_count": outcome.already_absent_filter_count,
+            "runtime_ids_checkpointed": outcome.runtime_ids_checkpointed,
+            "journal_removed": outcome.journal_removed,
+            "synthetic_filters_committed_during_test": outcome.installed_filter_count > 0,
+            "synthetic_filters_may_remain": outcome.synthetic_filters_may_remain
         });
 
         let write_result = wfp_acl_probe_report_path().and_then(|path| {

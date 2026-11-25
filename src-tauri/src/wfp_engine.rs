@@ -47,6 +47,69 @@ pub struct FilterValidationReport {
 }
 
 #[cfg(windows)]
+struct FilterSecurityDescriptor(*mut core::ffi::c_void);
+
+#[cfg(windows)]
+impl FilterSecurityDescriptor {
+    fn for_service_sid(service_sid: &str) -> Result<Self, String> {
+        use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
+
+        let service_sid_suffix = service_sid.strip_prefix("S-1-5-80-");
+        if service_sid.len() > 128
+            || service_sid_suffix.is_none_or(|suffix| {
+                let parts: Vec<_> = suffix.split('-').collect();
+                parts.len() != 5
+                    || parts.iter().any(|part| {
+                        part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit())
+                    })
+            })
+        {
+            return Err("The restricted Agent service SID has an invalid service-SID representation.".into());
+        }
+
+        // Keep filter-object permissions local to Agent-created filters. The
+        // filter container receives ADD only; READ/DELETE are attached to each
+        // owned filter through this explicit security descriptor.
+        let sddl = format!("D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x00010080;;;{service_sid})");
+        let wide: Vec<u16> = sddl.encode_utf16().chain(Some(0)).collect();
+        let mut descriptor = std::ptr::null_mut();
+        let mut descriptor_size = 0u32;
+        let converted = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                wide.as_ptr(),
+                1,
+                &mut descriptor,
+                &mut descriptor_size,
+            )
+        };
+        if converted == 0 || descriptor.is_null() || descriptor_size == 0 {
+            let error = unsafe { windows_sys::Win32::Foundation::GetLastError() };
+            if !descriptor.is_null() {
+                unsafe { windows_sys::Win32::Foundation::LocalFree(descriptor) };
+            }
+            return Err(format!(
+                "ConvertStringSecurityDescriptorToSecurityDescriptorW failed with Windows error {error}."
+            ));
+        }
+        Ok(Self(descriptor))
+    }
+
+    fn as_ptr(&self) -> *mut core::ffi::c_void {
+        self.0
+    }
+}
+
+#[cfg(windows)]
+impl Drop for FilterSecurityDescriptor {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { windows_sys::Win32::Foundation::LocalFree(self.0) };
+            self.0 = std::ptr::null_mut();
+        }
+    }
+}
+
+#[cfg(windows)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FilterRemovalReport {
     /// Filters deleted inside the committed WFP transaction and confirmed absent.
@@ -308,6 +371,26 @@ impl WfpEngine {
         &mut self,
         spec: &crate::wfp_policy::EgressPolicySpec,
     ) -> Result<FilterValidationReport, String> {
+        self.validate_egress_policy_transaction_with_filter_sd(spec, std::ptr::null_mut())
+    }
+
+    /// Rollback-only validation with a per-filter security descriptor. The
+    /// descriptor is supplied to FwpmFilterAdd0 so READ/DELETE rights can be
+    /// granted only on these exact Agent-owned filter objects.
+    pub fn validate_egress_policy_transaction_for_service_sid(
+        &mut self,
+        spec: &crate::wfp_policy::EgressPolicySpec,
+        service_sid: &str,
+    ) -> Result<FilterValidationReport, String> {
+        let descriptor = FilterSecurityDescriptor::for_service_sid(service_sid)?;
+        self.validate_egress_policy_transaction_with_filter_sd(spec, descriptor.as_ptr())
+    }
+
+    fn validate_egress_policy_transaction_with_filter_sd(
+        &mut self,
+        spec: &crate::wfp_policy::EgressPolicySpec,
+        filter_security_descriptor: *mut core::ffi::c_void,
+    ) -> Result<FilterValidationReport, String> {
         use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FwpmTransactionBegin0;
 
         self.ensure_open()?;
@@ -324,7 +407,7 @@ impl WfpEngine {
             for planned in &plan.filters {
                 let key = GUID::from_u128(uuid::Uuid::new_v4().as_u128());
                 generated_keys.push(key);
-                self.add_and_verify_planned_filter(key, planned)?;
+                self.add_and_verify_planned_filter(key, planned, filter_security_descriptor)?;
 
                 let deletion = unsafe {
                     windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FwpmFilterDeleteByKey0(
@@ -475,6 +558,7 @@ impl WfpEngine {
         &self,
         filter_key: GUID,
         planned: &crate::wfp_policy::PlannedFilter,
+        filter_security_descriptor: *mut core::ffi::c_void,
     ) -> Result<(), String> {
         use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::{
             FwpmFilterAdd0, FWPM_ACTION0, FWPM_ACTION0_0, FWPM_DISPLAY_DATA0,
@@ -613,7 +697,7 @@ impl WfpEngine {
         };
 
         let add = unsafe {
-            FwpmFilterAdd0(self.handle, &filter, std::ptr::null_mut(), &mut filter_id)
+            FwpmFilterAdd0(self.handle, &filter, filter_security_descriptor, &mut filter_id)
         };
         if add != 0 {
             return Err(format!("FwpmFilterAdd0({label}) failed with Windows status 0x{add:08X}."));

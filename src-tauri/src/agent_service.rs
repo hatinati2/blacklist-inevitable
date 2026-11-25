@@ -313,7 +313,24 @@ mod windows_service {
         STATUS_HANDLE.store(0, Ordering::Release);
     }
 
+    fn wfp_acl_probe_service_sid_path() -> Result<PathBuf, String> {
+        let program_data = std::env::var_os("ProgramData")
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "ProgramData is unavailable to the WFP ACL probe service.".to_string())?;
+        Ok(PathBuf::from(program_data)
+            .join("blacklist-inevitable")
+            .join("Agent")
+            .join("wfp-acl-probe-service-sid.txt"))
+    }
+
     fn run_wfp_acl_probe_once() -> (bool, String, usize, usize) {
+        let service_sid = match wfp_acl_probe_service_sid_path()
+            .and_then(|path| std::fs::read_to_string(path)
+                .map_err(|error| format!("Could not read the restricted service SID supplied by the disposable test harness: {error}")))
+        {
+            Ok(value) => value.trim().to_string(),
+            Err(error) => return (false, error, 0, 0),
+        };
         let mut engine = match crate::wfp_engine::WfpEngine::open_local() {
             Ok(engine) => engine,
             Err(error) => return (false, format!("FwpmEngineOpen0: {error}"), 0, 0),
@@ -341,7 +358,7 @@ mod windows_service {
             ],
         };
 
-        match engine.validate_egress_policy_transaction(&spec) {
+        match engine.validate_egress_policy_transaction_for_service_sid(&spec, &service_sid) {
             Ok(report) => (
                 true,
                 format!(

@@ -11,24 +11,40 @@ $probeExe = Join-Path $probeRoot "blacklist-inevitable-wfp-acl-probe.exe"
 $stateRoot = Join-Path $env:ProgramData "blacklist-inevitable"
 $reportDirectory = Join-Path $stateRoot "Agent"
 $reportPath = Join-Path $reportDirectory "wfp-acl-probe.json"
+$serviceSidPath = Join-Path $reportDirectory "wfp-acl-probe-service-sid.txt"
 $artifactPath = Join-Path $env:RUNNER_TEMP "wfp-service-sid-probe.json"
 $serviceCreated = $false
 $aclMutationAttempted = $false
-$originalEngineDacl = $null
+$originalDacls = @{}
 
-# This helper runs only on the disposable, elevated GitHub-hosted Windows runner.
-# It captures the complete BFE Engine DACL, grants one service SID only the
-# WFP-specific rights needed by the rollback-only probe, and restores the
-# original DACL byte-for-byte in finally.
-if (-not ("BlacklistInevitable.WfpEngineAclInterop" -as [type])) {
+# Run only on the disposable elevated GitHub-hosted runner.
+# The administrator BFE smoke test must have provisioned the Agent provider
+# and sublayer before this script starts. No provider/sublayer containers or
+# unrelated WFP objects are modified here.
+if (-not ("BlacklistInevitable.WfpScopedAclInterop" -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 
 namespace BlacklistInevitable {
-    public static class WfpEngineAclInterop {
+    public static class WfpScopedAclInterop {
         private const uint DACL_SECURITY_INFORMATION = 0x00000004;
         private const uint RPC_C_AUTHN_WINNT = 10;
+        private const int GRANT_ACCESS = 1;
+        private const int TRUSTEE_IS_SID = 0;
+        private const int TRUSTEE_IS_USER = 1;
+        private const int NO_MULTIPLE_TRUSTEE = 0;
+        private const uint NO_INHERITANCE = 0;
+
+        private static readonly Guid ProviderKey =
+            new Guid("9d45d56a-6b31-48aa-9c45-72c8b25e2f10");
+        private static readonly Guid SublayerKey =
+            new Guid("4aabbc48-c0a2-4f76-9f2a-0a90da1caa37");
+        private static readonly Guid LayerV4 =
+            new Guid("c38d57d1-05a7-4c33-904f-7fbceee60e82");
+        private static readonly Guid LayerV6 =
+            new Guid("4a72393b-319f-44bc-84c3-ba54dcb3b6b4");
 
         [StructLayout(LayoutKind.Sequential)]
         private struct TrusteeW {
@@ -50,30 +66,55 @@ namespace BlacklistInevitable {
         [DllImport("fwpuclnt.dll", ExactSpelling = true)]
         private static extern uint FwpmEngineOpen0(IntPtr serverName, uint authnService,
             IntPtr authIdentity, IntPtr session, out IntPtr engineHandle);
-
         [DllImport("fwpuclnt.dll", ExactSpelling = true)]
         private static extern uint FwpmEngineClose0(IntPtr engineHandle);
-
         [DllImport("fwpuclnt.dll", ExactSpelling = true)]
         private static extern uint FwpmEngineGetSecurityInfo0(IntPtr engineHandle,
             uint securityInfo, out IntPtr sidOwner, out IntPtr sidGroup,
             out IntPtr dacl, out IntPtr sacl, out IntPtr securityDescriptor);
-
         [DllImport("fwpuclnt.dll", ExactSpelling = true)]
         private static extern uint FwpmEngineSetSecurityInfo0(IntPtr engineHandle,
-            uint securityInfo, IntPtr sidOwner, IntPtr sidGroup,
-            IntPtr dacl, IntPtr sacl);
+            uint securityInfo, IntPtr sidOwner, IntPtr sidGroup, IntPtr dacl, IntPtr sacl);
+
+        [DllImport("fwpuclnt.dll", ExactSpelling = true)]
+        private static extern uint FwpmProviderGetSecurityInfoByKey0(IntPtr engineHandle,
+            IntPtr key, uint securityInfo, out IntPtr sidOwner, out IntPtr sidGroup,
+            out IntPtr dacl, out IntPtr sacl, out IntPtr securityDescriptor);
+        [DllImport("fwpuclnt.dll", ExactSpelling = true)]
+        private static extern uint FwpmProviderSetSecurityInfoByKey0(IntPtr engineHandle,
+            IntPtr key, uint securityInfo, IntPtr sidOwner, IntPtr sidGroup, IntPtr dacl, IntPtr sacl);
+
+        [DllImport("fwpuclnt.dll", ExactSpelling = true)]
+        private static extern uint FwpmSubLayerGetSecurityInfoByKey0(IntPtr engineHandle,
+            IntPtr key, uint securityInfo, out IntPtr sidOwner, out IntPtr sidGroup,
+            out IntPtr dacl, out IntPtr sacl, out IntPtr securityDescriptor);
+        [DllImport("fwpuclnt.dll", ExactSpelling = true)]
+        private static extern uint FwpmSubLayerSetSecurityInfoByKey0(IntPtr engineHandle,
+            IntPtr key, uint securityInfo, IntPtr sidOwner, IntPtr sidGroup, IntPtr dacl, IntPtr sacl);
+
+        [DllImport("fwpuclnt.dll", ExactSpelling = true)]
+        private static extern uint FwpmLayerGetSecurityInfoByKey0(IntPtr engineHandle,
+            IntPtr key, uint securityInfo, out IntPtr sidOwner, out IntPtr sidGroup,
+            out IntPtr dacl, out IntPtr sacl, out IntPtr securityDescriptor);
+        [DllImport("fwpuclnt.dll", ExactSpelling = true)]
+        private static extern uint FwpmLayerSetSecurityInfoByKey0(IntPtr engineHandle,
+            IntPtr key, uint securityInfo, IntPtr sidOwner, IntPtr sidGroup, IntPtr dacl, IntPtr sacl);
+
+        [DllImport("fwpuclnt.dll", ExactSpelling = true)]
+        private static extern uint FwpmFilterGetSecurityInfoByKey0(IntPtr engineHandle,
+            IntPtr key, uint securityInfo, out IntPtr sidOwner, out IntPtr sidGroup,
+            out IntPtr dacl, out IntPtr sacl, out IntPtr securityDescriptor);
+        [DllImport("fwpuclnt.dll", ExactSpelling = true)]
+        private static extern uint FwpmFilterSetSecurityInfoByKey0(IntPtr engineHandle,
+            IntPtr key, uint securityInfo, IntPtr sidOwner, IntPtr sidGroup, IntPtr dacl, IntPtr sacl);
 
         [DllImport("fwpuclnt.dll", ExactSpelling = true)]
         private static extern void FwpmFreeMemory0(ref IntPtr pointer);
-
         [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern bool ConvertStringSidToSidW(string stringSid, out IntPtr sid);
-
         [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true, ExactSpelling = true)]
-        private static extern uint SetEntriesInAclW(uint count,
-            ref ExplicitAccessW entries, IntPtr oldAcl, out IntPtr newAcl);
-
+        private static extern uint SetEntriesInAclW(uint count, ref ExplicitAccessW entries,
+            IntPtr oldAcl, out IntPtr newAcl);
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern IntPtr LocalFree(IntPtr memory);
 
@@ -83,24 +124,75 @@ namespace BlacklistInevitable {
                 IntPtr.Zero, IntPtr.Zero, out engine);
             if (status != 0 || engine == IntPtr.Zero)
                 throw new InvalidOperationException(
-                    "FwpmEngineOpen0 for ACL provisioning failed: 0x" + status.ToString("X8"));
+                    "FwpmEngineOpen0 for scoped ACL provisioning failed: 0x" + status.ToString("X8"));
             return engine;
         }
 
-        private static byte[] ReadDacl(IntPtr engine) {
+        private static IntPtr KeyPointer(string target) {
+            Guid key;
+            switch (target) {
+                case "Provider": key = ProviderKey; break;
+                case "Sublayer": key = SublayerKey; break;
+                case "LayerV4": key = LayerV4; break;
+                case "LayerV6": key = LayerV6; break;
+                case "Engine":
+                case "FilterContainer":
+                    return IntPtr.Zero;
+                default:
+                    throw new ArgumentException("Unsupported WFP ACL target: " + target);
+            }
+            IntPtr pointer = Marshal.AllocHGlobal(16);
+            byte[] bytes = key.ToByteArray();
+            Marshal.Copy(bytes, 0, pointer, 16);
+            return pointer;
+        }
+
+        private static byte[] ReadDacl(IntPtr engine, string target) {
+            IntPtr key = KeyPointer(target);
             IntPtr owner, group, dacl, sacl, descriptor;
-            uint status = FwpmEngineGetSecurityInfo0(engine, DACL_SECURITY_INFORMATION,
-                out owner, out group, out dacl, out sacl, out descriptor);
+            uint status;
+            try {
+                switch (target) {
+                    case "Engine":
+                        status = FwpmEngineGetSecurityInfo0(engine, DACL_SECURITY_INFORMATION,
+                            out owner, out group, out dacl, out sacl, out descriptor);
+                        break;
+                    case "Provider":
+                        status = FwpmProviderGetSecurityInfoByKey0(engine, key, DACL_SECURITY_INFORMATION,
+                            out owner, out group, out dacl, out sacl, out descriptor);
+                        break;
+                    case "Sublayer":
+                        status = FwpmSubLayerGetSecurityInfoByKey0(engine, key, DACL_SECURITY_INFORMATION,
+                            out owner, out group, out dacl, out sacl, out descriptor);
+                        break;
+                    case "LayerV4":
+                    case "LayerV6":
+                        status = FwpmLayerGetSecurityInfoByKey0(engine, key, DACL_SECURITY_INFORMATION,
+                            out owner, out group, out dacl, out sacl, out descriptor);
+                        break;
+                    case "FilterContainer":
+                        status = FwpmFilterGetSecurityInfoByKey0(engine, IntPtr.Zero, DACL_SECURITY_INFORMATION,
+                            out owner, out group, out dacl, out sacl, out descriptor);
+                        break;
+                    default:
+                        throw new ArgumentException("Unsupported WFP ACL target: " + target);
+                }
+            }
+            finally {
+                if (target != "Engine" && target != "FilterContainer" && key != IntPtr.Zero)
+                    Marshal.FreeHGlobal(key);
+            }
+
             if (status != 0 || descriptor == IntPtr.Zero)
                 throw new InvalidOperationException(
-                    "FwpmEngineGetSecurityInfo0 failed: 0x" + status.ToString("X8"));
+                    "Could not read " + target + " WFP DACL: 0x" + status.ToString("X8"));
             try {
-                // A NULL DACL grants unrestricted access. Refuse to replace it.
+                // A NULL DACL grants unrestricted access. Never replace one.
                 if (dacl == IntPtr.Zero)
-                    throw new InvalidOperationException("The BFE Engine has a NULL DACL; refusing ACL mutation.");
+                    throw new InvalidOperationException(target + " WFP object has a NULL DACL; refusing ACL mutation.");
                 int size = unchecked((ushort)Marshal.ReadInt16(IntPtr.Add(dacl, 2)));
                 if (size < 8)
-                    throw new InvalidOperationException("The BFE Engine DACL has an invalid ACL size.");
+                    throw new InvalidOperationException(target + " WFP DACL has an invalid ACL size.");
                 byte[] bytes = new byte[size];
                 Marshal.Copy(dacl, bytes, 0, size);
                 return bytes;
@@ -110,53 +202,124 @@ namespace BlacklistInevitable {
             }
         }
 
-        public static string CaptureEngineDaclBase64() {
+        private static void SetDacl(IntPtr engine, string target, byte[] bytes) {
+            IntPtr key = KeyPointer(target);
+            IntPtr acl = Marshal.AllocHGlobal(bytes.Length);
+            try {
+                Marshal.Copy(bytes, 0, acl, bytes.Length);
+                uint status;
+                switch (target) {
+                    case "Engine":
+                        status = FwpmEngineSetSecurityInfo0(engine, DACL_SECURITY_INFORMATION,
+                            IntPtr.Zero, IntPtr.Zero, acl, IntPtr.Zero);
+                        break;
+                    case "Provider":
+                        status = FwpmProviderSetSecurityInfoByKey0(engine, key, DACL_SECURITY_INFORMATION,
+                            IntPtr.Zero, IntPtr.Zero, acl, IntPtr.Zero);
+                        break;
+                    case "Sublayer":
+                        status = FwpmSubLayerSetSecurityInfoByKey0(engine, key, DACL_SECURITY_INFORMATION,
+                            IntPtr.Zero, IntPtr.Zero, acl, IntPtr.Zero);
+                        break;
+                    case "LayerV4":
+                    case "LayerV6":
+                        status = FwpmLayerSetSecurityInfoByKey0(engine, key, DACL_SECURITY_INFORMATION,
+                            IntPtr.Zero, IntPtr.Zero, acl, IntPtr.Zero);
+                        break;
+                    case "FilterContainer":
+                        status = FwpmFilterSetSecurityInfoByKey0(engine, IntPtr.Zero, DACL_SECURITY_INFORMATION,
+                            IntPtr.Zero, IntPtr.Zero, acl, IntPtr.Zero);
+                        break;
+                    default:
+                        throw new ArgumentException("Unsupported WFP ACL target: " + target);
+                }
+                if (status != 0)
+                    throw new InvalidOperationException(
+                        "Could not set " + target + " WFP DACL: 0x" + status.ToString("X8"));
+            }
+            finally {
+                if (target != "Engine" && target != "FilterContainer" && key != IntPtr.Zero)
+                    Marshal.FreeHGlobal(key);
+                Marshal.FreeHGlobal(acl);
+            }
+        }
+
+        public static string CaptureDaclBase64(string target) {
             IntPtr engine = OpenEngine();
-            try { return Convert.ToBase64String(ReadDacl(engine)); }
+            try { return Convert.ToBase64String(ReadDacl(engine, target)); }
             finally { FwpmEngineClose0(engine); }
         }
 
-        public static void AddTemporaryServiceAce(string serviceSid, uint accessMask) {
+        public static void AddTemporaryServiceAce(string target, string serviceSid, uint accessMask) {
             IntPtr engine = OpenEngine();
             IntPtr descriptor = IntPtr.Zero;
             IntPtr sid = IntPtr.Zero;
             IntPtr newAcl = IntPtr.Zero;
             try {
+                // Snapshot here as an additional guard against applying a grant
+                // to a NULL or unreadable security descriptor.
+                byte[] ignored = ReadDacl(engine, target);
+                IntPtr key = KeyPointer(target);
                 IntPtr owner, group, dacl, sacl;
-                uint readStatus = FwpmEngineGetSecurityInfo0(engine, DACL_SECURITY_INFORMATION,
-                    out owner, out group, out dacl, out sacl, out descriptor);
-                if (readStatus != 0 || descriptor == IntPtr.Zero)
+                uint readStatus;
+                try {
+                    switch (target) {
+                        case "Engine":
+                            readStatus = FwpmEngineGetSecurityInfo0(engine, DACL_SECURITY_INFORMATION,
+                                out owner, out group, out dacl, out sacl, out descriptor);
+                            break;
+                        case "Provider":
+                            readStatus = FwpmProviderGetSecurityInfoByKey0(engine, key, DACL_SECURITY_INFORMATION,
+                                out owner, out group, out dacl, out sacl, out descriptor);
+                            break;
+                        case "Sublayer":
+                            readStatus = FwpmSubLayerGetSecurityInfoByKey0(engine, key, DACL_SECURITY_INFORMATION,
+                                out owner, out group, out dacl, out sacl, out descriptor);
+                            break;
+                        case "LayerV4":
+                        case "LayerV6":
+                            readStatus = FwpmLayerGetSecurityInfoByKey0(engine, key, DACL_SECURITY_INFORMATION,
+                                out owner, out group, out dacl, out sacl, out descriptor);
+                            break;
+                        case "FilterContainer":
+                            readStatus = FwpmFilterGetSecurityInfoByKey0(engine, IntPtr.Zero, DACL_SECURITY_INFORMATION,
+                                out owner, out group, out dacl, out sacl, out descriptor);
+                            break;
+                        default:
+                            throw new ArgumentException("Unsupported WFP ACL target: " + target);
+                    }
+                }
+                finally {
+                    if (target != "Engine" && target != "FilterContainer" && key != IntPtr.Zero)
+                        Marshal.FreeHGlobal(key);
+                }
+                if (readStatus != 0 || descriptor == IntPtr.Zero || dacl == IntPtr.Zero)
                     throw new InvalidOperationException(
-                        "FwpmEngineGetSecurityInfo0 before grant failed: 0x" + readStatus.ToString("X8"));
-                if (dacl == IntPtr.Zero)
-                    throw new InvalidOperationException("The BFE Engine has a NULL DACL; refusing ACL mutation.");
+                        "Could not retrieve " + target + " WFP DACL before grant: 0x" + readStatus.ToString("X8"));
                 if (!ConvertStringSidToSidW(serviceSid, out sid))
                     throw new InvalidOperationException(
                         "ConvertStringSidToSidW failed: " + Marshal.GetLastWin32Error());
 
                 ExplicitAccessW entry = new ExplicitAccessW();
                 entry.grfAccessPermissions = accessMask;
-                entry.grfAccessMode = 1; // GRANT_ACCESS
-                entry.grfInheritance = 3; // CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE; cascade through WFP containers and objects.
+                entry.grfAccessMode = GRANT_ACCESS;
+                entry.grfInheritance = NO_INHERITANCE;
                 entry.Trustee = new TrusteeW {
                     pMultipleTrustee = IntPtr.Zero,
-                    MultipleTrusteeOperation = 0, // NO_MULTIPLE_TRUSTEE
-                    TrusteeForm = 0, // TRUSTEE_IS_SID
-                    TrusteeType = 1, // TRUSTEE_IS_USER
+                    MultipleTrusteeOperation = NO_MULTIPLE_TRUSTEE,
+                    TrusteeForm = TRUSTEE_IS_SID,
+                    TrusteeType = TRUSTEE_IS_USER,
                     ptstrName = sid
                 };
-
                 uint aclStatus = SetEntriesInAclW(1, ref entry, dacl, out newAcl);
                 if (aclStatus != 0 || newAcl == IntPtr.Zero)
-                    throw new InvalidOperationException(
-                        "SetEntriesInAclW failed: 0x" + aclStatus.ToString("X8"));
+                    throw new InvalidOperationException("SetEntriesInAclW failed: 0x" + aclStatus.ToString("X8"));
 
-                uint setStatus = FwpmEngineSetSecurityInfo0(engine, DACL_SECURITY_INFORMATION,
-                    IntPtr.Zero, IntPtr.Zero, newAcl, IntPtr.Zero);
-                if (setStatus != 0)
-                    throw new InvalidOperationException(
-                        "FwpmEngineSetSecurityInfo0 granting the temporary probe ACE failed: 0x" +
-                        setStatus.ToString("X8"));
+                // Build a byte copy so one common setter path handles every target.
+                int size = unchecked((ushort)Marshal.ReadInt16(IntPtr.Add(newAcl, 2)));
+                byte[] updated = new byte[size];
+                Marshal.Copy(newAcl, updated, 0, size);
+                SetDacl(engine, target, updated);
             }
             finally {
                 if (newAcl != IntPtr.Zero) LocalFree(newAcl);
@@ -166,26 +329,13 @@ namespace BlacklistInevitable {
             }
         }
 
-        public static void RestoreEngineDaclBase64(string base64Dacl) {
+        public static void RestoreDaclBase64(string target, string base64Dacl) {
             byte[] bytes = Convert.FromBase64String(base64Dacl);
             if (bytes.Length < 8)
-                throw new InvalidOperationException("The captured BFE Engine DACL is invalid.");
-            IntPtr acl = Marshal.AllocHGlobal(bytes.Length);
-            IntPtr engine = IntPtr.Zero;
-            try {
-                Marshal.Copy(bytes, 0, acl, bytes.Length);
-                engine = OpenEngine();
-                uint status = FwpmEngineSetSecurityInfo0(engine, DACL_SECURITY_INFORMATION,
-                    IntPtr.Zero, IntPtr.Zero, acl, IntPtr.Zero);
-                if (status != 0)
-                    throw new InvalidOperationException(
-                        "FwpmEngineSetSecurityInfo0 restoring the original DACL failed: 0x" +
-                        status.ToString("X8"));
-            }
-            finally {
-                if (engine != IntPtr.Zero) FwpmEngineClose0(engine);
-                Marshal.FreeHGlobal(acl);
-            }
+                throw new InvalidOperationException("The captured " + target + " DACL is invalid.");
+            IntPtr engine = OpenEngine();
+            try { SetDacl(engine, target, bytes); }
+            finally { FwpmEngineClose0(engine); }
         }
     }
 }
@@ -196,6 +346,15 @@ function Invoke-Icacls {
     param([Parameter(Mandatory = $true)][string[]]$Arguments)
     $output = & (Join-Path $env:WINDIR "System32\icacls.exe") @Arguments 2>&1
     if ($LASTEXITCODE -ne 0) { throw "icacls failed: $($output -join ' ')" }
+}
+
+$aclRights = [ordered]@{
+    Engine = [uint32]0x00000008       # BEGIN_WRITE_TXN, non-inheriting
+    Provider = [uint32]0x00000082     # READ | ADD_LINK on Agent provider only
+    Sublayer = [uint32]0x00000082     # READ | ADD_LINK on Agent sublayer only
+    LayerV4 = [uint32]0x00000002      # ADD_LINK on ALE_AUTH_CONNECT_V4 only
+    LayerV6 = [uint32]0x00000002      # ADD_LINK on ALE_AUTH_CONNECT_V6 only
+    FilterContainer = [uint32]0x00000001 # ADD only; no inheritance to filters
 }
 
 try {
@@ -222,9 +381,9 @@ try {
     $account = [System.Security.Principal.NTAccount]::new("NT SERVICE\$serviceName")
     $serviceSid = $account.Translate([System.Security.Principal.SecurityIdentifier])
     $sidText = $serviceSid.Value
+    Set-Content -LiteralPath $serviceSidPath -Value $sidText -NoNewline -Encoding ascii
 
-    # Mirror the service's narrow filesystem access needed to load the probe
-    # and write its diagnostic report. All changes are on the disposable runner.
+    # Mirror the Agent executable and ProgramData report access on this disposable runner.
     $programFilesRoot = [System.IO.Path]::GetFullPath($env:ProgramFiles).TrimEnd('\')
     Invoke-Icacls @($programFilesRoot, "/grant", ("*" + $sidText + ":(RX)"), "/C")
     Invoke-Icacls @($probeRoot, "/grant", ("*" + $sidText + ":(OI)(CI)(RX)"), "/T", "/C")
@@ -240,16 +399,24 @@ try {
         throw "SCM did not confirm SERVICE_SID_TYPE_RESTRICTED: $($queryOutput -join ' ')"
     }
 
-    # Exact minimum for this code path: WFP ADD, ADD_LINK, BEGIN_WRITE_TXN,
-    # READ and standard DELETE. OPEN already succeeds through BFE's default
-    # Everyone ACE. No generic WRITE/ALL or BEGIN_READ_TXN is granted.
-    $minimumWfpRights = [uint32]0x0001008B
-    $originalEngineDacl = [BlacklistInevitable.WfpEngineAclInterop]::CaptureEngineDaclBase64()
-    if ([string]::IsNullOrWhiteSpace($originalEngineDacl)) {
-        throw "Could not capture the original BFE Engine DACL."
+    # The preceding administrator-run live-BFE smoke test creates and validates
+    # our persistent provider/sublayer. Snapshot every existing descriptor before
+    # mutating any ACL, then grant only at the exact object/container check sites.
+    $targets = @("Engine", "Provider", "Sublayer", "LayerV4", "LayerV6", "FilterContainer")
+    foreach ($target in $targets) {
+        $originalDacls[$target] = [BlacklistInevitable.WfpScopedAclInterop]::CaptureDaclBase64($target)
+        if ([string]::IsNullOrWhiteSpace($originalDacls[$target])) {
+            throw "Could not capture the original $target WFP DACL."
+        }
     }
+
     $aclMutationAttempted = $true
-    [BlacklistInevitable.WfpEngineAclInterop]::AddTemporaryServiceAce($sidText, $minimumWfpRights)
+    foreach ($entry in $aclRights.GetEnumerator()) {
+        [BlacklistInevitable.WfpScopedAclInterop]::AddTemporaryServiceAce(
+            $entry.Key, $sidText, [uint32]$entry.Value
+        )
+        Write-Host ("Granted scoped WFP right 0x{0:X8} on {1}." -f [uint32]$entry.Value, $entry.Key)
+    }
 
     Start-Service -Name $serviceName -ErrorAction Stop
     $deadline = [DateTime]::UtcNow.AddSeconds(60)
@@ -270,12 +437,11 @@ try {
         $report.outcome -ne "access_granted" -or
         $report.validated_filter_count -lt 1 -or
         $report.rolled_back_filter_count -ne $report.validated_filter_count) {
-        throw "The restricted Agent WFP ACL acceptance test failed. Report: $($report | ConvertTo-Json -Depth 8 -Compress)"
+        throw "The scoped WFP ACL acceptance test failed. Report: $($report | ConvertTo-Json -Depth 8 -Compress)"
     }
 
     $report | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $artifactPath -Encoding utf8
     Write-Host "Restricted service SID: $sidText"
-    Write-Host "WFP rights granted temporarily: 0x$($minimumWfpRights.ToString('X8'))"
     Write-Host "WFP access result: $($report.outcome)"
     Write-Host "Validated filters: $($report.validated_filter_count)"
     Write-Host "Rolled-back filters: $($report.rolled_back_filter_count)"
@@ -292,12 +458,28 @@ finally {
         }
     }
 
-    if ($aclMutationAttempted -and -not [string]::IsNullOrWhiteSpace($originalEngineDacl)) {
-        [BlacklistInevitable.WfpEngineAclInterop]::RestoreEngineDaclBase64($originalEngineDacl)
-        $restoredEngineDacl = [BlacklistInevitable.WfpEngineAclInterop]::CaptureEngineDaclBase64()
-        if ($restoredEngineDacl -ne $originalEngineDacl) {
-            throw "The original BFE Engine DACL was not restored byte-for-byte after the disposable probe."
+    $restoreErrors = [System.Collections.Generic.List[string]]::new()
+    if ($aclMutationAttempted) {
+        # Restore in reverse scope order, continue after individual failures,
+        # then independently compare each restored DACL with its saved bytes.
+        $restoreOrder = @("FilterContainer", "LayerV6", "LayerV4", "Sublayer", "Provider", "Engine")
+        foreach ($target in $restoreOrder) {
+            try {
+                [BlacklistInevitable.WfpScopedAclInterop]::RestoreDaclBase64($target, $originalDacls[$target])
+                $restored = [BlacklistInevitable.WfpScopedAclInterop]::CaptureDaclBase64($target)
+                if ($restored -ne $originalDacls[$target]) {
+                    throw "The original $target WFP DACL was not restored byte-for-byte."
+                }
+                Write-Host "Original $target WFP DACL restored and verified byte-for-byte."
+            }
+            catch {
+                $restoreErrors.Add("$target restoration: $($_.Exception.Message)")
+            }
         }
-        Write-Host "Original BFE Engine DACL restored and verified byte-for-byte."
+    }
+
+    Remove-Item -LiteralPath $serviceSidPath -Force -ErrorAction SilentlyContinue
+    if ($restoreErrors.Count -gt 0) {
+        throw ("WFP ACL restoration failed: " + ($restoreErrors -join "; "))
     }
 }

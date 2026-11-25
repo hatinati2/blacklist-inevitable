@@ -246,7 +246,7 @@ fn parse_response(packet: &[u8], expected_name: &str, expected_type: RecordType)
                 }
                 5 => {
                     let (target, consumed) = decode_name(packet, offset)?;
-                    if offset + consumed != end || target.is_empty() {
+                    if consumed != end || target.is_empty() {
                         return Err("The encrypted DNS response contains an invalid CNAME record.".into());
                     }
                     RecordData::Cname(target)
@@ -322,7 +322,7 @@ fn decode_name(packet: &[u8], start: usize) -> Result<(String, usize), String> {
         cursor += 1;
         if length == 0 {
             let next = next_offset.unwrap_or(cursor);
-            return Ok((labels.join("."), next - start));
+            return Ok((labels.join("."), next));
         }
         let len = length as usize;
         let end = cursor.checked_add(len).filter(|end| *end <= packet.len())

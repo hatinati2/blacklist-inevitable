@@ -226,10 +226,10 @@ impl LocalProxyRuntime {
         // credential so another local Windows user cannot reuse the proxy.
         let username = uuid::Uuid::new_v4().simple().to_string();
         let password = uuid::Uuid::new_v4().simple().to_string();
-        config["inbounds"][0]["users"] = serde_json::json!([{
-            "username": username,
-            "password": password
-        }]);
+        if let Err(error) = configure_local_socks_auth(&mut config, &username, &password) {
+            zeroize_json(&mut config);
+            return Err(error);
+        }
         let encoded = serde_json::to_vec(&config);
         // Clear every generated config field before propagating a serialization error.
         zeroize_json(&mut config);
@@ -330,6 +330,38 @@ impl LocalProxyRuntime {
     }
 }
 
+
+
+fn configure_local_socks_auth(
+    config: &mut serde_json::Value,
+    username: &str,
+    password: &str,
+) -> Result<(), String> {
+    if username.is_empty()
+        || password.is_empty()
+        || username.len() > u8::MAX as usize
+        || password.len() > u8::MAX as usize
+    {
+        return Err("The generated local proxy credentials are invalid.".to_string());
+    }
+    let inbounds = config["inbounds"]
+        .as_array_mut()
+        .ok_or_else(|| "The generated proxy config has no inbound list.".to_string())?;
+    let inbound = inbounds
+        .first_mut()
+        .ok_or_else(|| "The generated proxy config has no local inbound.".to_string())?;
+    if inbound["type"] != "socks" || inbound["listen"] != "127.0.0.1" {
+        return Err(
+            "The generated local proxy inbound is not the expected loopback-only SOCKS listener."
+                .to_string(),
+        );
+    }
+    inbound["users"] = serde_json::json!([{
+        "username": username,
+        "password": password
+    }]);
+    Ok(())
+}
 
 fn zeroize_json(value: &mut serde_json::Value) {
     match value {
@@ -545,6 +577,41 @@ mod tests {
         assert_eq!(value["inbounds"][0]["users"][0]["password"], "");
         assert_eq!(value["nested"][0], "");
         assert_eq!(value["nested"][1]["token"], "");
+    }
+
+
+    #[test]
+    fn local_auth_requires_loopback_socks_inbound() {
+        let mut config = serde_json::json!({
+            "inbounds": [{
+                "type": "socks",
+                "listen": "127.0.0.1",
+                "listen_port": 12345
+            }]
+        });
+        configure_local_socks_auth(&mut config, "local-user", "local-password")
+            .expect("configure authenticated loopback inbound");
+        assert_eq!(config["inbounds"][0]["listen"], "127.0.0.1");
+        assert_eq!(config["inbounds"][0]["users"][0]["username"], "local-user");
+        assert_eq!(config["inbounds"][0]["users"][0]["password"], "local-password");
+
+        let mut non_loopback = serde_json::json!({
+            "inbounds": [{
+                "type": "socks",
+                "listen": "0.0.0.0",
+                "listen_port": 12345
+            }]
+        });
+        assert!(configure_local_socks_auth(&mut non_loopback, "u", "p").is_err());
+
+        let mut wrong_type = serde_json::json!({
+            "inbounds": [{
+                "type": "http",
+                "listen": "127.0.0.1",
+                "listen_port": 12345
+            }]
+        });
+        assert!(configure_local_socks_auth(&mut wrong_type, "u", "p").is_err());
     }
 
     #[test]

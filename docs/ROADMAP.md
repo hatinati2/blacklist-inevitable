@@ -77,6 +77,7 @@ Naive import/config mapping is implemented for a bounded subset; remote authenti
 - [x] Reconcile isolated WFP-only recovery journals during Agent startup, deleting only exact Agent-owned filter keys and retaining journals on any failure.
 - [x] Provision the restricted Agent service SID's object-scoped WFP grants from the per-machine installer; remove only those ACEs during upgrade/uninstall.
 - [x] Add journaled, exact-tuple outbound transport WFP filters for IPv4 and IPv6 alongside ALE authorization filters; validate restricted-SID add/read/remove and idempotent recovery on the disposable Windows runner.
+- [ ] Add read-only Windows physical-egress candidate discovery from GetIfTable2 using hardware/connector flags, stable NET_LUID/index identities, and fail-closed classification tests.
 - [ ] Test agent install/upgrade/uninstall, UAC denial, service crash/recovery, and UI-agent IPC authorization.
 - [ ] Test repeated connect / disconnect, crashes, sleep / resume, and shutdown.
 - [ ] Reconcile mixed engine/TUN/route/DNS/WFP journals in reverse mutation order before allowing Connect; current startup recovery handles WFP-only journals and defers all mixed-resource sessions.

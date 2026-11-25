@@ -2,7 +2,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, State};
 use tokio::net::TcpStream;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
@@ -54,6 +54,40 @@ pub struct EndpointTestResult {
     reachable: bool,
     latency_ms: Option<u64>,
     detail: String,
+}
+
+
+#[tauri::command]
+pub async fn get_local_proxy_status(
+    runtime: State<'_, crate::local_proxy::LocalProxyRuntime>,
+) -> crate::local_proxy::LocalProxyStatus {
+    runtime.status().await
+}
+
+#[tauri::command]
+pub async fn start_local_proxy(
+    app: AppHandle,
+    runtime: State<'_, crate::local_proxy::LocalProxyRuntime>,
+    profile_id: String,
+) -> Result<crate::local_proxy::LocalProxyStatus, String> {
+    let profile = profile_store::list_profiles(&app)?
+        .into_iter()
+        .find(|profile| profile.id == profile_id)
+        .ok_or_else(|| "Profile not found.".to_string())?;
+    let credentials = profile_store::get_credentials(&profile.id)?;
+    let supervisor = app.state::<ProcessSupervisor>().inner().clone();
+    runtime
+        .start(&app, profile, &credentials, &supervisor)
+        .await
+}
+
+#[tauri::command]
+pub async fn stop_local_proxy(
+    app: AppHandle,
+    runtime: State<'_, crate::local_proxy::LocalProxyRuntime>,
+) -> Result<crate::local_proxy::LocalProxyStatus, String> {
+    let supervisor = app.state::<ProcessSupervisor>().inner().clone();
+    runtime.stop(&supervisor).await
 }
 
 #[tauri::command]

@@ -451,6 +451,6 @@ mod tests {
     async fn literal_endpoint_returns_without_a_dns_exchange() {
         let resolver = EndpointBootstrapResolver::new().unwrap();
         assert_eq!(resolver.resolve_server("203.0.113.8").await.unwrap(),
-            vec!["203.0.113.8".parse().unwrap()]);
+            vec!["203.0.113.8".parse::<IpAddr>().unwrap()]);
     }
 }

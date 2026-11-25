@@ -2,6 +2,7 @@ use tauri::Manager;
 
 pub mod agent_client;
 pub mod agent_protocol;
+pub mod endpoint_bootstrap;
 pub mod agent_service;
 #[cfg(windows)]
 pub mod agent_pipe;

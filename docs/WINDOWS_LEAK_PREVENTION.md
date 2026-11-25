@@ -89,6 +89,12 @@ Do not use a broad "block all" rule without carefully scoped exceptions for the 
 - Define behavior for Windows DNS Client, multihomed DNS, NRPT, Windows system DoH, browser DoH, cached answers, resolver cache flush, mDNS, LLMNR, NetBIOS name service and local discovery.
 - Strict Privacy mode should disable or tightly constrain local discovery protocols where they expose device names or queries onto the local network. LAN use-cases may be exposed as an explicit, separately labelled exception.
 
+## VPN endpoint bootstrap resolver primitive
+
+The application now has a standalone Agent-callable DoH resolver for initial VPN endpoint hostnames. It sends RFC 8484 `application/dns-message` POST requests to `cloudflare-dns.com`, with the hostname mapped only to Cloudflare's published numeric IPv4/IPv6 resolver addresses. TLS certificate-chain and hostname validation remain enabled; proxy environment variables and redirects are disabled. The resolver requests both A and AAAA records, follows a bounded CNAME chain, bounds response size and request time, rejects malformed/NXDOMAIN/non-unicast results, and has no system-DNS or plaintext fallback.
+
+This is a resolver primitive, not yet a Connect integration. The Agent connection state machine must call it before route capture and WFP preparation, retain the returned address set only for that connection attempt, and abort on any error. The selected bootstrap resolver sees the queried VPN hostname; the physical network sees an HTTPS connection to the resolver IP. This initial query is outside the not-yet-created tunnel. The resolver provider should become an explicit supported setting before public release.
+
 ### VPN endpoint bootstrap
 A profile whose server is a hostname needs an address before TUN startup. The Agent must not use ordinary Windows system DNS as a silent fallback.
 

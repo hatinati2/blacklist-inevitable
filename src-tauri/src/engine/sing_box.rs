@@ -1260,6 +1260,47 @@ mod tests {
         assert_eq!(outbound["udp_relay_mode"], "quic");
         assert_eq!(outbound["tls"]["enabled"], true);
     }
+    #[test]
+    fn endpoint_plan_uses_the_emitted_engine_transport_tuple() {
+        use crate::wfp_policy::TransportProtocol::{Tcp, Udp};
+
+        let vless_credentials = BTreeMap::from([("uuid".to_string(), "uuid-value".to_string())]);
+        let vless = sample_profile("vless");
+        let plan = build_engine_endpoint_plan(&vless, &vless_credentials).unwrap();
+        assert_eq!(plan.server, "proxy.example.com");
+        assert_eq!(plan.port, 443);
+        assert_eq!(plan.protocols, vec![Tcp]);
+
+        let mut vless_quic = sample_profile("vless");
+        vless_quic.options.insert("transport".to_string(), "quic".to_string());
+        let plan = build_engine_endpoint_plan(&vless_quic, &vless_credentials).unwrap();
+        assert_eq!(plan.protocols, vec![Udp]);
+
+        let naive_credentials = BTreeMap::from([("password".to_string(), "secret".to_string())]);
+        let naive_https = sample_profile("naive");
+        assert_eq!(build_engine_endpoint_plan(&naive_https, &naive_credentials).unwrap().protocols, vec![Tcp]);
+        let mut naive_quic = sample_profile("naive");
+        naive_quic.options.insert("quic".to_string(), "true".to_string());
+        assert_eq!(build_engine_endpoint_plan(&naive_quic, &naive_credentials).unwrap().protocols, vec![Udp]);
+
+        let mut shadowsocks = sample_profile("shadowsocks");
+        shadowsocks.options.insert("method".to_string(), "chacha20-ietf-poly1305".to_string());
+        let shadowsocks_credentials = BTreeMap::from([("password".to_string(), "secret".to_string())]);
+        assert_eq!(build_engine_endpoint_plan(&shadowsocks, &shadowsocks_credentials).unwrap().protocols, vec![Tcp, Udp]);
+
+        let hysteria_credentials = BTreeMap::from([("password".to_string(), "secret".to_string())]);
+        let hysteria = sample_profile("hysteria2");
+        assert_eq!(build_engine_endpoint_plan(&hysteria, &hysteria_credentials).unwrap().protocols, vec![Udp]);
+
+        let tuic = sample_profile("tuic");
+        let tuic_credentials = BTreeMap::from([
+            ("uuid".to_string(), "uuid-value".to_string()),
+            ("password".to_string(), "secret".to_string()),
+        ]);
+        assert_eq!(build_engine_endpoint_plan(&tuic, &tuic_credentials).unwrap().protocols, vec![Udp]);
+    }
+
+
 }
 
 
@@ -3300,45 +3341,6 @@ mod engine_archive_tests {
 
         assert!(error.contains("libcronet.dll"));
         fs::remove_dir_all(directory).expect("remove temp directory");
-    }
-    #[test]
-    fn endpoint_plan_uses_the_emitted_engine_transport_tuple() {
-        use crate::wfp_policy::TransportProtocol::{Tcp, Udp};
-
-        let vless_credentials = BTreeMap::from([("uuid".to_string(), "uuid-value".to_string())]);
-        let vless = sample_profile("vless");
-        let plan = build_engine_endpoint_plan(&vless, &vless_credentials).unwrap();
-        assert_eq!(plan.server, "proxy.example.com");
-        assert_eq!(plan.port, 443);
-        assert_eq!(plan.protocols, vec![Tcp]);
-
-        let mut vless_quic = sample_profile("vless");
-        vless_quic.options.insert("transport".to_string(), "quic".to_string());
-        let plan = build_engine_endpoint_plan(&vless_quic, &vless_credentials).unwrap();
-        assert_eq!(plan.protocols, vec![Udp]);
-
-        let naive_credentials = BTreeMap::from([("password".to_string(), "secret".to_string())]);
-        let naive_https = sample_profile("naive");
-        assert_eq!(build_engine_endpoint_plan(&naive_https, &naive_credentials).unwrap().protocols, vec![Tcp]);
-        let mut naive_quic = sample_profile("naive");
-        naive_quic.options.insert("quic".to_string(), "true".to_string());
-        assert_eq!(build_engine_endpoint_plan(&naive_quic, &naive_credentials).unwrap().protocols, vec![Udp]);
-
-        let mut shadowsocks = sample_profile("shadowsocks");
-        shadowsocks.options.insert("method".to_string(), "chacha20-ietf-poly1305".to_string());
-        let shadowsocks_credentials = BTreeMap::from([("password".to_string(), "secret".to_string())]);
-        assert_eq!(build_engine_endpoint_plan(&shadowsocks, &shadowsocks_credentials).unwrap().protocols, vec![Tcp, Udp]);
-
-        let hysteria_credentials = BTreeMap::from([("password".to_string(), "secret".to_string())]);
-        let hysteria = sample_profile("hysteria2");
-        assert_eq!(build_engine_endpoint_plan(&hysteria, &hysteria_credentials).unwrap().protocols, vec![Udp]);
-
-        let tuic = sample_profile("tuic");
-        let tuic_credentials = BTreeMap::from([
-            ("uuid".to_string(), "uuid-value".to_string()),
-            ("password".to_string(), "secret".to_string()),
-        ]);
-        assert_eq!(build_engine_endpoint_plan(&tuic, &tuic_credentials).unwrap().protocols, vec![Udp]);
     }
 
 }

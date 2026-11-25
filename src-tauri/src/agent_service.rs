@@ -1,8 +1,9 @@
 //! Dedicated Windows Service Control Manager host for the privileged Agent.
 //!
-//! The service owns the local authenticated status-only named pipe. VPN engine,
-//! WFP, TUN, route and DNS operations remain disabled until the recovery runtime
-//! and packet-capture release gates are implemented.
+//! The service owns the local authenticated status-only named pipe. Startup may
+//! remove exact Agent-owned WFP filters for isolated WFP-only recovery journals;
+//! installing traffic policy, starting an engine, TUN, route and DNS operations
+//! remain disabled until the full recovery and packet-capture release gates pass.
 
 #[cfg(windows)]
 mod windows_service {
@@ -112,14 +113,96 @@ mod windows_service {
         Ok((store, unresolved.len()))
     }
 
-    fn recovery_diagnostics_detail(unresolved_sessions: usize) -> String {
-        let journal_state = if unresolved_sessions == 0 {
-            "no unresolved committed sessions were found".to_string()
-        } else {
-            format!("{unresolved_sessions} unresolved session(s) require recovery")
+    #[derive(Default)]
+    struct StartupRecoveryOutcome {
+        recovered_wfp_only_sessions: usize,
+        failure: Option<String>,
+    }
+
+    fn is_wfp_only_recovery_session(
+        journal: &crate::recovery_journal::RecoveryJournal,
+    ) -> bool {
+        journal.engine.is_none()
+            && journal.tunnel.is_none()
+            && journal.routes.is_empty()
+            && journal.dns.is_empty()
+            && !journal.firewall_filters.is_empty()
+    }
+
+    /// Reconcile only journals that contain WFP filters and no process, TUN,
+    /// route, or DNS state. The injected callback must remove exact journalled
+    /// filter keys and independently verify absence before this function clears
+    /// the journal. Mixed-resource sessions are deliberately deferred.
+    fn reconcile_wfp_only_sessions<F>(
+        store: &RecoveryJournalStore,
+        mut remove_exact_filters: F,
+    ) -> StartupRecoveryOutcome
+    where
+        F: FnMut(&[crate::recovery_journal::FirewallFilterRecord]) -> Result<(), String>,
+    {
+        let journals = match store.load_unresolved() {
+            Ok(journals) => journals,
+            Err(error) => {
+                return StartupRecoveryOutcome {
+                    recovered_wfp_only_sessions: 0,
+                    failure: Some(error),
+                };
+            }
         };
+
+        let mut outcome = StartupRecoveryOutcome::default();
+        for journal in journals.iter().filter(|item| is_wfp_only_recovery_session(item)) {
+            if let Err(error) = remove_exact_filters(&journal.firewall_filters) {
+                outcome.failure = Some(error);
+                break;
+            }
+            if let Err(error) = store.remove_session(journal.session_id) {
+                outcome.failure = Some(format!(
+                    "WFP filters were verified absent, but recovery journal cleanup failed: {error}"
+                ));
+                break;
+            }
+            outcome.recovered_wfp_only_sessions += 1;
+        }
+        outcome
+    }
+
+    fn reconcile_startup_wfp_filters(
+        store: &RecoveryJournalStore,
+    ) -> StartupRecoveryOutcome {
+        let mut engine: Option<crate::wfp_engine::WfpEngine> = None;
+        reconcile_wfp_only_sessions(store, |records| {
+            if engine.is_none() {
+                engine = Some(crate::wfp_engine::WfpEngine::open_local()?);
+            }
+            engine
+                .as_mut()
+                .expect("WFP engine was opened for an actionable recovery journal")
+                .remove_owned_filters(records)
+                .map(|_| ())
+        })
+    }
+
+    fn recovery_diagnostics_detail(
+        unresolved_sessions: usize,
+        recovered_wfp_only_sessions: usize,
+        recovery_failure: Option<&str>,
+    ) -> String {
+        let journal_state = if unresolved_sessions == 0 {
+            "no unresolved committed sessions remain".to_string()
+        } else {
+            format!("{unresolved_sessions} unresolved session(s) remain")
+        };
+        let recovery_state = if recovered_wfp_only_sessions == 0 {
+            "no WFP-only session required recovery".to_string()
+        } else {
+            format!("recovered {recovered_wfp_only_sessions} WFP-only session(s)")
+        };
+        let failure_state = recovery_failure
+            .map(|detail| format!(" WFP recovery is incomplete: {detail}."))
+            .unwrap_or_default();
         format!(
-            "The privileged Agent is running in status-only mode. Recovery journal validation completed: {journal_state}. No automatic network recovery is performed, and VPN connection operations remain disabled."
+            "The privileged Agent is running in status-only mode. Startup journal result: {recovery_state}; {journal_state}. Sessions containing engine, TUN, route, or DNS state are not auto-cleaned. Connect, Disconnect, and Recover remain disabled.{failure_state}"
         )
     }
 
@@ -128,9 +211,15 @@ mod windows_service {
         use std::fs;
         use std::path::Path;
 
-        use crate::recovery_journal::{RecoveryJournal, RecoveryJournalStore};
+        use crate::recovery_journal::{
+            DnsConfiguration, DnsMutationRecord, FirewallFilterRecord, RecoveryJournal,
+            RecoveryJournalStore, RouteMutationRecord, RouteState,
+        };
 
-        use super::{open_recovery_journal_store_at, recovery_diagnostics_detail};
+        use super::{
+            is_wfp_only_recovery_session, open_recovery_journal_store_at,
+            reconcile_wfp_only_sessions, recovery_diagnostics_detail,
+        };
 
         fn test_program_data() -> std::path::PathBuf {
             std::env::temp_dir().join(format!(
@@ -142,6 +231,104 @@ mod windows_service {
         fn create_journal_directory(program_data: &Path) {
             fs::create_dir_all(program_data.join("blacklist-inevitable").join("Agent"))
                 .expect("create test journal directory");
+        }
+
+        #[test]
+        fn startup_recovery_removes_only_wfp_only_sessions() {
+            let program_data = test_program_data();
+            create_journal_directory(&program_data);
+            let journal_directory = program_data.join("blacklist-inevitable").join("Agent");
+            let store = RecoveryJournalStore::open(&journal_directory).expect("open test store");
+
+            let mut wfp_only = RecoveryJournal::new(74);
+            wfp_only.firewall_filters.push(test_filter_record());
+            store.persist(&wfp_only).expect("persist WFP-only journal");
+
+            let mut mixed = RecoveryJournal::new(75);
+            mixed.firewall_filters.push(test_filter_record_with_key(
+                "f0a00000-0000-4000-8000-000000000075",
+            ));
+            mixed.routes.push(RouteMutationRecord {
+                destination_prefix: "0.0.0.0/0".to_string(),
+                applied: RouteState {
+                    interface_index: 7,
+                    next_hop: None,
+                    metric: 10,
+                },
+                previous: Some(RouteState {
+                    interface_index: 3,
+                    next_hop: Some("192.0.2.1".parse().expect("valid test gateway")),
+                    metric: 25,
+                }),
+            });
+            store.persist(&mixed).expect("persist mixed-resource journal");
+
+            let mut removed_keys = Vec::new();
+            let outcome = reconcile_wfp_only_sessions(&store, |records| {
+                removed_keys.extend(records.iter().filter_map(|record| record.filter_key.clone()));
+                Ok(())
+            });
+            assert_eq!(outcome.recovered_wfp_only_sessions, 1);
+            assert!(outcome.failure.is_none());
+            assert_eq!(removed_keys, vec![
+                "f0a00000-0000-4000-8000-000000000074".to_string()
+            ]);
+            let unresolved = store.load_unresolved().expect("reload unresolved");
+            assert_eq!(unresolved.len(), 1);
+            assert_eq!(unresolved[0].session_id, 75);
+
+            fs::remove_dir_all(program_data).expect("remove test ProgramData directory");
+        }
+
+        #[test]
+        fn startup_recovery_retains_journal_when_exact_filter_removal_fails() {
+            let program_data = test_program_data();
+            create_journal_directory(&program_data);
+            let journal_directory = program_data.join("blacklist-inevitable").join("Agent");
+            let store = RecoveryJournalStore::open(&journal_directory).expect("open test store");
+            let mut journal = RecoveryJournal::new(76);
+            journal.firewall_filters.push(test_filter_record());
+            store.persist(&journal).expect("persist WFP-only journal");
+
+            let outcome = reconcile_wfp_only_sessions(&store, |_records| {
+                Err("simulated WFP access denied".to_string())
+            });
+            assert_eq!(outcome.recovered_wfp_only_sessions, 0);
+            assert_eq!(
+                outcome.failure.as_deref(),
+                Some("simulated WFP access denied")
+            );
+            assert_eq!(store.load_unresolved().expect("reload journal").len(), 1);
+
+            fs::remove_dir_all(program_data).expect("remove test ProgramData directory");
+        }
+
+        #[test]
+        fn startup_recovery_does_not_treat_empty_or_dns_sessions_as_wfp_only() {
+            let mut empty = RecoveryJournal::new(77);
+            assert!(!is_wfp_only_recovery_session(&empty));
+            empty.dns.push(DnsMutationRecord {
+                interface_index: 7,
+                applied: DnsConfiguration::Static(vec![
+                    "203.0.113.53".parse().expect("valid test DNS"),
+                ]),
+                previous: DnsConfiguration::Dhcp,
+            });
+            empty.firewall_filters.push(test_filter_record());
+            assert!(!is_wfp_only_recovery_session(&empty));
+        }
+
+        fn test_filter_record() -> FirewallFilterRecord {
+            test_filter_record_with_key("f0a00000-0000-4000-8000-000000000074")
+        }
+
+        fn test_filter_record_with_key(key: &str) -> FirewallFilterRecord {
+            FirewallFilterRecord {
+                provider_key: "9d45d56a-6b31-48aa-9c45-72c8b25e2f10".to_string(),
+                filter_key: Some(key.to_string()),
+                layer_key: "b2f9b5a0-5e8a-4c6f-9d2b-77c0f4a25a01".to_string(),
+                filter_id: None,
+            }
         }
 
         #[test]
@@ -194,17 +381,19 @@ mod windows_service {
 
         #[test]
         fn startup_diagnostics_report_an_empty_journal_without_claiming_network_recovery() {
-            let detail = recovery_diagnostics_detail(0);
-            assert!(detail.contains("no unresolved committed sessions were found"));
-            assert!(detail.contains("No automatic network recovery is performed"));
-            assert!(detail.contains("VPN connection operations remain disabled"));
+            let detail = recovery_diagnostics_detail(0, 0, None);
+            assert!(detail.contains("no unresolved committed sessions remain"));
+            assert!(detail.contains("no WFP-only session required recovery"));
+            assert!(detail.contains("Connect, Disconnect, and Recover remain disabled"));
         }
 
         #[test]
         fn startup_diagnostics_surface_unresolved_session_count() {
-            let detail = recovery_diagnostics_detail(3);
-            assert!(detail.contains("3 unresolved session(s) require recovery"));
-            assert!(detail.contains("VPN connection operations remain disabled"));
+            let detail = recovery_diagnostics_detail(3, 1, Some("access denied"));
+            assert!(detail.contains("1 WFP-only session(s)"));
+            assert!(detail.contains("3 unresolved session(s) remain"));
+            assert!(detail.contains("WFP recovery is incomplete: access denied"));
+            assert!(detail.contains("Connect, Disconnect, and Recover remain disabled"));
         }
     }
 
@@ -248,7 +437,7 @@ mod windows_service {
         // SYSTEM, Administrators, and this restricted service SID. Open it before
         // accepting clients; a missing, corrupt, oversized, or unsafe journal
         // blocks service startup rather than being silently ignored.
-        let (_recovery_journal_store, unresolved_sessions) = match open_recovery_journal_store() {
+        let (recovery_journal_store, _) = match open_recovery_journal_store() {
             Ok(state) => state,
             Err(error) => {
                 eprintln!("Agent recovery journal validation failed; service startup is blocked: {error}");
@@ -258,12 +447,34 @@ mod windows_service {
                 return;
             }
         };
+
+        // Only an isolated WFP-only journal is actionable here. If any session
+        // also records an engine, tunnel, route, or DNS mutation, it remains
+        // unresolved and no partial cleanup is attempted.
+        let recovery = reconcile_startup_wfp_filters(&recovery_journal_store);
+        let unresolved_sessions = match recovery_journal_store.load_unresolved() {
+            Ok(journals) => journals.len(),
+            Err(error) => {
+                eprintln!("Agent recovery journal re-validation failed; service startup is blocked: {error}");
+                close_owned_handles(std::ptr::null_mut(), stop_event);
+                report_status(&status(SERVICE_STOPPED, 0, ERROR_GEN_FAILURE, 2, 0));
+                STATUS_HANDLE.store(0, Ordering::Release);
+                return;
+            }
+        };
+        if let Some(error) = recovery.failure.as_deref() {
+            eprintln!("Agent WFP-only startup recovery remains unresolved: {error}");
+        }
         if unresolved_sessions > 0 {
             eprintln!(
                 "Agent recovery journal contains {unresolved_sessions} unresolved session(s); network operations remain disabled."
             );
         }
-        let startup_detail = recovery_diagnostics_detail(unresolved_sessions);
+        let startup_detail = recovery_diagnostics_detail(
+            unresolved_sessions,
+            recovery.recovered_wfp_only_sessions,
+            recovery.failure.as_deref(),
+        );
 
         // The service is not reported as RUNNING until both its recovery journal
         // and its protected, local-only pipe endpoint have been validated.

@@ -24,6 +24,12 @@ An unbound policy that adds every VPN endpoint exception to every physical adapt
 
 The disposable Windows CI runner also exercises the compiled route-bound plan against live BFE with two synthetic physical-interface identities and separate IPv4/IPv6 endpoint bindings. The rollback-only test adds each filter, reads back its interface LUID, endpoint tuple, action and layer, deletes by key, then aborts without leaving packet policy installed. A second acceptance probe runs as the restricted Agent service SID: it commits the 12 route-bound filters using TEST-NET destinations and nonexistent interface identities, reloads the durable journal, removes the exact keys, confirms idempotent absence, and removes the journal. This validates the WFP and recovery path, not real packet routing or production network protection.
 
+## Encrypted endpoint preparation
+
+The Windows-only `WindowsEgressSnapshot::capture_for_server` entry point accepts a hostname, explicit non-zero port, and engine-derived TCP/UDP protocol. It performs numeric-address DoH bootstrap with no system-DNS fallback, maps each resolved A/AAAA address to the exact supplied transport tuple, and immediately captures current physical route bindings. The endpoint count is capped at the WFP policy limit. The API deliberately does not infer transport semantics from a profile label.
+
+The initial DoH request occurs before snapshot capture and before any tunnel exists. A successful snapshot is preparation data only; it does not install policy, mutate routes/DNS, or authorize Connected state.
+
 ## Consistency boundary
 
 The epoch is a point-in-time invalidation guard, not a route lock. A route can still change after a final generation check and before or immediately after a WFP commit. The commit caller must retain the snapshot, treat invalidation as failed preparation, keep the engine stopped, and leave the durable WFP intent journal for exact recovery. A future connection state machine must serialize route/DNS/WFP/engine state and reconcile it on crash/reboot.

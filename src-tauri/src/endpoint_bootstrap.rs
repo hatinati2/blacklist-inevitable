@@ -15,6 +15,7 @@ const DOH_URL: &str = "https://cloudflare-dns.com/dns-query";
 const DNS_MEDIA_TYPE: &str = "application/dns-message";
 const MAX_MESSAGE_BYTES: usize = 4096;
 const MAX_ANSWERS: usize = 128;
+const MAX_ENDPOINTS: usize = 64;
 const MAX_CNAME_HOPS: usize = 8;
 
 fn bootstrap_addresses() -> [SocketAddr; 4] {
@@ -74,7 +75,32 @@ impl EndpointBootstrapResolver {
         if addresses.is_empty() {
             return Err("Encrypted DNS returned no A or AAAA address for the VPN endpoint.".into());
         }
+        if addresses.len() > MAX_ENDPOINTS {
+            return Err("Encrypted DNS returned more endpoint addresses than the bounded route/WFP policy can accept.".into());
+        }
         Ok(addresses.into_iter().collect())
+    }
+
+    /// Resolve a proxy hostname and preserve its exact transport tuple for each
+    /// numeric address. The port/protocol are supplied by the engine adapter;
+    /// this method never guesses whether a profile uses TCP or UDP.
+    pub async fn resolve_vpn_endpoints(
+        &self,
+        server: &str,
+        port: u16,
+        protocol: crate::wfp_policy::TransportProtocol,
+    ) -> Result<Vec<crate::wfp_policy::VpnEndpoint>, String> {
+        if port == 0 {
+            return Err("The VPN endpoint transport port must be non-zero.".into());
+        }
+        let addresses = self.resolve_server(server).await?;
+        if addresses.is_empty() || addresses.len() > MAX_ENDPOINTS {
+            return Err("The VPN endpoint address set is empty or exceeds the bounded route/WFP policy capacity.".into());
+        }
+        Ok(addresses
+            .into_iter()
+            .map(|address| crate::wfp_policy::VpnEndpoint { address, port, protocol })
+            .collect())
     }
 
     async fn resolve_family(&self, domain: &str, kind: RecordType) -> Result<Vec<IpAddr>, String> {
@@ -450,7 +476,34 @@ mod tests {
     #[tokio::test]
     async fn literal_endpoint_returns_without_a_dns_exchange() {
         let resolver = EndpointBootstrapResolver::new().unwrap();
-        assert_eq!(resolver.resolve_server("203.0.113.8").await.unwrap(),
-            vec!["203.0.113.8".parse().unwrap()]);
+        assert_eq!(
+            resolver.resolve_server("203.0.113.8").await.unwrap(),
+            vec!["203.0.113.8".parse::<IpAddr>().unwrap()]
+        );
+    }
+
+    #[tokio::test]
+    async fn maps_numeric_endpoint_to_exact_supplied_transport_tuple() {
+        let resolver = EndpointBootstrapResolver::new().unwrap();
+        let endpoints = resolver.resolve_vpn_endpoints(
+            "2001:db8::8",
+            8443,
+            crate::wfp_policy::TransportProtocol::Udp,
+        ).await.unwrap();
+        assert_eq!(endpoints, vec![crate::wfp_policy::VpnEndpoint {
+            address: "2001:db8::8".parse().unwrap(),
+            port: 8443,
+            protocol: crate::wfp_policy::TransportProtocol::Udp,
+        }]);
+    }
+
+    #[tokio::test]
+    async fn rejects_zero_transport_port_before_dns() {
+        let resolver = EndpointBootstrapResolver::new().unwrap();
+        assert!(resolver.resolve_vpn_endpoints(
+            "203.0.113.8",
+            0,
+            crate::wfp_policy::TransportProtocol::Tcp,
+        ).await.is_err());
     }
 }

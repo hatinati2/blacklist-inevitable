@@ -317,11 +317,15 @@ impl LocalProxyRuntime {
                         .to_string(),
                 )
             } else {
-                remove_config_file(&session.config_path, supervisor)?;
-                drop(session);
-                Ok(LocalProxyStatus::inactive(
-                    "The local proxy was stopped and its temporary configuration was removed.",
-                ))
+                match remove_config_file(&session.config_path, supervisor) {
+                    Ok(()) => {
+                        drop(session);
+                        Ok(LocalProxyStatus::inactive(
+                            "The local proxy was stopped and its temporary configuration was removed.",
+                        ))
+                    }
+                    Err(error) => Err(error),
+                }
             }
         } else {
             Ok(LocalProxyStatus::inactive("No local proxy session is running."))

@@ -73,3 +73,10 @@ Before normal connection functionality is implemented:
 - Real Delay workers are detached from the invoking Tauri command so closing the invoking window or cancelling that command does not abort the worker before cleanup. The process-wide supervisor waits for graceful cleanup, while the Windows Job Object provides kill-on-close containment for assigned children.
 - Complete license, notice, redistribution, signing, and release review remains a release gate.
 - Never download or execute an engine binary merely because a profile references it.
+
+
+## Route-bound endpoint permits
+
+The route-aware policy compiler requires a one-to-one binding from every numeric VPN endpoint to the current Windows-selected physical interface. It emits the four block filters on every candidate NIC, but each endpoint permit exists only on its own resolved LUID/index. The Windows egress snapshot holds IPv4/IPv6 route and interface change subscriptions from before discovery until the WFP install attempt completes, and the install routine rechecks the snapshot before transaction start and before commit. These checks are point-in-time guards, not an atomic route lock.
+
+Only the route-aware snapshot installation API is suitable for future production connection use. The unbound policy installation helper is crate-private and exists only for the disposable restricted-Service-SID recovery probe; it must not be wired into Connect.

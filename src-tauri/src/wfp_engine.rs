@@ -478,18 +478,66 @@ impl WfpEngine {
     /// interface classification, network-control exceptions, endpoint bootstrap,
     /// routes/DNS, crash recovery, and physical-adapter packet-capture acceptance
     /// are complete.
-    pub fn install_egress_policy_for_service_sid(
+    /// Install a WFP plan while a live Windows egress snapshot remains current.
+    ///
+    /// The snapshot owns route/interface notification subscriptions and binds
+    /// each VPN endpoint permit to the exact physical interface selected by
+    /// Windows. The generation is checked before the journaled transaction,
+    /// before BFE begin, immediately before commit, and after verification.
+    pub fn install_egress_policy_snapshot_for_service_sid(
+        &mut self,
+        snapshot: &crate::windows_egress_snapshot::WindowsEgressSnapshot,
+        service_sid: &str,
+        journal_store: &crate::recovery_journal::RecoveryJournalStore,
+        journal: &mut crate::recovery_journal::RecoveryJournal,
+    ) -> Result<FilterInstallReport, String> {
+        let plan = snapshot.policy_plan()?.clone();
+        self.install_compiled_egress_policy_plan_for_service_sid(
+            plan,
+            service_sid,
+            journal_store,
+            journal,
+            || snapshot.ensure_current(),
+        )
+    }
+
+    /// Synthetic unbound install retained only for the disposable restricted
+    /// Service-SID recovery acceptance probe. Production connection code must
+    /// use `install_egress_policy_snapshot_for_service_sid`.
+    pub(crate) fn install_egress_policy_for_service_sid(
         &mut self,
         spec: &crate::wfp_policy::EgressPolicySpec,
         service_sid: &str,
         journal_store: &crate::recovery_journal::RecoveryJournalStore,
         journal: &mut crate::recovery_journal::RecoveryJournal,
     ) -> Result<FilterInstallReport, String> {
+        let plan = spec.compile_plan()?;
+        self.install_compiled_egress_policy_plan_for_service_sid(
+            plan,
+            service_sid,
+            journal_store,
+            journal,
+            || Ok(()),
+        )
+    }
+
+    fn install_compiled_egress_policy_plan_for_service_sid<F>(
+        &mut self,
+        plan: crate::wfp_policy::WfpPolicyPlan,
+        service_sid: &str,
+        journal_store: &crate::recovery_journal::RecoveryJournalStore,
+        journal: &mut crate::recovery_journal::RecoveryJournal,
+        mut ensure_current: F,
+    ) -> Result<FilterInstallReport, String>
+    where
+        F: FnMut() -> Result<(), String>,
+    {
         use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::{
             FwpmTransactionBegin0, FwpmTransactionCommit0,
         };
 
         self.ensure_open()?;
+        ensure_current()?;
         if journal.session_id == 0 || journal.firewall_filters.len() != 0 {
             return Err("WFP policy installation requires a valid session journal with no prior filter intents.".into());
         }
@@ -498,7 +546,6 @@ impl WfpEngine {
         }
         journal.validate()?;
 
-        let plan = spec.compile_plan()?;
         if plan.filters.is_empty() || plan.filters.len() > 256 {
             return Err("The Agent egress policy exceeds the recovery journal's bounded 256-filter capacity.".into());
         }
@@ -537,6 +584,11 @@ impl WfpEngine {
         journal_store.persist(&intent)?;
         *journal = intent.clone();
 
+        // If the route snapshot became stale while the intent was being
+        // checkpointed, leave the durable exact keys for startup reconciliation
+        // but do not begin a BFE transaction.
+        ensure_current()?;
+
         // A failed begin leaves the durable stable-key intents in place. Startup
         // recovery will confirm the keys are absent before removing the journal.
         let begin = unsafe { FwpmTransactionBegin0(self.handle, 0) };
@@ -563,6 +615,13 @@ impl WfpEngine {
             };
         }
 
+        if let Err(error) = ensure_current() {
+            return match self.abort_transaction_or_poison() {
+                Ok(()) => Err(format!("{error} The WFP transaction was aborted; stable-key intent remains for exact reconciliation.")),
+                Err(abort_error) => Err(format!("{error} {abort_error} The intent journal is retained and network startup must remain blocked.")),
+            };
+        }
+
         let commit = unsafe { FwpmTransactionCommit0(self.handle) };
         if commit != 0 {
             let error = format!(
@@ -572,6 +631,13 @@ impl WfpEngine {
                 Ok(()) => Err(format!("{error} Stable-key intent remains for exact reconciliation.")),
                 Err(abort_error) => Err(format!("{error} {abort_error} The intent journal is retained and network startup must remain blocked.")),
             };
+        }
+
+        // The filters are now committed. If a route/interface notification arrived
+        // during the commit boundary, retain the stable-key intent and refuse to
+        // let the caller start the engine; startup recovery will remove exact keys.
+        if let Err(error) = ensure_current() {
+            return Err(format!("{error} WFP filters were committed but the egress snapshot is stale; the stable-key journal remains durable. Do not start the engine; reconcile the filters first."));
         }
 
         // Persist runtime IDs as diagnostic data only. The stable GUID checkpoint
@@ -600,6 +666,10 @@ impl WfpEngine {
         {
             verify_committed_filter_identity(self.handle, key, *runtime_id, planned)?;
         }
+
+        ensure_current().map_err(|error| {
+            format!("{error} The WFP filters remain committed and journaled; do not start the engine and reconcile the exact filter keys.")
+        })?;
 
         *journal = committed;
         Ok(FilterInstallReport {

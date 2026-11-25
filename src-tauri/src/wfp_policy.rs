@@ -6,7 +6,7 @@
 //! model can be considered active leak protection.
 
 use std::collections::BTreeSet;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 
 const MAX_PHYSICAL_INTERFACES: usize = 32;
 const MAX_ENDPOINTS: usize = 64;
@@ -23,6 +23,15 @@ pub struct VpnEndpoint {
     pub address: IpAddr,
     pub port: u16,
     pub protocol: TransportProtocol,
+}
+
+/// One exact VPN endpoint exception bound to the interface Windows selected
+/// for that endpoint's current route. A binding must match a candidate by both
+/// stable LUID and current interface index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct EndpointEgressBinding {
+    pub endpoint: VpnEndpoint,
+    pub egress: PhysicalInterface,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -72,7 +81,7 @@ pub struct WfpPolicyPlan {
 }
 
 impl EgressPolicySpec {
-    pub fn validate(&self) -> Result<(), String> {
+    fn validate_common(&self) -> Result<(), String> {
         if self.physical_interfaces.is_empty()
             || self.physical_interfaces.len() > MAX_PHYSICAL_INTERFACES
         {
@@ -100,6 +109,11 @@ impl EgressPolicySpec {
         {
             return Err("The VPN endpoint allowlist contains a duplicate or invalid transport tuple.".into());
         }
+        Ok(())
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        self.validate_common()?;
         let planned_filter_count = self
             .physical_interfaces
             .len()
@@ -151,6 +165,97 @@ impl EgressPolicySpec {
                         });
                     }
                 }
+            }
+        }
+
+        Ok(WfpPolicyPlan { filters })
+    }
+
+    /// Compile a route-bound dual-stack WFP plan. Block filters cover every
+    /// candidate physical interface, but each VPN endpoint permit is emitted
+    /// only on the single interface Windows selected for that endpoint.
+    ///
+    /// This is the only plan builder suitable for a route-resolved production
+    /// transaction. The unbound `compile_plan` remains for rollback-only
+    /// synthetic WFP acceptance tests.
+    pub fn compile_plan_with_resolved_egress(
+        &self,
+        bindings: &[EndpointEgressBinding],
+    ) -> Result<WfpPolicyPlan, String> {
+        self.validate_common()?;
+        if bindings.len() != self.vpn_endpoints.len() {
+            return Err("Every VPN endpoint must have exactly one Windows-resolved egress binding.".into());
+        }
+
+        let endpoints: BTreeSet<_> = self.vpn_endpoints.iter().copied().collect();
+        let mut seen_endpoints = BTreeSet::new();
+        for binding in bindings {
+            if !endpoints.contains(&binding.endpoint) {
+                return Err("An egress binding references an endpoint outside the configured VPN endpoint set.".into());
+            }
+            if !seen_endpoints.insert(binding.endpoint) {
+                return Err("A VPN endpoint has more than one egress-interface binding.".into());
+            }
+            if !self.physical_interfaces.iter().any(|interface| {
+                interface.interface_luid == binding.egress.interface_luid
+                    && interface.interface_index == binding.egress.interface_index
+            }) {
+                return Err("A route-resolved endpoint egress does not exactly match a discovered physical-interface identity.".into());
+            }
+            if binding.endpoint.address.is_unspecified()
+                || binding.endpoint.address.is_loopback()
+                || binding.endpoint.address.is_multicast()
+                || binding.endpoint.address == IpAddr::V4(Ipv4Addr::BROADCAST)
+                || matches!(binding.endpoint.address, IpAddr::V6(address) if address.is_unicast_link_local())
+            {
+                return Err("A route-bound VPN endpoint is not a supported unicast destination.".into());
+            }
+        }
+        if seen_endpoints != endpoints {
+            return Err("The endpoint-to-egress bindings do not cover the configured VPN endpoint set exactly.".into());
+        }
+
+        // Four mandatory block filters per physical NIC plus two exact permit
+        // filters per endpoint (ALE + outbound transport, one address family).
+        let block_count = self.physical_interfaces.len().checked_mul(4)
+            .ok_or_else(|| "The route-bound WFP filter count overflowed.".to_string())?;
+        let permit_count = bindings.len().checked_mul(2)
+            .ok_or_else(|| "The route-bound WFP permit count overflowed.".to_string())?;
+        let filter_count = block_count.checked_add(permit_count)
+            .ok_or_else(|| "The route-bound WFP filter count overflowed.".to_string())?;
+        if filter_count > MAX_PLANNED_FILTERS {
+            return Err("The route-bound WFP policy exceeds the bounded 256-filter recovery journal.".into());
+        }
+
+        let mut filters = Vec::with_capacity(filter_count);
+        for interface in &self.physical_interfaces {
+            for layer in [
+                WfpLayer::AleAuthConnectV4,
+                WfpLayer::AleAuthConnectV6,
+                WfpLayer::OutboundTransportV4,
+                WfpLayer::OutboundTransportV6,
+            ] {
+                filters.push(PlannedFilter {
+                    interface_index: interface.interface_index,
+                    interface_luid: interface.interface_luid,
+                    layer,
+                    intent: FilterIntent::BlockOtherPhysicalEgress,
+                });
+            }
+        }
+
+        for binding in bindings {
+            let layers = match binding.endpoint.address {
+                IpAddr::V4(_) => [WfpLayer::AleAuthConnectV4, WfpLayer::OutboundTransportV4],
+                IpAddr::V6(_) => [WfpLayer::AleAuthConnectV6, WfpLayer::OutboundTransportV6],
+            };
+            for layer in layers {
+                filters.push(PlannedFilter {
+                    interface_index: binding.egress.interface_index,
+                    interface_luid: binding.egress.interface_luid,
+                    layer,
+                    intent: FilterIntent::PermitVpnEndpoint(binding.endpoint),
+                });
             }
         }
 
@@ -294,6 +399,113 @@ mod tests {
             protocol: TransportProtocol::Udp,
         });
         assert!(value.compile_plan().is_err(), "the policy must not exceed the 256-record journal bound");
+    }
+
+    #[test]
+    fn route_bound_plan_permits_each_endpoint_only_on_its_selected_interface() {
+        let value = spec();
+        let bindings = vec![
+            EndpointEgressBinding { endpoint: value.vpn_endpoints[0], egress: value.physical_interfaces[0] },
+            EndpointEgressBinding { endpoint: value.vpn_endpoints[1], egress: value.physical_interfaces[1] },
+        ];
+        let plan = value.compile_plan_with_resolved_egress(&bindings).unwrap();
+        assert_eq!(plan.filters.len(), 12);
+
+        for interface in &value.physical_interfaces {
+            for layer in [
+                WfpLayer::AleAuthConnectV4,
+                WfpLayer::AleAuthConnectV6,
+                WfpLayer::OutboundTransportV4,
+                WfpLayer::OutboundTransportV6,
+            ] {
+                assert!(plan.filters.iter().any(|filter| {
+                    filter.interface_luid == interface.interface_luid
+                        && filter.interface_index == interface.interface_index
+                        && filter.layer == layer
+                        && filter.intent == FilterIntent::BlockOtherPhysicalEgress
+                }));
+            }
+        }
+
+        for (endpoint, selected) in [
+            (value.vpn_endpoints[0], value.physical_interfaces[0]),
+            (value.vpn_endpoints[1], value.physical_interfaces[1]),
+        ] {
+            let expected_layers: &[WfpLayer] = match endpoint.address {
+                IpAddr::V4(_) => &[WfpLayer::AleAuthConnectV4, WfpLayer::OutboundTransportV4],
+                IpAddr::V6(_) => &[WfpLayer::AleAuthConnectV6, WfpLayer::OutboundTransportV6],
+            };
+            for layer in expected_layers {
+                assert!(plan.filters.iter().any(|filter| {
+                    filter.interface_luid == selected.interface_luid
+                        && filter.interface_index == selected.interface_index
+                        && filter.layer == *layer
+                        && filter.intent == FilterIntent::PermitVpnEndpoint(endpoint)
+                }));
+            }
+            assert!(!plan.filters.iter().any(|filter| {
+                filter.interface_luid != selected.interface_luid
+                    && filter.intent == FilterIntent::PermitVpnEndpoint(endpoint)
+            }));
+        }
+    }
+
+    #[test]
+    fn route_bound_plan_rejects_missing_duplicate_unknown_and_stale_bindings() {
+        let value = spec();
+        let first = EndpointEgressBinding { endpoint: value.vpn_endpoints[0], egress: value.physical_interfaces[0] };
+        let second = EndpointEgressBinding { endpoint: value.vpn_endpoints[1], egress: value.physical_interfaces[1] };
+        assert!(value.compile_plan_with_resolved_egress(&[first]).is_err());
+        assert!(value.compile_plan_with_resolved_egress(&[first, first]).is_err());
+
+        let mut unknown = first;
+        unknown.endpoint.port += 1;
+        assert!(value.compile_plan_with_resolved_egress(&[unknown, second]).is_err());
+
+        let mut stale = first;
+        stale.egress.interface_index += 100;
+        assert!(value.compile_plan_with_resolved_egress(&[stale, second]).is_err());
+    }
+
+    #[test]
+    fn route_bound_plan_supports_exact_256_filter_capacity_without_cross_nic_permits() {
+        let interfaces: Vec<_> = (1..=32)
+            .map(|index| PhysicalInterface { interface_luid: index as u64, interface_index: index })
+            .collect();
+        let endpoints: Vec<_> = (1..=64)
+            .map(|port| VpnEndpoint {
+                address: "198.51.100.9".parse().unwrap(),
+                port,
+                protocol: TransportProtocol::Udp,
+            })
+            .collect();
+        let bindings: Vec<_> = endpoints.iter().enumerate()
+            .map(|(index, endpoint)| EndpointEgressBinding {
+                endpoint: *endpoint,
+                egress: interfaces[index % interfaces.len()],
+            })
+            .collect();
+        let value = EgressPolicySpec { physical_interfaces: interfaces, vpn_endpoints: endpoints };
+        let plan = value.compile_plan_with_resolved_egress(&bindings).unwrap();
+        assert_eq!(plan.filters.len(), 256);
+        assert_eq!(
+            plan.filters.iter().filter(|item| matches!(item.intent, FilterIntent::PermitVpnEndpoint(_))).count(),
+            128
+        );
+    }
+
+    #[test]
+    fn route_bound_plan_rejects_link_local_ipv6_without_scope() {
+        let value = EgressPolicySpec {
+            physical_interfaces: vec![PhysicalInterface { interface_luid: 7, interface_index: 7 }],
+            vpn_endpoints: vec![VpnEndpoint {
+                address: "fe80::1".parse().unwrap(),
+                port: 443,
+                protocol: TransportProtocol::Tcp,
+            }],
+        };
+        let binding = EndpointEgressBinding { endpoint: value.vpn_endpoints[0], egress: value.physical_interfaces[0] };
+        assert!(value.compile_plan_with_resolved_egress(&[binding]).is_err());
     }
 
     #[test]

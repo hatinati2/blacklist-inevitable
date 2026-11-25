@@ -101,19 +101,22 @@ function Stop-InstalledApplicationProcesses {
 $resourcesDirectory = Join-Path $installDirectory "resources"
 $agentPath = Join-Path $resourcesDirectory "blacklist-inevitable-agent.exe"
 $serviceHelper = Join-Path $resourcesDirectory "windows-agent-service.ps1"
+$wfpAclHelper = Join-Path $resourcesDirectory "windows-agent-wfp-acl.ps1"
 $publisherPinPath = Join-Path $resourcesDirectory "agent-publisher-thumbprint.txt"
 
-foreach ($requiredFile in @($appPath, $agentPath, $serviceHelper, $publisherPinPath)) {
+foreach ($requiredFile in @($appPath, $agentPath, $serviceHelper, $wfpAclHelper, $publisherPinPath)) {
     if (-not (Test-Path -LiteralPath $requiredFile -PathType Leaf)) {
         throw "A required installed application/Agent resource is missing: $requiredFile"
     }
 }
 
-$tokens = $null
-$parseErrors = $null
-[void][System.Management.Automation.Language.Parser]::ParseFile($serviceHelper, [ref]$tokens, [ref]$parseErrors)
-if ($parseErrors.Count -gt 0) {
-    throw "The bundled Windows Agent service helper contains PowerShell syntax errors: $($parseErrors -join '; ')"
+foreach ($helperPath in @($serviceHelper, $wfpAclHelper)) {
+    $tokens = $null
+    $parseErrors = $null
+    [void][System.Management.Automation.Language.Parser]::ParseFile($helperPath, [ref]$tokens, [ref]$parseErrors)
+    if ($parseErrors.Count -gt 0) {
+        throw "A bundled Windows Agent helper contains PowerShell syntax errors ($helperPath): $($parseErrors -join '; ')"
+    }
 }
 
 $publisherThumbprint = (Get-Content -LiteralPath $publisherPinPath -Raw -Encoding ascii).Trim().ToUpperInvariant()

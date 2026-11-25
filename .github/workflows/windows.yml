@@ -2,9 +2,9 @@ name: Windows build
 
 on:
   push:
-    branches: [main, feat/wfp-transactional-removal-smoke, feat/wfp-restricted-service-sid-probe, feat/wfp-restricted-sid-minimum-acl, feat/wfp-object-scoped-acl, feat/wfp-journaled-filter-recovery-test, feat/agent-startup-wfp-only-recovery]
+    branches: [main, feat/wfp-transactional-removal-smoke, feat/wfp-restricted-service-sid-probe, feat/wfp-restricted-sid-minimum-acl, feat/wfp-object-scoped-acl, feat/wfp-journaled-filter-recovery-test, feat/agent-startup-wfp-only-recovery, feat/installer-wfp-acl-provisioning]
   pull_request:
-    branches: [main, feat/windows-agent-service-installer, feat/agent-credential-handoff, feat/agent-recovery-journal-bootstrap, feat/wfp-journaled-filter-recovery-test]
+    branches: [main, feat/windows-agent-service-installer, feat/agent-credential-handoff, feat/agent-recovery-journal-bootstrap, feat/wfp-journaled-filter-recovery-test, feat/agent-startup-wfp-only-recovery, feat/installer-wfp-acl-provisioning]
   workflow_dispatch:
 
 permissions:

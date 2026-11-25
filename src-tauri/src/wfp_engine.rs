@@ -184,10 +184,13 @@ fn expected_condition_key(value: ExpectedCondition) -> GUID {
 fn wfp_layer_guid(layer: crate::wfp_policy::WfpLayer) -> GUID {
     use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::{
         FWPM_LAYER_ALE_AUTH_CONNECT_V4, FWPM_LAYER_ALE_AUTH_CONNECT_V6,
+        FWPM_LAYER_OUTBOUND_TRANSPORT_V4, FWPM_LAYER_OUTBOUND_TRANSPORT_V6,
     };
     match layer {
         crate::wfp_policy::WfpLayer::AleAuthConnectV4 => FWPM_LAYER_ALE_AUTH_CONNECT_V4,
         crate::wfp_policy::WfpLayer::AleAuthConnectV6 => FWPM_LAYER_ALE_AUTH_CONNECT_V6,
+        crate::wfp_policy::WfpLayer::OutboundTransportV4 => FWPM_LAYER_OUTBOUND_TRANSPORT_V4,
+        crate::wfp_policy::WfpLayer::OutboundTransportV6 => FWPM_LAYER_OUTBOUND_TRANSPORT_V6,
     }
 }
 
@@ -468,11 +471,13 @@ impl WfpEngine {
     /// first filter is added. All filters are committed atomically, read back, and
     /// followed by a second journal revision containing diagnostic BFE runtime IDs.
     ///
-    /// This API currently covers only ALE_AUTH_CONNECT_V4/V6 connection
-    /// authorization. It is not a complete packet-layer kill switch: callers must
-    /// not claim all-protocol physical-egress protection or enable Connect until
-    /// packet-layer policy, interface discovery, endpoint bootstrap, routes/DNS,
-    /// crash recovery, and physical-adapter packet-capture acceptance are complete.
+    /// This API installs ALE_AUTH_CONNECT_V4/V6 plus OUTBOUND_TRANSPORT_V4/V6
+    /// filters. The transport layers also see third-party/raw transport packets
+    /// and traffic in previously authorized ALE flows. This is still not a
+    /// complete release kill switch: keep Connect disabled until physical
+    /// interface classification, network-control exceptions, endpoint bootstrap,
+    /// routes/DNS, crash recovery, and physical-adapter packet-capture acceptance
+    /// are complete.
     pub fn install_egress_policy_for_service_sid(
         &mut self,
         spec: &crate::wfp_policy::EgressPolicySpec,
@@ -625,8 +630,8 @@ impl WfpEngine {
         }
         self.ensure_open()?;
         let plan = spec.compile_plan()?;
-        if plan.filters.is_empty() || plan.filters.len() > 4 {
-            return Err("The WFP recovery acceptance test requires a bounded four-filter dual-stack plan.".into());
+        if plan.filters.is_empty() || plan.filters.len() > 8 {
+            return Err("The WFP recovery acceptance test requires a bounded eight-filter dual-stack ALE/transport plan.".into());
         }
 
         let mut journal = crate::recovery_journal::RecoveryJournal::new(session_id);
@@ -1020,8 +1025,13 @@ fn validate_owned_filter_records(
         return Err("The recovery journal contains too many WFP filter identities.".into());
     }
 
-    let v4_layer = wfp_layer_guid(crate::wfp_policy::WfpLayer::AleAuthConnectV4);
-    let v6_layer = wfp_layer_guid(crate::wfp_policy::WfpLayer::AleAuthConnectV6);
+    let allowed_layers = [
+        crate::wfp_policy::WfpLayer::AleAuthConnectV4,
+        crate::wfp_policy::WfpLayer::AleAuthConnectV6,
+        crate::wfp_policy::WfpLayer::OutboundTransportV4,
+        crate::wfp_policy::WfpLayer::OutboundTransportV6,
+    ]
+    .map(wfp_layer_guid);
     let mut seen_keys = std::collections::BTreeSet::new();
     let mut validated = Vec::with_capacity(records.len());
 
@@ -1036,7 +1046,7 @@ fn validate_owned_filter_records(
         })?;
         let filter_key = parse_canonical_wfp_guid(filter_key_text)?;
         let layer_key = parse_canonical_wfp_guid(&record.layer_key)?;
-        if !guid_eq(&layer_key, &v4_layer) && !guid_eq(&layer_key, &v6_layer) {
+        if !allowed_layers.iter().any(|allowed| guid_eq(&layer_key, allowed)) {
             return Err("A recovery record names a WFP layer outside the Agent's supported egress policy.".into());
         }
         if record.filter_id == Some(0) {
@@ -1201,7 +1211,7 @@ mod live_bfe_transaction_tests {
             .expect("BFE should add, read back, delete, and roll back the test filters");
 
         assert_eq!(report.validated_filter_count, report.rolled_back_filter_count);
-        assert_eq!(report.validated_filter_count, 4);
+        assert_eq!(report.validated_filter_count, 8);
     }
 }
 

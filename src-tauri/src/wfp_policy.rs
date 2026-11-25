@@ -252,6 +252,34 @@ mod tests {
     }
 
     #[test]
+    fn accepts_the_exact_journal_capacity_and_rejects_one_filter_over() {
+        let mut value = EgressPolicySpec {
+            physical_interfaces: (1..=4)
+                .map(|index| PhysicalInterface {
+                    interface_luid: index as u64,
+                    interface_index: index,
+                })
+                .collect(),
+            vpn_endpoints: (1..=62)
+                .map(|port| VpnEndpoint {
+                    address: "203.0.113.8".parse().unwrap(),
+                    port,
+                    protocol: TransportProtocol::Udp,
+                })
+                .collect(),
+        };
+        let plan = value.compile_plan().expect("256 filters fit the recovery journal");
+        assert_eq!(plan.filters.len(), 256);
+
+        value.vpn_endpoints.push(VpnEndpoint {
+            address: "203.0.113.8".parse().unwrap(),
+            port: 63,
+            protocol: TransportProtocol::Udp,
+        });
+        assert!(value.compile_plan().is_err(), "the policy must not exceed the 256-record journal bound");
+    }
+
+    #[test]
     fn rejects_duplicate_endpoint_tuples() {
         let mut value = spec();
         value.vpn_endpoints.push(value.vpn_endpoints[0]);

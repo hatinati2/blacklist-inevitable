@@ -592,6 +592,7 @@ impl WfpEngine {
         journal_store.persist(&committed).map_err(|error| {
             format!("Agent WFP filters were committed, but the runtime-ID checkpoint failed: {error}. The prior stable-key intent remains durable; do not start the engine or report Connected.")
         })?;
+        *journal = committed.clone();
 
         // Verify the objects again after the transaction has committed. A failure
         // is not treated as success; the caller must retain the journal and block.

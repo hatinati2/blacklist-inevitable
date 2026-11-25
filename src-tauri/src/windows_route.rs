@@ -7,6 +7,7 @@
 //! Any mismatch or virtual/filter/endpoint result is rejected.
 
 use crate::wfp_policy::{PhysicalInterface, VpnEndpoint};
+pub use crate::wfp_policy::EndpointEgressBinding as ResolvedVpnEndpointEgress;
 use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr};
 
@@ -61,12 +62,6 @@ struct InterfaceFacts {
     interface_index: u32,
     interface_type: u32,
     flags: u8,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ResolvedVpnEndpointEgress {
-    pub endpoint: VpnEndpoint,
-    pub egress: PhysicalInterface,
 }
 
 fn is_known_logical_interface_type(interface_type: u32) -> bool {

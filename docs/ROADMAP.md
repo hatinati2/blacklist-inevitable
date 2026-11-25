@@ -77,9 +77,10 @@ Naive import/config mapping is implemented for a bounded subset; remote authenti
 - [x] Reconcile isolated WFP-only recovery journals during Agent startup, deleting only exact Agent-owned filter keys and retaining journals on any failure.
 - [x] Provision the restricted Agent service SID's object-scoped WFP grants from the per-machine installer; remove only those ACEs during upgrade/uninstall.
 - [x] Add journaled, exact-tuple outbound transport WFP filters for IPv4 and IPv6 alongside ALE authorization filters; validate restricted-SID add/read/remove and idempotent recovery on the disposable Windows runner.
-- [ ] Add read-only Windows physical-egress candidate discovery from GetIfTable2 using hardware/connector flags, stable NET_LUID/index identities, and fail-closed classification tests.
-- [ ] Resolve each pinned VPN endpoint to the current Windows-selected egress interface for IPv4/IPv6; require fresh LUID/flags to match the physical-interface inventory.
-- [ ] Monitor IPv4/IPv6 route and IP-interface changes; invalidate endpoint-egress snapshots and require re-discovery before any future WFP commit.
+- [x] Add read-only Windows physical-egress candidate discovery from GetIfTable2 using hardware/connector flags, stable NET_LUID/index identities, and fail-closed classification tests.
+- [x] Resolve each pinned VPN endpoint to the current Windows-selected egress interface for IPv4/IPv6; require fresh LUID/flags to match the physical-interface inventory.
+- [x] Monitor IPv4/IPv6 route and IP-interface changes; invalidate endpoint-egress snapshots and require re-discovery before any future WFP commit.
+- [ ] Compile endpoint permits only on each endpoint's Windows-selected physical egress interface; reject stale/incomplete mappings and keep block filters on every discovered physical interface.
 - [ ] Test agent install/upgrade/uninstall, UAC denial, service crash/recovery, and UI-agent IPC authorization.
 - [ ] Test repeated connect / disconnect, crashes, sleep / resume, and shutdown.
 - [ ] Reconcile mixed engine/TUN/route/DNS/WFP journals in reverse mutation order before allowing Connect; current startup recovery handles WFP-only journals and defers all mixed-resource sessions.

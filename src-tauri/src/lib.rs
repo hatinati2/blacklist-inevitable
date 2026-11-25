@@ -11,6 +11,7 @@ pub mod recovery_journal;
 pub mod wfp_policy;
 pub mod windows_interfaces;
 pub mod windows_route;
+pub mod windows_network_change;
 #[cfg(windows)]
 pub mod wfp_engine;
 pub mod split_tunnel;

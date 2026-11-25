@@ -76,6 +76,7 @@ Naive import/config mapping is implemented for a bounded subset; remote authenti
 - [ ] Add the split-tunnel policy editor and persistent settings in the Windows UI; enforce process-path matching and DNS behavior in the privileged agent.
 - [x] Reconcile isolated WFP-only recovery journals during Agent startup, deleting only exact Agent-owned filter keys and retaining journals on any failure.
 - [x] Provision the restricted Agent service SID's object-scoped WFP grants from the per-machine installer; remove only those ACEs during upgrade/uninstall.
+- [x] Add journaled, exact-tuple outbound transport WFP filters for IPv4 and IPv6 alongside ALE authorization filters; validate restricted-SID add/read/remove and idempotent recovery on the disposable Windows runner.
 - [ ] Test agent install/upgrade/uninstall, UAC denial, service crash/recovery, and UI-agent IPC authorization.
 - [ ] Test repeated connect / disconnect, crashes, sleep / resume, and shutdown.
 - [ ] Reconcile mixed engine/TUN/route/DNS/WFP journals in reverse mutation order before allowing Connect; current startup recovery handles WFP-only journals and defers all mixed-resource sessions.

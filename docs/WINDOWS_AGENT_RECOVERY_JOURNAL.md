@@ -34,9 +34,9 @@ The optional runtime ID supports the crash window between writing a stable-key i
 
 The Windows CI now has an opt-in live-BFE smoke test that adds test filters, reads each one back, deletes each by stable key, and aborts the encompassing write transaction. This exercises the real add/read-back/delete API sequence without committing any traffic filter. The test also provisions only the Agent's persistent provider/sublayer metadata on the disposable hosted runner; it does not install a network policy. The test runs in an administrative CI context and does **not** prove access under the restricted LocalSystem Agent service token.
 
-The scoped WFP access model places rights at the object where each operation checks access: Engine `BEGIN_WRITE_TXN`; Agent provider and sublayer `READ | ADD_LINK`; target ALE layer objects `ADD_LINK`; Filter-container `ADD`; and per-filter `READ | DELETE` through an explicit descriptor passed to `FwpmFilterAdd0`. The Filter-container ACE is non-inheriting. The restricted service receives no generic write/all, no global provider/sublayer ADD, and no container-wide READ/DELETE permissions.
+The scoped WFP access model places rights at the object where each operation checks access: Engine `BEGIN_WRITE_TXN`; Agent provider and sublayer `READ | ADD_LINK`; ALE_AUTH_CONNECT and OUTBOUND_TRANSPORT layer objects `ADD_LINK`; Filter-container `ADD`; and per-filter `READ | DELETE` through an explicit descriptor passed to `FwpmFilterAdd0`. The Filter-container ACE is non-inheriting. The restricted service receives no generic write/all, no global provider/sublayer ADD, and no container-wide READ/DELETE permissions.
 
-The Windows acceptance workflow seeds the persistent Agent provider/sublayer on a disposable hosted runner, snapshots the DACLs for the Engine, provider, sublayer, both target ALE layers, and Filter container, then applies the scoped ACEs for a LocalSystem SCM service with `SERVICE_SID_TYPE_RESTRICTED`. The service persists a pre-mutation `FirewallFilterRecord` set containing stable GUIDs but no runtime IDs, commits four synthetic persistent filters with per-filter `READ | DELETE` descriptors, reloads the on-disk journal, and invokes `remove_owned_filters` in a separate committed WFP transaction. It then invokes the same recovery again to require idempotent already-absent results. Only after all filter keys are verified absent does it remove the journal session. It also persists and reloads the post-add runtime-ID revision.
+The Windows acceptance workflow seeds the persistent Agent provider/sublayer on a disposable hosted runner, snapshots the DACLs for the Engine, provider, sublayer, both ALE layers, both outbound transport layers, and Filter container, then applies the scoped ACEs for a LocalSystem SCM service with `SERVICE_SID_TYPE_RESTRICTED`. The service persists a pre-mutation `FirewallFilterRecord` set containing stable GUIDs but no runtime IDs, commits eight synthetic persistent filters with per-filter `READ | DELETE` descriptors, reloads the on-disk journal, and invokes `remove_owned_filters` in a separate committed WFP transaction. It then invokes the same recovery again to require idempotent already-absent results. Only after all filter keys are verified absent does it remove the journal session. It also persists and reloads the post-add runtime-ID revision.
 
 The probe uses TEST-NET endpoint addresses and a deliberately non-existent interface LUID/index. Four real persistent test filters are briefly committed on the disposable CI machine and are removed before success; this is not a production traffic policy and the runner is discarded after the workflow. The test requires the journal to be absent after verified cleanup. On exit, the harness restores all captured WFP DACLs in reverse order and verifies exact byte-for-byte equality; any failed restoration fails CI.
 
@@ -46,18 +46,19 @@ Agent startup now performs a narrowly scoped WFP-only reconciliation before expo
 
 ## Production installer WFP ACL provisioning
 
-The per-machine Agent installer now bundles `scripts/windows-agent-wfp-acl.ps1`. After creating the LocalSystem service and enabling its restricted service SID, the installer invokes the helper to verify or create the persistent Agent provider/sublayer namespace and provision six non-inheriting object-scoped grants:
+The per-machine Agent installer now bundles `scripts/windows-agent-wfp-acl.ps1`. After creating the LocalSystem service and enabling its restricted service SID, the installer invokes the helper to verify or create the persistent Agent provider/sublayer namespace and provision eight non-inheriting object-scoped grants:
 
 - Engine: `BEGIN_WRITE_TXN` only.
 - Agent provider and sublayer: `READ | ADD_LINK`.
 - ALE_AUTH_CONNECT_V4 and ALE_AUTH_CONNECT_V6 layer objects: `ADD_LINK` only.
+- OUTBOUND_TRANSPORT_V4 and OUTBOUND_TRANSPORT_V6 layer objects: `ADD_LINK` only.
 - Filter container: `ADD` only; no inheritance.
 
-The helper preserves the existing DACL by adding only the Agent service SID ACE. It refuses NULL DACLs and verifies the provider/sublayer identity and persistence flags before granting access. If provisioning fails part-way, it attempts to remove the grants it just applied and the installer does not start the service. Uninstall/upgrade stops the service, removes only that service SID's six ACEs, then deletes the SCM service. Persistent provider/sublayer metadata is intentionally left in place; no traffic filters are installed or removed by the installer helper.
+The helper preserves the existing DACL by adding only the Agent service SID ACE. It refuses NULL DACLs and verifies the provider/sublayer identity and persistence flags before granting access. If provisioning fails part-way, it attempts to remove the grants it just applied and the installer does not start the service. Uninstall/upgrade stops the service, removes only that service SID's eight ACEs, then deletes the SCM service. Persistent provider/sublayer metadata is intentionally left in place; no traffic filters are installed or removed by the installer helper.
 
-The Windows restricted-SID acceptance probe now calls this same provision/remove helper, then exercises the service's journaled WFP filter add/read/delete path. The harness snapshots all six DACLs and restores them byte-for-byte after the test. This validates the helper's WFP ACL operations on a disposable hosted runner. It does not exercise the signed production installer because the repository's publisher thumbprint remains `UNCONFIGURED`; a trusted signed install and clean Windows 10/11 verification remain release gates.
+The Windows restricted-SID acceptance probe now calls this same provision/remove helper, then exercises the service's journaled WFP filter add/read/delete path. The harness snapshots all eight DACLs and restores them byte-for-byte after the test. This validates the helper's WFP ACL operations on a disposable hosted runner. It does not exercise the signed production installer because the repository's publisher thumbprint remains `UNCONFIGURED`; a trusted signed install and clean Windows 10/11 verification remain release gates.
 
-## Agent-owned persistent ALE policy transaction
+## Agent-owned persistent ALE and outbound transport policy transaction
 
 The Windows WFP backend now exposes
 `WfpEngine::install_egress_policy_for_service_sid`. It requires the restricted
@@ -75,14 +76,43 @@ calls this same install API with TEST-NET endpoints and a deliberately nonexiste
 interface identity, then reloads the journal and verifies exact-key deletion and
 idempotent absence on the disposable Windows runner.
 
-**This is an ALE connection-authorization milestone, not the complete physical
-egress kill switch.** The current plan uses only
-`ALE_AUTH_CONNECT_V4/V6`; it does not yet install packet-layer filters for every
-protocol or multicast/broadcast path, classify physical versus virtual adapters,
-wire policy installation into production Connect, or implement route/DNS/engine
-lifecycle rollback. The installer/CI smoke test does not establish leak-free
-traffic behavior. Keep Connect disabled until the broader WFP policy and
-Windows 10/11 physical-adapter packet-capture gates pass.
+**This is an expanded WFP egress-policy milestone, not the complete release
+kill switch.** The plan now installs the block and exact VPN-endpoint permit at
+both `ALE_AUTH_CONNECT_V4/V6` and `OUTBOUND_TRANSPORT_V4/V6`. The outbound
+transport filters match interface LUID, destination address, destination port,
+and protocol, and add packet-path coverage for raw and third-party transports
+and packets in previously authorized ALE flows. The restricted-SID acceptance
+probe now validates eight filters and snapshots/restores eight WFP layer/object
+DACLs byte-for-byte.
+
+The implementation still does not classify physical versus virtual adapters
+from live interface data, wire policy installation into production Connect,
+define all network-control and multicast/broadcast exceptions, or implement
+route/DNS/engine lifecycle rollback. The installer/CI smoke test does not
+establish leak-free traffic behavior. Keep Connect disabled until those
+remaining gates and Windows 10/11 physical-adapter packet-capture tests pass.
+
+## Outbound transport enforcement
+
+The same journaled transaction adds a second filter pair at
+`FWPM_LAYER_OUTBOUND_TRANSPORT_V4/V6`. Each physical-interface policy blocks
+all unmatched outbound transport traffic, while a higher-weight filter permits
+only the configured VPN endpoint's exact IP address, port, and TCP/UDP protocol.
+The condition set also pins the physical interface by its stable NET_LUID.
+
+Microsoft documents that outbound transport filtering sits at the top of the
+network layer and catches packets sent through third-party transports and raw
+sockets. The policy is also installed at ALE_AUTH_CONNECT, so new connection
+authorizations and outbound packet/transport traffic are checked at their
+respective WFP layers. WFP arbitration is per-layer; the endpoint exception is
+therefore independently installed at each layer. The restricted-SID probe
+commits eight synthetic filters on the disposable runner and verifies exact-key
+removal and idempotent recovery.
+
+This still does not prove production leak prevention. Physical adapter
+classification, network-control/multicast policy, persistent crash/reboot
+behavior, route/DNS transaction recovery, and packet-capture validation remain
+release gates.
 
 ## Security boundary and remaining work
 

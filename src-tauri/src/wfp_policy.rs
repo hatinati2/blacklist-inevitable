@@ -46,6 +46,8 @@ pub struct EgressPolicySpec {
 pub enum WfpLayer {
     AleAuthConnectV4,
     AleAuthConnectV6,
+    OutboundTransportV4,
+    OutboundTransportV6,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,7 +103,7 @@ impl EgressPolicySpec {
         let planned_filter_count = self
             .physical_interfaces
             .len()
-            .checked_mul(self.vpn_endpoints.len() + 2)
+            .checked_mul(2 * (self.vpn_endpoints.len() + 2))
             .ok_or_else(|| "The WFP filter plan size overflowed.".to_string())?;
         if planned_filter_count > MAX_PLANNED_FILTERS {
             return Err("The WFP policy exceeds the bounded maximum filter count.".into());
@@ -116,28 +118,38 @@ impl EgressPolicySpec {
     pub fn compile_plan(&self) -> Result<WfpPolicyPlan, String> {
         self.validate()?;
         let mut filters = Vec::with_capacity(
-            self.physical_interfaces.len() * (self.vpn_endpoints.len() + 2),
+            self.physical_interfaces.len() * 2 * (self.vpn_endpoints.len() + 2),
         );
 
+        // ALE rejects new outbound authorizations that do not match the exact
+        // VPN endpoint. Outbound transport also sees packets from third-party
+        // transports and raw sockets, including packets in previously
+        // authorized ALE flows. WFP arbitration is per-layer, so each layer
+        // needs its own exact VPN endpoint exception.
         for interface in &self.physical_interfaces {
-            for layer in [WfpLayer::AleAuthConnectV4, WfpLayer::AleAuthConnectV6] {
-                filters.push(PlannedFilter {
-                    interface_index: interface.interface_index,
-                    interface_luid: interface.interface_luid,
-                    layer,
-                    intent: FilterIntent::BlockOtherPhysicalEgress,
-                });
-                for endpoint in self.vpn_endpoints.iter().filter(|endpoint| {
-                    matches!((layer, endpoint.address),
-                        (WfpLayer::AleAuthConnectV4, IpAddr::V4(_))
-                        | (WfpLayer::AleAuthConnectV6, IpAddr::V6(_)))
-                }) {
+            for (ale_layer, transport_layer) in [
+                (WfpLayer::AleAuthConnectV4, WfpLayer::OutboundTransportV4),
+                (WfpLayer::AleAuthConnectV6, WfpLayer::OutboundTransportV6),
+            ] {
+                for layer in [ale_layer, transport_layer] {
                     filters.push(PlannedFilter {
                         interface_index: interface.interface_index,
                         interface_luid: interface.interface_luid,
                         layer,
-                        intent: FilterIntent::PermitVpnEndpoint(*endpoint),
+                        intent: FilterIntent::BlockOtherPhysicalEgress,
                     });
+                    for endpoint in self.vpn_endpoints.iter().filter(|endpoint| {
+                        matches!((ale_layer, endpoint.address),
+                            (WfpLayer::AleAuthConnectV4, IpAddr::V4(_))
+                            | (WfpLayer::AleAuthConnectV6, IpAddr::V6(_)))
+                    }) {
+                        filters.push(PlannedFilter {
+                            interface_index: interface.interface_index,
+                            interface_luid: interface.interface_luid,
+                            layer,
+                            intent: FilterIntent::PermitVpnEndpoint(*endpoint),
+                        });
+                    }
                 }
             }
         }
@@ -174,12 +186,17 @@ mod tests {
     #[test]
     fn compiles_both_address_families_and_blocks_other_egress() {
         let plan = spec().compile_plan().unwrap();
-        assert_eq!(plan.filters.len(), 8);
+        assert_eq!(plan.filters.len(), 16);
         for interface in [
             PhysicalInterface { interface_luid: 0x0001_0000_0000_0007, interface_index: 7 },
             PhysicalInterface { interface_luid: 0x0001_0000_0000_000B, interface_index: 11 },
         ] {
-            for layer in [WfpLayer::AleAuthConnectV4, WfpLayer::AleAuthConnectV6] {
+            for layer in [
+                WfpLayer::AleAuthConnectV4,
+                WfpLayer::AleAuthConnectV6,
+                WfpLayer::OutboundTransportV4,
+                WfpLayer::OutboundTransportV6,
+            ] {
                 assert!(plan.filters.iter().any(|filter| {
                     filter.interface_index == interface.interface_index
                         && filter.interface_luid == interface.interface_luid
@@ -260,7 +277,7 @@ mod tests {
                     interface_index: index,
                 })
                 .collect(),
-            vpn_endpoints: (1..=62)
+            vpn_endpoints: (1..=30)
                 .map(|port| VpnEndpoint {
                     address: "203.0.113.8".parse().unwrap(),
                     port,
@@ -273,7 +290,7 @@ mod tests {
 
         value.vpn_endpoints.push(VpnEndpoint {
             address: "203.0.113.8".parse().unwrap(),
-            port: 63,
+            port: 31,
             protocol: TransportProtocol::Udp,
         });
         assert!(value.compile_plan().is_err(), "the policy must not exceed the 256-record journal bound");

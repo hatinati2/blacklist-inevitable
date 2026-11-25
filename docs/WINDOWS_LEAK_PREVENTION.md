@@ -45,6 +45,24 @@ Therefore:
 
 ## Required Agent-owned egress policy
 
+### Current implementation status
+
+The Agent-owned WFP transaction now installs per-interface block filters and
+exact VPN endpoint permits at both `ALE_AUTH_CONNECT_V4/V6` and
+`OUTBOUND_TRANSPORT_V4/V6`. At the outbound transport layer, the endpoint
+exception matches the exact remote address, port, protocol, and local interface
+LUID; all other outbound transport traffic on the selected interface is blocked.
+Microsoft documents that this layer is at the top of the network layer and also
+filters raw packets and packets sent by third-party transports. This complements
+ALE authorization and helps enforce policy on packets belonging to flows that
+were authorized before the new policy was installed.
+
+This is not yet release acceptance. The policy is not invoked by production
+Connect, adapter classification and network-control exceptions remain
+incomplete, and no real Windows 10/11 physical-adapter capture matrix has passed.
+Keep Connect disabled until crash/reboot recovery, route/DNS rollback, and
+packet-capture acceptance are complete.
+
 The Agent must own a WFP policy independently of sing-box's dynamic WFP session.
 
 1. Resolve and pin the active VPN endpoint address set and exact transport ports before the tunnel. Preserve only the narrow physical route and WFP allow rule required for those endpoint connections.

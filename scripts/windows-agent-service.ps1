@@ -64,11 +64,38 @@ function Wait-AgentServiceRemoved {
     throw "The Agent service is still registered after the delete request."
 }
 
+function Get-AgentServiceSid {
+    $serviceAccount = [System.Security.Principal.NTAccount]::new("NT SERVICE\$ServiceName")
+    return $serviceAccount.Translate([System.Security.Principal.SecurityIdentifier]).Value
+}
+
+function Invoke-AgentWfpAclHelper {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("Provision", "Remove")]
+        [string]$HelperAction,
+        [Parameter(Mandatory = $true)]
+        [string]$ServiceSid
+    )
+
+    $helperPath = Join-Path $PSScriptRoot "windows-agent-wfp-acl.ps1"
+    if (-not (Test-Path -LiteralPath $helperPath -PathType Leaf)) {
+        throw "The bundled Agent WFP ACL helper is missing: $helperPath"
+    }
+    & $helperPath -Action $HelperAction -ServiceSid $ServiceSid | Out-Null
+}
+
 function Remove-AgentService {
     Stop-AgentService
     $service = Get-AgentService
     if ($null -eq $service) { return }
     $service.Dispose()
+
+    # Remove only the Agent service SID's six scoped WFP ACEs before deleting
+    # the service identity. Persistent provider/sublayer metadata is retained.
+    $serviceSid = Get-AgentServiceSid
+    Invoke-AgentWfpAclHelper -HelperAction Remove -ServiceSid $serviceSid
+
     Invoke-Sc @("delete", $ServiceName)
     Wait-AgentServiceRemoved
 }
@@ -243,6 +270,8 @@ function Install-AgentService {
             ("DisplayName= `"$ServiceDisplayName`"")
         )
         Invoke-Sc @("sidtype", $ServiceName, "restricted")
+        $serviceSid = Get-AgentServiceSid
+        Invoke-AgentWfpAclHelper -HelperAction Provision -ServiceSid $serviceSid
         Invoke-Sc @(
             "failure",
             $ServiceName,

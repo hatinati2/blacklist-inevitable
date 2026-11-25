@@ -1,15 +1,19 @@
 //! Read-only Windows interface inventory for a future Agent-owned egress policy.
 //!
 //! This module does not change routes, DNS, WFP, interface state, or traffic. It
-//! returns conservative hardware-interface candidates using the flags supplied
-//! by IP Helper; callers must still complete route correlation and packet-capture
-//! acceptance before using the result in a production kill switch.
+//! returns conservative hardware-interface candidates; callers must still
+//! complete route correlation and packet-capture acceptance before using the
+//! result in a production kill switch.
 
 use crate::wfp_policy::PhysicalInterface;
 use std::collections::BTreeSet;
 
 const MAX_ENUMERATED_INTERFACES: usize = 4096;
 const MAX_PHYSICAL_INTERFACES: usize = 32;
+const MAX_ADAPTER_BUFFER_BYTES: usize = 16 * 1024 * 1024;
+const ERROR_BUFFER_OVERFLOW: u32 = 111;
+const AF_UNSPEC: u32 = 0;
+const GAA_FLAG_INCLUDE_ALL_INTERFACES: u32 = 0x0100;
 
 const HARDWARE_INTERFACE: u8 = 1 << 0;
 const FILTER_INTERFACE: u8 = 1 << 1;
@@ -98,69 +102,135 @@ fn select_hardware_egress_candidates(
     Ok(candidates)
 }
 
-#[cfg(windows)]
-struct MibIfTable(*mut windows_sys::Win32::NetworkManagement::IpHelper::MIB_IF_TABLE2);
-
-#[cfg(windows)]
-impl Drop for MibIfTable {
-    fn drop(&mut self) {
-        if !self.0.is_null() {
-            unsafe {
-                windows_sys::Win32::NetworkManagement::IpHelper::FreeMibTable(
-                    self.0.cast::<core::ffi::c_void>(),
-                );
-            }
-            self.0 = std::ptr::null_mut();
-        }
-    }
-}
-
-/// Enumerate Windows interfaces using GetIfTable2 and return conservative
-/// hardware-egress candidates with stable NET_LUID values.
+/// Enumerate all NDIS adapters as a caller-owned linked list, then ask IP Helper
+/// for each row's full MIB_IF_ROW2 metadata by stable LUID.
 ///
-/// This function is read-only. It fails closed on API errors, malformed table
-/// pointers, oversized inventories, duplicate identities, or an empty candidate
-/// set. The caller must not treat this inventory alone as proof of a complete
-/// physical-egress kill switch.
+/// GetAdaptersAddresses owns no memory after this function returns: its linked
+/// list lives in the aligned Vec buffer below. GetIfEntry2 fills a single local
+/// row and avoids walking the variable-alignment MIB_IF_TABLE2 array.
 #[cfg(windows)]
 pub fn discover_hardware_egress_interfaces() -> Result<Vec<PhysicalInterface>, String> {
     use windows_sys::Win32::NetworkManagement::IpHelper::{
-        FreeMibTable, GetIfTable2, MIB_IF_TABLE2,
+        GetAdaptersAddresses, GetIfEntry2, IP_ADAPTER_ADDRESSES_LH, MIB_IF_ROW2,
     };
 
-    let mut table: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
-    let status = unsafe { GetIfTable2(&mut table) };
-    if status != 0 {
-        if !table.is_null() {
-            unsafe { FreeMibTable(table.cast::<core::ffi::c_void>()) };
-        }
-        return Err(format!("GetIfTable2 failed with Windows error {status}."));
-    }
-    if table.is_null() {
-        return Err("GetIfTable2 succeeded without returning an interface table.".into());
-    }
-
-    let table = MibIfTable(table);
-    let count = unsafe { (*table.0).NumEntries as usize };
-    if count > MAX_ENUMERATED_INTERFACES {
+    let mut required_bytes = 0u32;
+    let sizing_status = unsafe {
+        GetAdaptersAddresses(
+            AF_UNSPEC,
+            GAA_FLAG_INCLUDE_ALL_INTERFACES,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            &mut required_bytes,
+        )
+    };
+    if sizing_status != ERROR_BUFFER_OVERFLOW && sizing_status != 0 {
         return Err(format!(
-            "GetIfTable2 returned {count} rows, above the defensive limit of {MAX_ENUMERATED_INTERFACES}."
+            "GetAdaptersAddresses sizing call failed with Windows error {sizing_status}."
+        ));
+    }
+    if required_bytes == 0 || required_bytes as usize > MAX_ADAPTER_BUFFER_BYTES {
+        return Err(format!(
+            "GetAdaptersAddresses returned an invalid or oversized buffer length: {required_bytes}."
         ));
     }
 
-    // MIB_IF_TABLE2 exposes a one-element flexible-array placeholder. The
-    // Win32 binding's repr(C) field supplies the required first-row alignment;
-    // each following MIB_IF_ROW2 has the same C array stride.
-    let first_row = unsafe { (*table.0).Table.as_ptr() };
-    let rows = unsafe { std::slice::from_raw_parts(first_row, count) };
-    let facts = rows.iter().map(|row| InterfaceFacts {
-        interface_luid: unsafe { row.InterfaceLuid.Value },
-        interface_index: row.InterfaceIndex,
-        interface_type: row.Type,
-        flags: row.InterfaceAndOperStatusFlags._bitfield,
-    });
+    // Vec<usize> guarantees pointer alignment for IP_ADAPTER_ADDRESSES_LH,
+    // unlike Vec<u8>. Retrying is bounded in case adapters change during sizing.
+    for _attempt in 0..3 {
+        let words = (required_bytes as usize)
+            .checked_add(std::mem::size_of::<usize>() - 1)
+            .ok_or_else(|| "The adapter buffer size overflowed.".to_string())?
+            / std::mem::size_of::<usize>();
+        let mut storage = vec![0usize; words];
+        let capacity_bytes = storage
+            .len()
+            .checked_mul(std::mem::size_of::<usize>())
+            .ok_or_else(|| "The adapter buffer allocation size overflowed.".to_string())?;
+        let mut supplied_bytes = u32::try_from(capacity_bytes)
+            .map_err(|_| "The adapter buffer exceeds the Windows API size limit.".to_string())?;
+        let first = storage.as_mut_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>();
 
-    select_hardware_egress_candidates(facts)
+        let status = unsafe {
+            GetAdaptersAddresses(
+                AF_UNSPEC,
+                GAA_FLAG_INCLUDE_ALL_INTERFACES,
+                std::ptr::null(),
+                first,
+                &mut supplied_bytes,
+            )
+        };
+        if status == ERROR_BUFFER_OVERFLOW {
+            if supplied_bytes == 0 || supplied_bytes as usize > MAX_ADAPTER_BUFFER_BYTES {
+                return Err(format!(
+                    "GetAdaptersAddresses requested an invalid retry size: {supplied_bytes}."
+                ));
+            }
+            required_bytes = supplied_bytes;
+            continue;
+        }
+        if status != 0 {
+            return Err(format!(
+                "GetAdaptersAddresses failed with Windows error {status}."
+            ));
+        }
+
+        let buffer_start = first as usize;
+        let buffer_end = buffer_start
+            .checked_add(capacity_bytes)
+            .ok_or_else(|| "The adapter buffer address range overflowed.".to_string())?;
+        let mut current = first;
+        let mut seen_nodes = BTreeSet::new();
+        let mut rows = Vec::new();
+
+        while !current.is_null() {
+            let address = current as usize;
+            let row_end = address
+                .checked_add(std::mem::size_of::<IP_ADAPTER_ADDRESSES_LH>())
+                .ok_or_else(|| "An adapter row address overflowed.".to_string())?;
+            if address < buffer_start
+                || row_end > buffer_end
+                || address % std::mem::align_of::<IP_ADAPTER_ADDRESSES_LH>() != 0
+            {
+                return Err("GetAdaptersAddresses returned a linked-list node outside its aligned buffer.".into());
+            }
+            if !seen_nodes.insert(address) {
+                return Err("GetAdaptersAddresses returned a cyclic adapter linked list.".into());
+            }
+            if seen_nodes.len() > MAX_ENUMERATED_INTERFACES {
+                return Err("The adapter inventory exceeds the defensive 4096-row limit.".into());
+            }
+
+            let adapter = unsafe { &*current };
+            let luid = unsafe { adapter.Luid.Value };
+            if luid == 0 {
+                return Err("GetAdaptersAddresses returned an adapter with a zero LUID.".into());
+            }
+
+            let mut row: MIB_IF_ROW2 = unsafe { std::mem::zeroed() };
+            unsafe {
+                row.InterfaceLuid.Value = luid;
+            }
+            let row_status = unsafe { GetIfEntry2(&mut row) };
+            if row_status != 0 {
+                return Err(format!(
+                    "GetIfEntry2 failed for interface LUID {luid:#x} with Windows error {row_status}; the interface inventory may have changed."
+                ));
+            }
+
+            rows.push(InterfaceFacts {
+                interface_luid: unsafe { row.InterfaceLuid.Value },
+                interface_index: row.InterfaceIndex,
+                interface_type: row.Type,
+                flags: row.InterfaceAndOperStatusFlags._bitfield,
+            });
+            current = adapter.Next;
+        }
+
+        return select_hardware_egress_candidates(rows);
+    }
+
+    Err("The network adapter inventory changed during all three bounded enumeration attempts.".into())
 }
 
 #[cfg(test)]
@@ -179,8 +249,7 @@ mod tests {
     #[test]
     fn selects_hardware_candidates_and_sorts_by_stable_luid() {
         let mut disconnected = hardware(20, 2);
-        // MediaDisconnected / OperStatusDown are intentionally not represented
-        // as exclusion flags: unplugged hardware still needs a WFP policy.
+        // NotMediaConnected / OperStatusDown are intentionally not exclusion flags.
         disconnected.flags |= 1 << 4;
 
         let selected = select_hardware_egress_candidates([

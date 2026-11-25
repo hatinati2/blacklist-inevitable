@@ -6,10 +6,12 @@ The Rust module `windows_interfaces::discover_hardware_egress_interfaces` is a r
 
 ## Data source and ownership
 
-The implementation calls Windows IP Helper `GetIfTable2`, reads the `MIB_IF_TABLE2` / `MIB_IF_ROW2` rows, and releases the allocated table with `FreeMibTable` through an RAII guard. It uses each row's stable `InterfaceLuid` and current `InterfaceIndex`; it does not infer adapter type from display names or descriptions.
+The implementation calls `GetAdaptersAddresses(AF_UNSPEC, GAA_FLAG_INCLUDE_ALL_INTERFACES)` to enumerate all NDIS interfaces as a caller-owned linked list. It uses a bounded, pointer-aligned buffer and validates each linked-list node is inside that buffer, rejects cycles, and retries a bounded number of times if the interface list changes during sizing. For each adapter LUID it calls `GetIfEntry2` to obtain the full `MIB_IF_ROW2` metadata. This avoids treating `MIB_IF_TABLE2.Table` as a packed Rust slice: Microsoft explicitly warns that padding may exist before the first row and between row entries.
 
-Microsoft documents that GetIfTable2 enumerates logical and physical interfaces and that MIB_IF_ROW2 exposes `HardwareInterface`, `FilterInterface`, `ConnectorPresent`, and `EndPointInterface` flags:
-- https://learn.microsoft.com/en-us/windows/win32/api/netioapi/nf-netioapi-getiftable2
+Microsoft API references:
+- https://learn.microsoft.com/en-us/windows/win32/api/iphlpapi/nf-iphlpapi-getadaptersaddresses
+- https://learn.microsoft.com/en-us/windows/win32/api/iptypes/ns-iptypes-ip_adapter_addresses_lh
+- https://learn.microsoft.com/en-us/windows/win32/api/netioapi/nf-netioapi-getifentry2
 - https://learn.microsoft.com/en-us/windows/win32/api/netioapi/ns-netioapi-mib_if_row2
 - https://learn.microsoft.com/en-us/windows/win32/api/netioapi/ns-netioapi-mib_if_table2
 
@@ -24,7 +26,7 @@ An interface is selected only when:
 
 The inventory deliberately does not require `OperStatusUp` or a connected media state. An unplugged or temporarily down physical adapter must still be represented so a later connection cannot bypass the policy merely because that adapter was disconnected during discovery.
 
-The candidate set is sorted by LUID, must have unique non-zero LUID/index pairs, and is rejected (never truncated) if it is empty or exceeds the policy's 32-interface bound. API errors and malformed results are fail-closed.
+The candidate set is sorted by LUID, must have unique non-zero LUID/index pairs, and is rejected (never truncated) if it is empty or exceeds the policy's 32-interface bound. API errors, invalid buffer bounds, linked-list cycles, and oversized inventories fail closed.
 
 ## Remaining security gates
 

@@ -568,12 +568,15 @@ impl WfpEngine {
         let loaded_journal = loaded.iter()
             .find(|item| item.session_id == session_id)
             .ok_or_else(|| "The newly committed WFP recovery journal was not found after reload.".to_string())?;
-        if loaded_journal.firewall_filters.len() != keys.len()
-            || loaded_journal.firewall_filters.iter().zip(keys.iter()).any(|(record, key)| {
-                record.filter_key.as_deref()
-                    != Some(uuid::Uuid::from_u128(guid_to_u128(key)).to_string().as_str())
-            })
-        {
+        let loaded_keys_match = loaded_journal.firewall_filters.len() == keys.len()
+            && loaded_journal.firewall_filters.iter().zip(keys.iter()).all(|(record, key)| {
+                record.filter_key.as_deref().is_some_and(|record_key| {
+                    record_key.eq_ignore_ascii_case(
+                        &uuid::Uuid::from_u128(guid_to_u128(key)).to_string()
+                    )
+                })
+            });
+        if !loaded_keys_match {
             return Err("The reloaded WFP recovery journal did not preserve the exact stable filter keys.".into());
         }
 

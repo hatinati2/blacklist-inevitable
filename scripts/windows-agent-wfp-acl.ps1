@@ -44,7 +44,8 @@ namespace BlacklistInevitable {
         private static readonly Guid LayerV6 =
             new Guid("4a72393b-319f-44bc-84c3-ba54dcb3b6b4");
 
-        private sealed class TrusteeW {
+        [StructLayout(LayoutKind.Sequential)]
+        private struct TrusteeW {
             public IntPtr pMultipleTrustee;
             public int MultipleTrusteeOperation;
             public int TrusteeForm;
@@ -178,7 +179,8 @@ namespace BlacklistInevitable {
 
         private static void EnsureProvider(IntPtr engine) {
             IntPtr pointer = IntPtr.Zero;
-            uint status = FwpmProviderGetByKey0(engine, ref ProviderKey, out pointer);
+            Guid providerKey = ProviderKey;
+            uint status = FwpmProviderGetByKey0(engine, ref providerKey, out pointer);
             if (status == 0) {
                 try {
                     if (pointer == IntPtr.Zero)
@@ -211,7 +213,7 @@ namespace BlacklistInevitable {
             }
 
             pointer = IntPtr.Zero;
-            status = FwpmProviderGetByKey0(engine, ref ProviderKey, out pointer);
+            status = FwpmProviderGetByKey0(engine, ref providerKey, out pointer);
             if (status != 0 || pointer == IntPtr.Zero)
                 throw new InvalidOperationException("The Agent WFP provider could not be verified after creation: 0x" + status.ToString("X8"));
             try {
@@ -226,7 +228,8 @@ namespace BlacklistInevitable {
 
         private static void EnsureSublayer(IntPtr engine) {
             IntPtr pointer = IntPtr.Zero;
-            uint status = FwpmSubLayerGetByKey0(engine, ref SublayerKey, out pointer);
+            Guid sublayerKey = SublayerKey;
+            uint status = FwpmSubLayerGetByKey0(engine, ref sublayerKey, out pointer);
             if (status == 0) {
                 try {
                     if (pointer == IntPtr.Zero)
@@ -267,7 +270,7 @@ namespace BlacklistInevitable {
             }
 
             pointer = IntPtr.Zero;
-            status = FwpmSubLayerGetByKey0(engine, ref SublayerKey, out pointer);
+            status = FwpmSubLayerGetByKey0(engine, ref sublayerKey, out pointer);
             if (status != 0 || pointer == IntPtr.Zero)
                 throw new InvalidOperationException("The Agent WFP sublayer could not be verified after creation: 0x" + status.ToString("X8"));
             try {
@@ -421,9 +424,9 @@ namespace BlacklistInevitable {
                 for (int i = 0; i < Targets.Length; i++) {
                     // Service SIDs are unique to this service. Revoke only this
                     // SID's old ACEs before writing the exact non-inheriting grant.
+                    touched.Add(Targets[i]);
                     ChangeServiceAce(engine, Targets[i], serviceSid, Rights[i], false, false);
                     ChangeServiceAce(engine, Targets[i], serviceSid, Rights[i], true, false);
-                    touched.Add(Targets[i]);
                 }
                 return "Provisioned six object-scoped WFP ACEs for the restricted Agent service SID.";
             } catch {

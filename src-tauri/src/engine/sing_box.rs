@@ -245,7 +245,12 @@ pub fn build_engine_endpoint_plan(
         "naive" => match outbound.get("quic").and_then(Value::as_bool) {
             Some(true) => vec![Udp],
             Some(false) => vec![Tcp],
-            None => return Err("The validated Naive outbound has no explicit QUIC transport selection.".to_string()),
+            None => {
+                return Err(
+                    "The validated Naive outbound has no explicit QUIC transport selection."
+                        .to_string(),
+                )
+            }
         },
         // Shadowsocks supports both stream and datagram proxy traffic.
         "shadowsocks" => vec![Tcp, Udp],
@@ -253,9 +258,17 @@ pub fn build_engine_endpoint_plan(
         "vless" | "vmess" | "trojan" => match transport_type {
             None | Some("ws" | "grpc" | "http" | "httpupgrade") => vec![Tcp],
             Some("quic") => vec![Udp],
-            Some(other) => return Err(format!("The validated sing-box transport '{other}' has no endpoint protocol mapping.")),
+            Some(other) => {
+                return Err(format!(
+                    "The validated sing-box transport '{other}' has no endpoint protocol mapping."
+                ))
+            }
         },
-        other => return Err(format!("The validated sing-box outbound '{other}' has no endpoint protocol mapping.")),
+        other => {
+            return Err(format!(
+                "The validated sing-box outbound '{other}' has no endpoint protocol mapping."
+            ))
+        }
     };
 
     Ok(EngineEndpointPlan { server, port, protocols })

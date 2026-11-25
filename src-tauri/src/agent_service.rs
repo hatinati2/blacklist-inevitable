@@ -1,8 +1,9 @@
 //! Dedicated Windows Service Control Manager host for the privileged Agent.
 //!
-//! The service owns the local authenticated status-only named pipe. VPN engine,
-//! WFP, TUN, route and DNS operations remain disabled until the recovery runtime
-//! and packet-capture release gates are implemented.
+//! The service owns the local authenticated status-only named pipe. Startup may
+//! remove exact Agent-owned WFP filters for isolated WFP-only recovery journals;
+//! installing traffic policy, starting an engine, TUN, route and DNS operations
+//! remain disabled until the full recovery and packet-capture release gates pass.
 
 #[cfg(windows)]
 mod windows_service {

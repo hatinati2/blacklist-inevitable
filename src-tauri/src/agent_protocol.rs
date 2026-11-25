@@ -178,6 +178,20 @@ impl AgentResponse {
         }
     }
 
+    pub fn rejected_with_connection(
+        request_id: String,
+        connection: Option<ConnectionSnapshot>,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            version: AGENT_PROTOCOL_VERSION,
+            request_id,
+            status: AgentResponseStatus::Rejected,
+            connection,
+            detail: Some(sanitize_detail(detail.into(), &BTreeMap::new())),
+        }
+    }
+
     pub fn failed_redacted(
         request_id: String,
         connection: Option<ConnectionSnapshot>,
@@ -689,6 +703,28 @@ mod tests {
         let mut request = connect_request();
         request.version = AGENT_PROTOCOL_VERSION + 1;
         assert!(validate_agent_request(&request).is_err());
+    }
+
+    #[test]
+    fn rejected_agent_response_preserves_fail_closed_connection_snapshot() {
+        let snapshot = ConnectionSnapshot {
+            phase: crate::connection_state::ConnectionPhase::Failed,
+            session_id: Some(42),
+            profile_id: Some("profile-1".to_string()),
+            detail: Some("Unresolved recovery journal.".to_string()),
+            cleanup_healthy: false,
+        };
+        let response = AgentResponse::rejected_with_connection(
+            "request-02".to_string(),
+            Some(snapshot.clone()),
+            "Connect is disabled while recovery is unresolved.",
+        );
+
+        assert_eq!(response.status, AgentResponseStatus::Rejected);
+        assert_eq!(response.connection, Some(snapshot));
+        let encoded = serde_json::to_string(&response).expect("serialize rejected response");
+        assert!(encoded.contains("\"phase\":\"failed\""));
+        assert!(encoded.contains("\"cleanupHealthy\":false"));
     }
 
     #[test]

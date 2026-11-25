@@ -42,6 +42,7 @@ use windows_sys::Win32::Foundation::HANDLE;
 use crate::agent_protocol::{
     AgentOperation, AgentRequestReplayGuard, AgentResponse, MAX_AGENT_REQUEST_BYTES,
 };
+use crate::connection_state::ConnectionCoordinator;
 
 const PIPE_NAME: &str = r"\\.\pipe\BlacklistInevitable.Agent.v1";
 
@@ -107,7 +108,12 @@ pub fn create_listener() -> Result<HANDLE, String> {
 
 /// Serve one request per authenticated connection. The service-control layer
 /// owns cancellation of synchronous ConnectNamedPipe/ReadFile/WriteFile calls.
-pub fn serve(pipe: HANDLE, stop_event: HANDLE, startup_detail: &str) -> Result<(), String> {
+pub fn serve(
+    pipe: HANDLE,
+    stop_event: HANDLE,
+    startup_detail: &str,
+    connection: &ConnectionCoordinator,
+) -> Result<(), String> {
     if pipe.is_null() || pipe == INVALID_HANDLE_VALUE || stop_event.is_null() {
         return Err("The Agent named pipe or stop event handle is invalid.".into());
     }
@@ -124,7 +130,7 @@ pub fn serve(pipe: HANDLE, stop_event: HANDLE, startup_detail: &str) -> Result<(
         let request_result = if stop_requested(stop_event) {
             Ok(())
         } else {
-            handle_authenticated_connection(pipe, stop_event, startup_detail)
+            handle_authenticated_connection(pipe, stop_event, startup_detail, connection)
         };
 
         // Continuing on a thread that failed to revert impersonation would risk
@@ -158,6 +164,7 @@ fn handle_authenticated_connection(
     pipe: HANDLE,
     stop_event: HANDLE,
     startup_detail: &str,
+    connection: &ConnectionCoordinator,
 ) -> Result<(), String> {
     authenticate_active_console_client(pipe)?;
 
@@ -167,14 +174,16 @@ fn handle_authenticated_connection(
 
     let response = match request.operation {
         AgentOperation::GetStatus | AgentOperation::GetDiagnostics => {
-            let mut response = AgentResponse::ok(request.request_id, None);
+            let mut response =
+                AgentResponse::ok(request.request_id, Some(connection.snapshot()));
             response.detail = Some(startup_detail.to_string());
             response
         }
         AgentOperation::Connect { .. }
         | AgentOperation::Disconnect { .. }
-        | AgentOperation::Recover => AgentResponse::rejected(
+        | AgentOperation::Recover => AgentResponse::rejected_with_connection(
             request.request_id,
+            Some(connection.snapshot()),
             "VPN network operations are disabled until the Agent runtime and recovery path are implemented.",
         ),
     };

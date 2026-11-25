@@ -11,6 +11,7 @@ mod windows_service {
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
 
+    use crate::connection_state::{ConnectionCoordinator, ConnectionPhase};
     use crate::recovery_journal::RecoveryJournalStore;
 
     use windows_sys::Win32::Foundation::{
@@ -183,6 +184,25 @@ mod windows_service {
         })
     }
 
+    fn connection_coordinator_after_startup_recovery(
+        unresolved_sessions: usize,
+        recovery_failure: Option<&str>,
+    ) -> Result<ConnectionCoordinator, String> {
+        let coordinator = ConnectionCoordinator::new();
+        let recovery_id = coordinator.begin_recovery()?;
+        let cleanup_confirmed = unresolved_sessions == 0 && recovery_failure.is_none();
+        let detail = if cleanup_confirmed {
+            None
+        } else {
+            Some(format!(
+                "Startup recovery is incomplete: {unresolved_sessions} unresolved session(s); {}",
+                recovery_failure.unwrap_or("one or more network resources remain unverified")
+            ))
+        };
+        coordinator.finish_recovery(recovery_id, cleanup_confirmed, detail)?;
+        Ok(coordinator)
+    }
+
     fn recovery_diagnostics_detail(
         unresolved_sessions: usize,
         recovered_wfp_only_sessions: usize,
@@ -217,9 +237,11 @@ mod windows_service {
         };
 
         use super::{
-            is_wfp_only_recovery_session, open_recovery_journal_store_at,
-            reconcile_wfp_only_sessions, recovery_diagnostics_detail,
+            connection_coordinator_after_startup_recovery, is_wfp_only_recovery_session,
+            open_recovery_journal_store_at, reconcile_wfp_only_sessions,
+            recovery_diagnostics_detail,
         };
+        use crate::connection_state::ConnectionPhase;
 
         fn test_program_data() -> std::path::PathBuf {
             std::env::temp_dir().join(format!(
@@ -231,6 +253,46 @@ mod windows_service {
         fn create_journal_directory(program_data: &Path) {
             fs::create_dir_all(program_data.join("blacklist-inevitable").join("Agent"))
                 .expect("create test journal directory");
+        }
+
+        #[test]
+        fn clean_startup_recovery_exposes_a_disconnected_healthy_agent_state() {
+            let coordinator =
+                connection_coordinator_after_startup_recovery(0, None).expect("initialize clean state");
+            let snapshot = coordinator.snapshot();
+            assert_eq!(snapshot.phase, ConnectionPhase::Disconnected);
+            assert!(snapshot.cleanup_healthy);
+            assert!(snapshot.session_id.is_none());
+        }
+
+        #[test]
+        fn unresolved_startup_journal_exposes_failed_state_and_blocks_connect() {
+            let coordinator = connection_coordinator_after_startup_recovery(1, None)
+                .expect("initialize unresolved state");
+            let snapshot = coordinator.snapshot();
+            assert_eq!(snapshot.phase, ConnectionPhase::Failed);
+            assert!(!snapshot.cleanup_healthy);
+            assert!(snapshot.detail.as_deref().unwrap().contains("1 unresolved session"));
+            assert!(
+                coordinator.begin_connect("profile-1").is_err(),
+                "unresolved startup state must never allow a new connection"
+            );
+        }
+
+        #[test]
+        fn startup_recovery_error_blocks_connect_even_without_loaded_journals() {
+            let coordinator = connection_coordinator_after_startup_recovery(
+                0,
+                Some("WFP access denied"),
+            )
+            .expect("initialize failed recovery state");
+            let snapshot = coordinator.snapshot();
+            assert_eq!(snapshot.phase, ConnectionPhase::Failed);
+            assert!(!snapshot.cleanup_healthy);
+            assert!(
+                coordinator.begin_connect("profile-1").is_err(),
+                "a recovery error must block new sessions"
+            );
         }
 
         #[test]
@@ -475,6 +537,19 @@ mod windows_service {
             recovery.recovered_wfp_only_sessions,
             recovery.failure.as_deref(),
         );
+        let connection_coordinator = match connection_coordinator_after_startup_recovery(
+            unresolved_sessions,
+            recovery.failure.as_deref(),
+        ) {
+            Ok(coordinator) => coordinator,
+            Err(error) => {
+                eprintln!("Agent connection state initialization failed; service startup is blocked: {error}");
+                close_owned_handles(std::ptr::null_mut(), stop_event);
+                report_status(&status(SERVICE_STOPPED, 0, ERROR_GEN_FAILURE, 3, 0));
+                STATUS_HANDLE.store(0, Ordering::Release);
+                return;
+            }
+        };
 
         // The service is not reported as RUNNING until both its recovery journal
         // and its protected, local-only pipe endpoint have been validated.
@@ -504,7 +579,12 @@ mod windows_service {
                 signal_stop();
                 exit_code = ERROR_GEN_FAILURE;
             } else if !STOP_REQUESTED.load(Ordering::Acquire) {
-                if let Err(error) = crate::agent_pipe::serve(pipe, stop_event, &startup_detail) {
+                if let Err(error) = crate::agent_pipe::serve(
+                    pipe,
+                    stop_event,
+                    &startup_detail,
+                    &connection_coordinator,
+                ) {
                     if error.starts_with(crate::agent_pipe::FATAL_REVERT_ERROR_PREFIX) {
                         // The service thread may still carry a client impersonation
                         // token. Do not run any further cleanup/status code under it.

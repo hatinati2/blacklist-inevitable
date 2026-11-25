@@ -129,6 +129,15 @@ pub struct FilterRemovalReport {
 }
 
 #[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FilterInstallReport {
+    /// Persistent Agent-owned filters committed and independently read back.
+    pub installed_filter_count: usize,
+    /// The post-commit journal revision containing BFE runtime IDs was flushed.
+    pub runtime_ids_checkpointed: bool,
+}
+
+#[cfg(windows)]
 #[derive(Clone, Copy)]
 enum ExpectedCondition {
     InterfaceLuid(u64),
@@ -452,15 +461,158 @@ impl WfpEngine {
         })
     }
 
-    /// Exercise the persistent filter lifecycle under the restricted service
-    /// SID on a disposable Windows runner: persist stable-key intent first,
-    /// commit synthetic persistent filters, checkpoint their runtime IDs,
-    /// reload the journal, remove only those exact owned filters in a second
-    /// transaction, verify idempotent absence, and finally remove the journal.
+    /// Install an Agent-owned, persistent outbound ALE policy as one WFP transaction.
     ///
-    /// This is a CI acceptance primitive only. Callers must use TEST-NET
-    /// endpoints and a non-existent synthetic interface identity; it must not
-    /// be wired to the production connection path.
+    /// The caller must be the authenticated restricted Agent service. The complete
+    /// stable-key intent is flushed to the protected recovery journal before the
+    /// first filter is added. All filters are committed atomically, read back, and
+    /// followed by a second journal revision containing diagnostic BFE runtime IDs.
+    ///
+    /// This API currently covers only ALE_AUTH_CONNECT_V4/V6 connection
+    /// authorization. It is not a complete packet-layer kill switch: callers must
+    /// not claim all-protocol physical-egress protection or enable Connect until
+    /// packet-layer policy, interface discovery, endpoint bootstrap, routes/DNS,
+    /// crash recovery, and physical-adapter packet-capture acceptance are complete.
+    pub fn install_egress_policy_for_service_sid(
+        &mut self,
+        spec: &crate::wfp_policy::EgressPolicySpec,
+        service_sid: &str,
+        journal_store: &crate::recovery_journal::RecoveryJournalStore,
+        journal: &mut crate::recovery_journal::RecoveryJournal,
+    ) -> Result<FilterInstallReport, String> {
+        use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::{
+            FwpmTransactionBegin0, FwpmTransactionCommit0,
+        };
+
+        self.ensure_open()?;
+        if journal.session_id == 0 || journal.firewall_filters.len() != 0 {
+            return Err("WFP policy installation requires a valid session journal with no prior filter intents.".into());
+        }
+        if journal.phase != crate::recovery_journal::JournalPhase::Preparing {
+            return Err("The Agent egress policy must be installed before the session leaves the Preparing phase.".into());
+        }
+        journal.validate()?;
+
+        let plan = spec.compile_plan()?;
+        if plan.filters.is_empty() || plan.filters.len() > 256 {
+            return Err("The Agent egress policy exceeds the recovery journal's bounded 256-filter capacity.".into());
+        }
+
+        self.ensure_persistent_namespace()?;
+        let descriptor = FilterSecurityDescriptor::for_service_sid(service_sid)?;
+
+        // The caller may have already persisted the session's initial (non-WFP)
+        // recovery checkpoint. Require the in-memory revision to match disk, then
+        // advance it before recording any stable filter key.
+        let unresolved = journal_store.load_unresolved()?;
+        let previous = unresolved.iter().find(|item| item.session_id == journal.session_id);
+        let intent_revision = match previous {
+            Some(existing) if existing.revision == journal.revision => journal
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| "The recovery journal revision overflowed before WFP installation.".to_string())?,
+            Some(_) => return Err("The in-memory recovery journal is stale; refusing to add WFP filters.".into()),
+            None => journal.revision,
+        };
+
+        let mut keys = Vec::with_capacity(plan.filters.len());
+        let mut intent = journal.clone();
+        intent.revision = intent_revision;
+        for planned in &plan.filters {
+            let key = GUID::from_u128(uuid::Uuid::new_v4().as_u128());
+            keys.push(key);
+            intent.firewall_filters.push(crate::recovery_journal::FirewallFilterRecord {
+                provider_key: uuid::Uuid::from_u128(guid_to_u128(&PROVIDER_KEY)).to_string(),
+                filter_key: Some(uuid::Uuid::from_u128(guid_to_u128(&key)).to_string()),
+                layer_key: uuid::Uuid::from_u128(guid_to_u128(&wfp_layer_guid(planned.layer))).to_string(),
+                filter_id: None,
+            });
+        }
+        intent.validate()?;
+        journal_store.persist(&intent)?;
+        *journal = intent.clone();
+
+        // A failed begin leaves the durable stable-key intents in place. Startup
+        // recovery will confirm the keys are absent before removing the journal.
+        let begin = unsafe { FwpmTransactionBegin0(self.handle, 0) };
+        if begin != 0 {
+            return Err(format!(
+                "FwpmTransactionBegin0 failed before Agent egress policy installation (0x{begin:08X}); the intent journal is retained."
+            ));
+        }
+
+        let mut runtime_ids = Vec::with_capacity(plan.filters.len());
+        let operation = (|| -> Result<(), String> {
+            for (planned, key) in plan.filters.iter().zip(keys.iter()) {
+                let runtime_id =
+                    self.add_and_verify_planned_filter(*key, planned, descriptor.as_ptr())?;
+                runtime_ids.push(runtime_id);
+            }
+            Ok(())
+        })();
+
+        if let Err(error) = operation {
+            return match self.abort_transaction_or_poison() {
+                Ok(()) => Err(format!("{error} The WFP transaction was rolled back; stable-key intent remains for reconciliation.")),
+                Err(abort_error) => Err(format!("{error} {abort_error} The intent journal is retained and network startup must remain blocked.")),
+            };
+        }
+
+        let commit = unsafe { FwpmTransactionCommit0(self.handle) };
+        if commit != 0 {
+            let error = format!(
+                "FwpmTransactionCommit0 failed during Agent egress policy installation (0x{commit:08X})."
+            );
+            return match self.abort_transaction_or_poison() {
+                Ok(()) => Err(format!("{error} Stable-key intent remains for exact reconciliation.")),
+                Err(abort_error) => Err(format!("{error} {abort_error} The intent journal is retained and network startup must remain blocked.")),
+            };
+        }
+
+        // Persist runtime IDs as diagnostic data only. The stable GUID checkpoint
+        // already on disk remains sufficient for exact-key deletion if this write
+        // fails or the process stops between commit and this second revision.
+        let mut committed = intent;
+        committed.revision = committed
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| "The recovery journal revision overflowed after WFP commit; stable-key intent remains on disk.".to_string())?;
+        for (record, runtime_id) in committed.firewall_filters.iter_mut().zip(runtime_ids.iter()) {
+            record.filter_id = Some(*runtime_id);
+        }
+        journal_store.persist(&committed).map_err(|error| {
+            format!("Agent WFP filters were committed, but the runtime-ID checkpoint failed: {error}. The prior stable-key intent remains durable; do not start the engine or report Connected.")
+        })?;
+        *journal = committed.clone();
+
+        // Verify the objects again after the transaction has committed. A failure
+        // is not treated as success; the caller must retain the journal and block.
+        for ((planned, key), runtime_id) in plan
+            .filters
+            .iter()
+            .zip(keys.iter())
+            .zip(runtime_ids.iter())
+        {
+            verify_committed_filter_identity(self.handle, key, *runtime_id, planned)?;
+        }
+
+        *journal = committed;
+        Ok(FilterInstallReport {
+            installed_filter_count: keys.len(),
+            runtime_ids_checkpointed: true,
+        })
+    }
+
+    /// Restricted-SID CI acceptance: install a bounded synthetic policy through
+    /// the same production transaction primitive, reload its durable journal,
+    /// remove only the exact Agent-owned keys, verify idempotent absence, and
+    /// finally remove the journal. The caller must use TEST-NET endpoints and a
+    /// deliberately nonexistent interface identity on an ephemeral Windows runner.
+    /// Restricted-SID CI acceptance: exercise the real persistent install
+    /// transaction with TEST-NET endpoints and a deliberately nonexistent
+    /// interface identity, then reload the journal, remove exact filter keys,
+    /// verify idempotent absence, and remove the test journal. The caller must
+    /// use this only on an ephemeral Windows test runner.
     pub fn exercise_journaled_filter_recovery_for_service_sid(
         &mut self,
         spec: &crate::wfp_policy::EgressPolicySpec,
@@ -468,10 +620,6 @@ impl WfpEngine {
         journal_store: &crate::recovery_journal::RecoveryJournalStore,
         session_id: u64,
     ) -> Result<JournaledFilterRecoveryReport, String> {
-        use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::{
-            FwpmTransactionBegin0, FwpmTransactionCommit0,
-        };
-
         if session_id == 0 {
             return Err("The WFP recovery acceptance test requires a non-zero journal session ID.".into());
         }
@@ -480,113 +628,40 @@ impl WfpEngine {
         if plan.filters.is_empty() || plan.filters.len() > 4 {
             return Err("The WFP recovery acceptance test requires a bounded four-filter dual-stack plan.".into());
         }
-        self.ensure_persistent_namespace()?;
-        let descriptor = FilterSecurityDescriptor::for_service_sid(service_sid)?;
 
-        let mut keys = Vec::with_capacity(plan.filters.len());
         let mut journal = crate::recovery_journal::RecoveryJournal::new(session_id);
-        journal.phase = crate::recovery_journal::JournalPhase::Preparing;
-        for planned in &plan.filters {
-            let key = GUID::from_u128(uuid::Uuid::new_v4().as_u128());
-            keys.push(key);
-            journal.firewall_filters.push(crate::recovery_journal::FirewallFilterRecord {
-                provider_key: uuid::Uuid::from_u128(guid_to_u128(&PROVIDER_KEY)).to_string(),
-                filter_key: Some(uuid::Uuid::from_u128(guid_to_u128(&key)).to_string()),
-                layer_key: uuid::Uuid::from_u128(guid_to_u128(&wfp_layer_guid(planned.layer))).to_string(),
-                filter_id: None,
-            });
+        let installation =
+            self.install_egress_policy_for_service_sid(spec, service_sid, journal_store, &mut journal)?;
+        if installation.installed_filter_count != plan.filters.len()
+            || !installation.runtime_ids_checkpointed
+        {
+            return Err("The persistent WFP install did not return a complete committed-policy report.".into());
         }
-
-        // The stable GUID intent must be durable before the first BFE filter
-        // mutation. A crash after commit but before the runtime-ID revision
-        // remains recoverable because exact-key deletion does not require ID.
-        journal_store.persist(&journal)?;
-
-        let begin = unsafe { FwpmTransactionBegin0(self.handle, 0) };
-        if begin != 0 {
-            let error = format!("FwpmTransactionBegin0 failed before the journaled filter install (0x{begin:08X}).");
-            return match journal_store.remove_session(session_id) {
-                Ok(()) => Err(error),
-                Err(cleanup) => Err(format!("{error} The unused intent journal was retained because cleanup failed: {cleanup}")),
-            };
-        }
-
-        let mut runtime_ids = Vec::with_capacity(plan.filters.len());
-        let operation = (|| -> Result<(), String> {
-            for (planned, key) in plan.filters.iter().zip(keys.iter()) {
-                let runtime_id = self.add_and_verify_planned_filter(*key, planned, descriptor.as_ptr())?;
-                runtime_ids.push(runtime_id);
-            }
-            Ok(())
-        })();
-
-        if let Err(error) = operation {
-            let abort = self.abort_transaction_or_poison();
-            if abort.is_ok() {
-                let all_absent = keys.iter().all(|key| verify_filter_absent(self.handle, key).is_ok());
-                if all_absent {
-                    if let Err(cleanup) = journal_store.remove_session(session_id) {
-                        return Err(format!("{error} The pre-mutation journal could not be removed after verified rollback: {cleanup}"));
-                    }
-                }
-            }
-            return match abort {
-                Ok(()) => Err(error),
-                Err(abort_error) => Err(format!("{error} {abort_error} The journal is retained for reconciliation.")),
-            };
-        }
-
-        let commit = unsafe { FwpmTransactionCommit0(self.handle) };
-        if commit != 0 {
-            let error = format!("FwpmTransactionCommit0 failed during the journaled test install (0x{commit:08X}).");
-            let abort = self.abort_transaction_or_poison();
-            if abort.is_ok() {
-                let all_absent = keys.iter().all(|key| verify_filter_absent(self.handle, key).is_ok());
-                if all_absent {
-                    if let Err(cleanup) = journal_store.remove_session(session_id) {
-                        return Err(format!("{error} The intent journal was retained because cleanup failed: {cleanup}"));
-                    }
-                }
-            }
-            return match abort {
-                Ok(()) => Err(error),
-                Err(abort_error) => Err(format!("{error} {abort_error} The journal is retained for reconciliation.")),
-            };
-        }
-
-        let mut runtime_checkpoint = journal.clone();
-        runtime_checkpoint.revision = 2;
-        for (record, runtime_id) in runtime_checkpoint.firewall_filters.iter_mut().zip(runtime_ids.iter()) {
-            record.filter_id = Some(*runtime_id);
-        }
-        let runtime_ids_checkpointed = journal_store.persist(&runtime_checkpoint).is_ok();
 
         // Reload the committed journal rather than deleting from in-memory
-        // construction data. This deliberately exercises the same disk parser
-        // and stable-key validation used by startup recovery.
+        // construction data. This uses the same parser and stable-key path as
+        // startup recovery after an Agent crash.
         let loaded = journal_store.load_unresolved()?;
         let loaded_journal = loaded.iter()
             .find(|item| item.session_id == session_id)
             .ok_or_else(|| "The newly committed WFP recovery journal was not found after reload.".to_string())?;
-        let loaded_keys_match = loaded_journal.firewall_filters.len() == keys.len()
-            && loaded_journal.firewall_filters.iter().zip(keys.iter()).all(|(record, key)| {
-                record.filter_key.as_deref().is_some_and(|record_key| {
-                    record_key.eq_ignore_ascii_case(
-                        &uuid::Uuid::from_u128(guid_to_u128(key)).to_string()
-                    )
-                })
-            });
-        if !loaded_keys_match {
-            return Err("The reloaded WFP recovery journal did not preserve the exact stable filter keys.".into());
+        let keys_match = loaded_journal.firewall_filters.len() == plan.filters.len()
+            && loaded_journal.firewall_filters.iter().all(|record| record.filter_id.is_some());
+        if !keys_match {
+            return Err("The reloaded WFP recovery journal did not preserve all stable keys and runtime IDs.".into());
         }
 
         let removal = self.remove_owned_filters(&loaded_journal.firewall_filters)?;
-        if removal.removed_filter_count != keys.len() || removal.already_absent_filter_count != 0 {
+        if removal.removed_filter_count != plan.filters.len()
+            || removal.already_absent_filter_count != 0
+        {
             return Err("The first journaled recovery pass did not delete every committed test filter exactly once.".into());
         }
 
         let idempotent = self.remove_owned_filters(&loaded_journal.firewall_filters)?;
-        if idempotent.removed_filter_count != 0 || idempotent.already_absent_filter_count != keys.len() {
+        if idempotent.removed_filter_count != 0
+            || idempotent.already_absent_filter_count != plan.filters.len()
+        {
             return Err("The second journaled recovery pass did not confirm every filter was already absent.".into());
         }
 
@@ -598,10 +673,10 @@ impl WfpEngine {
         }
 
         Ok(JournaledFilterRecoveryReport {
-            installed_filter_count: keys.len(),
+            installed_filter_count: installation.installed_filter_count,
             removed_filter_count: removal.removed_filter_count,
             already_absent_filter_count: idempotent.already_absent_filter_count,
-            runtime_ids_checkpointed,
+            runtime_ids_checkpointed: installation.runtime_ids_checkpointed,
             journal_removed,
         })
     }
@@ -1128,6 +1203,60 @@ mod live_bfe_transaction_tests {
         assert_eq!(report.validated_filter_count, report.rolled_back_filter_count);
         assert_eq!(report.validated_filter_count, 4);
     }
+}
+
+#[cfg(windows)]
+fn verify_committed_filter_identity(
+    engine: windows_sys::Win32::Foundation::HANDLE,
+    key: &GUID,
+    expected_id: u64,
+    planned: &crate::wfp_policy::PlannedFilter,
+) -> Result<(), String> {
+    use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::{
+        FwpmFilterGetByKey0, FwpmFreeMemory0, FWPM_FILTER_FLAG_DISABLED,
+        FWPM_FILTER_FLAG_PERSISTENT, FWP_ACTION_BLOCK, FWP_ACTION_PERMIT, FWP_UINT8,
+    };
+
+    let mut filter_ptr = std::ptr::null_mut();
+    let status = unsafe { FwpmFilterGetByKey0(engine, key, &mut filter_ptr) };
+    if status != 0 {
+        return Err(format!("Committed WFP filter lookup failed with Windows status 0x{status:08X}; keep the recovery journal and block network startup."));
+    }
+    if filter_ptr.is_null() {
+        return Err("Committed WFP filter lookup returned a null object; keep the recovery journal and block network startup.".into());
+    }
+
+    let verification = (|| -> Result<(), String> {
+        let filter = unsafe { &*filter_ptr };
+        let provider_matches = !filter.providerKey.is_null()
+            && guid_eq(unsafe { &*filter.providerKey }, &PROVIDER_KEY);
+        let (expected_action, expected_weight, expected_conditions) = match planned.intent {
+            crate::wfp_policy::FilterIntent::BlockOtherPhysicalEgress =>
+                (FWP_ACTION_BLOCK, 0x0E, 1u32),
+            crate::wfp_policy::FilterIntent::PermitVpnEndpoint(_) =>
+                (FWP_ACTION_PERMIT, 0x0F, 4u32),
+        };
+        if !guid_eq(&filter.filterKey, key)
+            || filter.filterId != expected_id
+            || !provider_matches
+            || !guid_eq(&filter.subLayerKey, &SUBLAYER_KEY)
+            || !guid_eq(&filter.layerKey, &wfp_layer_guid(planned.layer))
+            || filter.flags & FWPM_FILTER_FLAG_PERSISTENT == 0
+            || filter.flags & FWPM_FILTER_FLAG_DISABLED != 0
+            || filter.action.r#type != expected_action
+            || filter.weight.r#type != FWP_UINT8
+            || unsafe { filter.weight.Anonymous.uint8 } != expected_weight
+            || filter.numFilterConditions != expected_conditions
+            || filter.filterCondition.is_null()
+        {
+            return Err("A committed Agent WFP filter failed provider, sublayer, layer, persistence, action, weight, or condition-count verification; keep the journal and block network startup.".into());
+        }
+        Ok(())
+    })();
+
+    let mut allocation = filter_ptr.cast();
+    unsafe { FwpmFreeMemory0(&mut allocation) };
+    verification
 }
 
 #[cfg(windows)]

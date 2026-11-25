@@ -10,7 +10,7 @@ use std::net::IpAddr;
 
 const MAX_PHYSICAL_INTERFACES: usize = 32;
 const MAX_ENDPOINTS: usize = 64;
-const MAX_PLANNED_FILTERS: usize = 2048;
+const MAX_PLANNED_FILTERS: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TransportProtocol {
@@ -249,6 +249,34 @@ mod tests {
         let mut value = spec();
         value.vpn_endpoints[0].port = 0;
         assert!(value.validate().is_err());
+    }
+
+    #[test]
+    fn accepts_the_exact_journal_capacity_and_rejects_one_filter_over() {
+        let mut value = EgressPolicySpec {
+            physical_interfaces: (1..=4)
+                .map(|index| PhysicalInterface {
+                    interface_luid: index as u64,
+                    interface_index: index,
+                })
+                .collect(),
+            vpn_endpoints: (1..=62)
+                .map(|port| VpnEndpoint {
+                    address: "203.0.113.8".parse().unwrap(),
+                    port,
+                    protocol: TransportProtocol::Udp,
+                })
+                .collect(),
+        };
+        let plan = value.compile_plan().expect("256 filters fit the recovery journal");
+        assert_eq!(plan.filters.len(), 256);
+
+        value.vpn_endpoints.push(VpnEndpoint {
+            address: "203.0.113.8".parse().unwrap(),
+            port: 63,
+            protocol: TransportProtocol::Udp,
+        });
+        assert!(value.compile_plan().is_err(), "the policy must not exceed the 256-record journal bound");
     }
 
     #[test]

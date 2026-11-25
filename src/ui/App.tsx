@@ -577,7 +577,7 @@ export default function App() {
           <p className="eyebrow">SAVED PROFILES</p>
           <h2>Your server list</h2>
         </div>
-        <button className="quiet-button" onClick={() => { void refreshStatus(); void refreshAgentStatus(); void refreshProfiles(); }} disabled={busy || previewMode}>
+        <button className="quiet-button" onClick={() => { void refreshStatus(); void refreshAgentStatus(); void refreshLocalProxyStatus(); void refreshProfiles(); }} disabled={busy || previewMode}>
           Refresh
         </button>
       </section>
@@ -681,7 +681,7 @@ export default function App() {
             <h3>{engine.kind}</h3>
             <p className="binary-name">{engine.binaryName}</p>
             {engine.kind === "sing-box" ? (
-              <p className="engine-note">sing-box config validation and isolated Real Delay are implemented; normal traffic routing is not.</p>
+              <p className="engine-note">sing-box local authenticated SOCKS5, config validation, and isolated Real Delay are implemented; system-wide VPN routing is not.</p>
             ) : (
               <p className="engine-note">This engine adapter is not implemented yet.</p>
             )}

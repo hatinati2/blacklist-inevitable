@@ -235,9 +235,9 @@ namespace BlacklistInevitable {
                     if (pointer == IntPtr.Zero)
                         throw new InvalidOperationException("WFP sublayer lookup returned NULL.");
                     Sublayer0 current = (Sublayer0)Marshal.PtrToStructure(pointer, typeof(Sublayer0));
-                    Guid? owner = current.providerKey == IntPtr.Zero
-                        ? (Guid?)null
-                        : (Guid?)Marshal.PtrToStructure(current.providerKey, typeof(Guid));
+                    Guid? owner = null;
+                    if (current.providerKey != IntPtr.Zero)
+                        owner = (Guid)Marshal.PtrToStructure(current.providerKey, typeof(Guid));
                     if (current.subLayerKey != SublayerKey ||
                         (current.flags & FWPM_SUBLAYER_FLAG_PERSISTENT) == 0 ||
                         owner != ProviderKey)
@@ -275,9 +275,9 @@ namespace BlacklistInevitable {
                 throw new InvalidOperationException("The Agent WFP sublayer could not be verified after creation: 0x" + status.ToString("X8"));
             try {
                 Sublayer0 current = (Sublayer0)Marshal.PtrToStructure(pointer, typeof(Sublayer0));
-                Guid? owner = current.providerKey == IntPtr.Zero
-                    ? (Guid?)null
-                    : (Guid?)Marshal.PtrToStructure(current.providerKey, typeof(Guid));
+                Guid? owner = null;
+                if (current.providerKey != IntPtr.Zero)
+                    owner = (Guid)Marshal.PtrToStructure(current.providerKey, typeof(Guid));
                 if (current.subLayerKey != SublayerKey ||
                     (current.flags & FWPM_SUBLAYER_FLAG_PERSISTENT) == 0 ||
                     owner != ProviderKey)

@@ -57,6 +57,33 @@ The helper preserves the existing DACL by adding only the Agent service SID ACE.
 
 The Windows restricted-SID acceptance probe now calls this same provision/remove helper, then exercises the service's journaled WFP filter add/read/delete path. The harness snapshots all six DACLs and restores them byte-for-byte after the test. This validates the helper's WFP ACL operations on a disposable hosted runner. It does not exercise the signed production installer because the repository's publisher thumbprint remains `UNCONFIGURED`; a trusted signed install and clean Windows 10/11 verification remain release gates.
 
+## Agent-owned persistent ALE policy transaction
+
+The Windows WFP backend now exposes
+`WfpEngine::install_egress_policy_for_service_sid`. It requires the restricted
+Agent service SID and a valid session journal, flushes every stable filter GUID
+before the first filter mutation, adds the complete bounded plan in one WFP
+transaction, commits once, reads every committed filter back, and persists a
+second journal revision with the BFE runtime IDs. If the transaction or the
+post-commit checkpoint/read-back fails, the durable stable-key intent is retained
+and the caller must keep the session blocked; startup reconciliation can remove
+only those exact Agent-owned keys.
+
+The install plan is capped at 256 filters so the policy cannot exceed the journal
+schema's 256-filter capacity. The restricted-SID live CI acceptance path now
+calls this same install API with TEST-NET endpoints and a deliberately nonexistent
+interface identity, then reloads the journal and verifies exact-key deletion and
+idempotent absence on the disposable Windows runner.
+
+**This is an ALE connection-authorization milestone, not the complete physical
+egress kill switch.** The current plan uses only
+`ALE_AUTH_CONNECT_V4/V6`; it does not yet install packet-layer filters for every
+protocol or multicast/broadcast path, classify physical versus virtual adapters,
+wire policy installation into production Connect, or implement route/DNS/engine
+lifecycle rollback. The installer/CI smoke test does not establish leak-free
+traffic behavior. Keep Connect disabled until the broader WFP policy and
+Windows 10/11 physical-adapter packet-capture gates pass.
+
 ## Security boundary and remaining work
 
 The journal is not an authentication or integrity mechanism. Its trust depends on the service-owned directory ACL and the service's validation of every record. The service must not open a user-writable directory as its journal root. Reparse-point entries are rejected, and files are never selected using a caller-supplied path.

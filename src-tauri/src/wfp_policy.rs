@@ -10,7 +10,7 @@ use std::net::IpAddr;
 
 const MAX_PHYSICAL_INTERFACES: usize = 32;
 const MAX_ENDPOINTS: usize = 64;
-const MAX_PLANNED_FILTERS: usize = 2048;
+const MAX_PLANNED_FILTERS: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TransportProtocol {

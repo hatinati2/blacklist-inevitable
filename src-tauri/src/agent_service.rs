@@ -664,27 +664,36 @@ mod windows_service {
         // intentionally non-existent synthetic LUID/index. They are committed
         // only on the disposable CI runner, then exact-key removed in a
         // separate transaction using the reloaded recovery journal.
-        let spec = crate::wfp_policy::EgressPolicySpec {
-            physical_interfaces: vec![crate::wfp_policy::PhysicalInterface {
-                interface_luid: u64::MAX,
-                interface_index: u32::MAX,
-            }],
-            vpn_endpoints: vec![
-                crate::wfp_policy::VpnEndpoint {
-                    address: "198.51.100.7".parse().expect("valid TEST-NET-2 IPv4 address"),
-                    port: 443,
-                    protocol: crate::wfp_policy::TransportProtocol::Tcp,
-                },
-                crate::wfp_policy::VpnEndpoint {
-                    address: "2001:db8::7".parse().expect("valid documentation IPv6 address"),
-                    port: 443,
-                    protocol: crate::wfp_policy::TransportProtocol::Tcp,
-                },
-            ],
+        let first = crate::wfp_policy::PhysicalInterface {
+            interface_luid: u64::MAX,
+            interface_index: u32::MAX,
         };
+        let second = crate::wfp_policy::PhysicalInterface {
+            interface_luid: u64::MAX - 1,
+            interface_index: u32::MAX - 1,
+        };
+        let ipv4 = crate::wfp_policy::VpnEndpoint {
+            address: "198.51.100.7".parse().expect("valid TEST-NET-2 IPv4 address"),
+            port: 443,
+            protocol: crate::wfp_policy::TransportProtocol::Tcp,
+        };
+        let ipv6 = crate::wfp_policy::VpnEndpoint {
+            address: "2001:db8::7".parse().expect("valid documentation IPv6 address"),
+            port: 443,
+            protocol: crate::wfp_policy::TransportProtocol::Tcp,
+        };
+        let spec = crate::wfp_policy::EgressPolicySpec {
+            physical_interfaces: vec![first, second],
+            vpn_endpoints: vec![ipv4, ipv6],
+        };
+        let bindings = [
+            crate::wfp_policy::EndpointEgressBinding { endpoint: ipv4, egress: first },
+            crate::wfp_policy::EndpointEgressBinding { endpoint: ipv6, egress: second },
+        ];
         let session_id = (uuid::Uuid::new_v4().as_u128() as u64).max(1);
         match engine.exercise_journaled_filter_recovery_for_service_sid(
             &spec,
+            &bindings,
             &service_sid,
             &journal_store,
             session_id,

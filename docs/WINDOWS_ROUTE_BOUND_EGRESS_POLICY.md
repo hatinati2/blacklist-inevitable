@@ -20,6 +20,10 @@ The snapshot retains the notification subscriptions. Its accessors call `ensure_
 
 An unbound policy that adds every VPN endpoint exception to every physical adapter is broader than the Windows route lookup. With two NICs, endpoint A may route through NIC 1 and endpoint B through NIC 2; the route-bound plan permits A only on NIC 1 and B only on NIC 2, while retaining block filters on both NICs. It rejects missing/duplicate endpoint bindings, unknown endpoints, and stale/mismatched LUID/index pairs.
 
+## Windows acceptance coverage
+
+The disposable Windows CI runner also exercises the compiled route-bound plan against live BFE with two synthetic physical-interface identities and separate IPv4/IPv6 endpoint bindings. The rollback-only test adds each filter, reads back its interface LUID, endpoint tuple, action and layer, deletes by key, then aborts without leaving packet policy installed. A second acceptance probe runs as the restricted Agent service SID: it commits the 12 route-bound filters using TEST-NET destinations and nonexistent interface identities, reloads the durable journal, removes the exact keys, confirms idempotent absence, and removes the journal. This validates the WFP and recovery path, not real packet routing or production network protection.
+
 ## Consistency boundary
 
 The epoch is a point-in-time invalidation guard, not a route lock. A route can still change after a final generation check and before or immediately after a WFP commit. The commit caller must retain the snapshot, treat invalidation as failed preparation, keep the engine stopped, and leave the durable WFP intent journal for exact recovery. A future connection state machine must serialize route/DNS/WFP/engine state and reconcile it on crash/reboot.

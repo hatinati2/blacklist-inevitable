@@ -27,6 +27,8 @@ pub struct LocalProxyStatus {
     pub profile_id: Option<String>,
     pub host: Option<String>,
     pub port: Option<u16>,
+    pub username: Option<String>,
+    pub password: Option<String>,
     pub detail: String,
 }
 
@@ -37,6 +39,8 @@ impl LocalProxyStatus {
             profile_id: None,
             host: None,
             port: None,
+            username: None,
+            password: None,
             detail: detail.into(),
         }
     }
@@ -45,6 +49,8 @@ impl LocalProxyStatus {
 struct Session {
     profile_id: String,
     port: u16,
+    username: String,
+    password: String,
     child: Child,
     config_path: PathBuf,
     _lease: OperationLease,
@@ -71,6 +77,8 @@ impl LocalProxyRuntime {
                 profile_id: Some(session.profile_id.clone()),
                 host: Some("127.0.0.1".to_string()),
                 port: Some(session.port),
+                username: Some(session.username.clone()),
+                password: Some(session.password.clone()),
                 detail: format!(
                     "Local SOCKS5 proxy is listening on 127.0.0.1:{}; system routing and TUN are unchanged.",
                     session.port
@@ -114,6 +122,8 @@ impl LocalProxyRuntime {
                     profile_id: Some(session.profile_id.clone()),
                     host: Some("127.0.0.1".to_string()),
                     port: Some(session.port),
+                    username: Some(session.username.clone()),
+                    password: Some(session.password.clone()),
                     detail: format!(
                         "Local SOCKS5 proxy is listening on 127.0.0.1:{}; system routing and TUN are unchanged.",
                         session.port
@@ -159,7 +169,15 @@ impl LocalProxyRuntime {
             .await?;
 
         let port = reserve_loopback_port()?;
-        let config = crate::engine::sing_box::build_probe_config(profile, credentials, port)?;
+        let mut config = crate::engine::sing_box::build_probe_config(profile, credentials, port)?;
+        // The listener is loopback-only and additionally requires a per-session
+        // credential so another local Windows user cannot reuse the proxy.
+        let username = uuid::Uuid::new_v4().simple().to_string();
+        let password = uuid::Uuid::new_v4().simple().to_string();
+        config["inbounds"][0]["users"] = serde_json::json!([{
+            "username": username,
+            "password": password
+        }]);
         let config_directory = app
             .path()
             .app_data_dir()
@@ -221,6 +239,8 @@ impl LocalProxyRuntime {
         Ok(Session {
             profile_id: profile.id.clone(),
             port,
+            username,
+            password,
             child,
             config_path,
             _lease: lease,

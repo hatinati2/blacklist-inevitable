@@ -41,3 +41,7 @@ The epoch is a point-in-time invalidation guard, not a route lock. A route can s
 - Network-control, multicast/broadcast, local-discovery, and required system traffic still need an explicit policy.
 - Run physical-adapter packet captures for all traffic classes and crash/reboot cases before release acceptance.
 - Keep Connect disabled; this is not yet a complete kill switch.
+
+## Engine-derived endpoint preparation
+
+The profile-based preparation entry point builds the strict sing-box outbound config before deriving the remote TCP/UDP tuple set. It includes both protocols for Shadowsocks, uses the generated Naive QUIC setting, handles Hysteria2/TUIC as UDP, and treats VLESS/VMess/Trojan as TCP unless the emitted sing-box transport is QUIC. The DoH resolver maps each returned numeric address to all of those exact tuples in one bounded set, then resolves Windows routes. Unknown engine configuration shapes fail closed. This still produces only a route-bound plan; it does not install WFP policy or start the tunnel.

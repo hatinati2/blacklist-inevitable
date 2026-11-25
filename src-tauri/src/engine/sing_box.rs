@@ -167,6 +167,74 @@ pub fn build_probe_config(
 }
 
 
+/// Endpoint tuple derived from the actual outbound config emitted by this adapter.
+/// The plan carries no credentials or rendered engine JSON.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EngineEndpointPlan {
+    pub server: String,
+    pub port: u16,
+    pub protocols: Vec<crate::wfp_policy::TransportProtocol>,
+}
+
+/// Build the validated sing-box outbound first, then derive every transport it
+/// can use to reach its remote server. Unknown outbound/transport shapes fail
+/// closed rather than guessing from an imported profile label.
+pub fn build_engine_endpoint_plan(
+    profile: &ProfileSummary,
+    credentials: &BTreeMap<String, String>,
+) -> Result<EngineEndpointPlan, String> {
+    use crate::wfp_policy::TransportProtocol::{Tcp, Udp};
+
+    let config = build_probe_config(profile, credentials, 17381)?;
+    let outbound = config
+        .get("outbounds")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+        .ok_or_else(|| "The validated sing-box config has no outbound endpoint.".to_string())?;
+    let server = outbound
+        .get("server")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "The validated sing-box outbound has no server hostname.".to_string())?
+        .to_string();
+    let port = outbound
+        .get("server_port")
+        .and_then(Value::as_u64)
+        .and_then(|value| u16::try_from(value).ok())
+        .filter(|value| *value != 0)
+        .ok_or_else(|| "The validated sing-box outbound has no valid non-zero server port.".to_string())?;
+    let outbound_type = outbound
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "The validated sing-box outbound has no protocol type.".to_string())?;
+    let transport_type = outbound
+        .get("transport")
+        .and_then(Value::as_object)
+        .and_then(|transport| transport.get("type"))
+        .and_then(Value::as_str);
+
+    let protocols = match outbound_type {
+        // These engine outbounds use QUIC-based UDP to the remote server.
+        "hysteria2" | "tuic" => vec![Udp],
+        "naive" => match outbound.get("quic").and_then(Value::as_bool) {
+            Some(true) => vec![Udp],
+            Some(false) => vec![Tcp],
+            None => return Err("The validated Naive outbound has no explicit QUIC transport selection.".to_string()),
+        },
+        // Shadowsocks supports both stream and datagram proxy traffic.
+        "shadowsocks" => vec![Tcp, Udp],
+        // These outbounds use TCP unless the emitted sing-box transport is QUIC.
+        "vless" | "vmess" | "trojan" => match transport_type {
+            None | Some("ws" | "grpc" | "http" | "httpupgrade") => vec![Tcp],
+            Some("quic") => vec![Udp],
+            Some(other) => return Err(format!("The validated sing-box transport '{other}' has no endpoint protocol mapping.")),
+        },
+        other => return Err(format!("The validated sing-box outbound '{other}' has no endpoint protocol mapping.")),
+    };
+
+    Ok(EngineEndpointPlan { server, port, protocols })
+}
+
 /// Runtime-selected values for a Windows normal-session TUN. The privileged
 /// agent must select collision-free interface addresses and resolve the proxy
 /// endpoint before creating this configuration.
@@ -3207,4 +3275,44 @@ mod engine_archive_tests {
         assert!(error.contains("libcronet.dll"));
         fs::remove_dir_all(directory).expect("remove temp directory");
     }
+    #[test]
+    fn endpoint_plan_uses_the_emitted_engine_transport_tuple() {
+        use crate::wfp_policy::TransportProtocol::{Tcp, Udp};
+
+        let vless_credentials = BTreeMap::from([("uuid".to_string(), "uuid-value".to_string())]);
+        let vless = sample_profile("vless");
+        let plan = build_engine_endpoint_plan(&vless, &vless_credentials).unwrap();
+        assert_eq!(plan.server, "proxy.example.com");
+        assert_eq!(plan.port, 443);
+        assert_eq!(plan.protocols, vec![Tcp]);
+
+        let mut vless_quic = sample_profile("vless");
+        vless_quic.options.insert("transport".to_string(), "quic".to_string());
+        let plan = build_engine_endpoint_plan(&vless_quic, &vless_credentials).unwrap();
+        assert_eq!(plan.protocols, vec![Udp]);
+
+        let naive_credentials = BTreeMap::from([("password".to_string(), "secret".to_string())]);
+        let naive_https = sample_profile("naive");
+        assert_eq!(build_engine_endpoint_plan(&naive_https, &naive_credentials).unwrap().protocols, vec![Tcp]);
+        let mut naive_quic = sample_profile("naive");
+        naive_quic.options.insert("quic".to_string(), "true".to_string());
+        assert_eq!(build_engine_endpoint_plan(&naive_quic, &naive_credentials).unwrap().protocols, vec![Udp]);
+
+        let mut shadowsocks = sample_profile("shadowsocks");
+        shadowsocks.options.insert("method".to_string(), "chacha20-ietf-poly1305".to_string());
+        let shadowsocks_credentials = BTreeMap::from([("password".to_string(), "secret".to_string())]);
+        assert_eq!(build_engine_endpoint_plan(&shadowsocks, &shadowsocks_credentials).unwrap().protocols, vec![Tcp, Udp]);
+
+        let hysteria_credentials = BTreeMap::from([("password".to_string(), "secret".to_string())]);
+        let hysteria = sample_profile("hysteria2");
+        assert_eq!(build_engine_endpoint_plan(&hysteria, &hysteria_credentials).unwrap().protocols, vec![Udp]);
+
+        let tuic = sample_profile("tuic");
+        let tuic_credentials = BTreeMap::from([
+            ("uuid".to_string(), "uuid-value".to_string()),
+            ("password".to_string(), "secret".to_string()),
+        ]);
+        assert_eq!(build_engine_endpoint_plan(&tuic, &tuic_credentials).unwrap().protocols, vec![Udp]);
+    }
+
 }

@@ -22,6 +22,14 @@ The Windows-only `WindowsEgressSnapshot::capture_for_server` composes this resol
 
 This remains a preparation primitive, not a live Connect transaction. The DoH bootstrap request happens before route-monitor capture and before tunnel startup. A successful snapshot does not install policy, mutate routes/DNS, or authorize Connected state.
 
+## Engine-derived endpoint plan
+
+The Windows-only `WindowsEgressSnapshot::capture_for_profile` entry point first asks the strict sing-box adapter to build its outbound configuration. The adapter then derives the remote transport tuple from that emitted configuration: Hysteria2/TUIC use UDP, Naive uses its explicit `quic` setting, Shadowsocks accounts for both TCP and UDP, and VLESS/VMess/Trojan use TCP unless the emitted transport is QUIC. Unknown outbound or transport shapes fail closed. This avoids inferring transport from a UI/profile label and keeps the endpoint allowlist aligned with the configuration that will later be launched.
+
+The resolver performs one A/AAAA bootstrap and expands the resulting addresses across the complete protocol set. The combined address/transport count is bounded by the 64-entry WFP endpoint limit; duplicates, an empty set, or overflow are rejected before route capture.
+
+This remains preparation-only: it does not open the Agent Connect path, install filters, change routes/DNS, or start sing-box. Credentials are used only in memory to validate/build the adapter configuration and are not included in the endpoint plan.
+
 ## Not yet complete
 
 This primitive is not yet called by the Windows Agent's Connect transaction. Until integration is implemented, actual endpoint bootstrap during a VPN connection is not yet protected by this code. The provider is currently fixed to Cloudflare and should become an explicit supported setting before release. The Agent must retain the returned address set for the current preparation attempt, resolve routes for each address, and restart preparation on network-change invalidation. The initial query is outside the tunnel and visible to the selected resolver.

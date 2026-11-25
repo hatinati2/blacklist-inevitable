@@ -450,9 +450,9 @@ try {
         $report.service_name -ne $serviceName -or
         $report.service_sid_type -ne "RESTRICTED" -or
         $report.outcome -ne "access_granted" -or
-        $report.installed_filter_count -ne 8 -or
-        $report.removed_filter_count -ne 8 -or
-        $report.already_absent_filter_count -ne 8 -or
+        $report.installed_filter_count -ne 12 -or
+        $report.removed_filter_count -ne 12 -or
+        $report.already_absent_filter_count -ne 12 -or
         $report.runtime_ids_checkpointed -ne $true -or
         $report.journal_removed -ne $true -or
         $report.synthetic_filters_committed_during_test -ne $true -or
@@ -463,7 +463,7 @@ try {
     $report | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $artifactPath -Encoding utf8
     Write-Host "Restricted service SID: $sidText"
     Write-Host "WFP access result: $($report.outcome)"
-    Write-Host "Synthetic filters committed: $($report.installed_filter_count)"
+    Write-Host "Route-bound synthetic filters committed across two interfaces: $($report.installed_filter_count)"
     Write-Host "Synthetic filters removed and verified absent: $($report.removed_filter_count)"
     Write-Host "Idempotent already-absent confirmations: $($report.already_absent_filter_count)"
     Write-Host "Runtime IDs persisted in recovery journal: $($report.runtime_ids_checkpointed)"

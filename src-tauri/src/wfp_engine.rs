@@ -380,15 +380,9 @@ impl WfpEngine {
         Ok(())
     }
 
-    /// Ask BFE to validate a complete dual-stack policy plan inside one explicit
-    /// write transaction: add each filter, read it back, delete it by its stable
-    /// key, then ABORT the transaction.
-    ///
-    /// No traffic policy is committed or left installed. The former design tried
-    /// to add FWPM_FILTER_FLAG_DISABLED, but Microsoft documents that this flag
-    /// cannot be supplied when adding a new filter. A rollback-only transaction
-    /// exercises both the add/read-back and exact-key delete APIs without changing
-    /// packet handling.
+    /// Ask BFE to validate a complete policy plan inside one explicit write
+    /// transaction: add each filter, read it back, delete it by stable key, then
+    /// ABORT the transaction. No traffic policy is committed or left installed.
     pub fn validate_egress_policy_transaction(
         &mut self,
         spec: &crate::wfp_policy::EgressPolicySpec,
@@ -397,8 +391,8 @@ impl WfpEngine {
     }
 
     /// Rollback-only validation with a per-filter security descriptor. The
-    /// descriptor is supplied to FwpmFilterAdd0 so READ/DELETE rights can be
-    /// granted only on these exact Agent-owned filter objects.
+    /// descriptor is supplied to FwpmFilterAdd0 so READ/DELETE rights are granted
+    /// only on these exact Agent-owned filter objects.
     pub fn validate_egress_policy_transaction_for_service_sid(
         &mut self,
         spec: &crate::wfp_policy::EgressPolicySpec,
@@ -413,10 +407,23 @@ impl WfpEngine {
         spec: &crate::wfp_policy::EgressPolicySpec,
         filter_security_descriptor: *mut core::ffi::c_void,
     ) -> Result<FilterValidationReport, String> {
+        self.validate_egress_policy_plan_transaction(
+            spec.compile_plan()?,
+            filter_security_descriptor,
+        )
+    }
+
+    /// Validate an already-compiled plan without changing packet handling.
+    /// This is also used by the route-bound BFE acceptance test so the live
+    /// provider sees the exact per-interface endpoint exceptions being tested.
+    fn validate_egress_policy_plan_transaction(
+        &mut self,
+        plan: crate::wfp_policy::WfpPolicyPlan,
+        filter_security_descriptor: *mut core::ffi::c_void,
+    ) -> Result<FilterValidationReport, String> {
         use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FwpmTransactionBegin0;
 
         self.ensure_open()?;
-        let plan = spec.compile_plan()?;
         self.ensure_persistent_namespace()?;
 
         let begin = unsafe { FwpmTransactionBegin0(self.handle, 0) };
@@ -464,26 +471,18 @@ impl WfpEngine {
         })
     }
 
-    /// Install an Agent-owned, persistent outbound ALE policy as one WFP transaction.
-    ///
-    /// The caller must be the authenticated restricted Agent service. The complete
-    /// stable-key intent is flushed to the protected recovery journal before the
-    /// first filter is added. All filters are committed atomically, read back, and
-    /// followed by a second journal revision containing diagnostic BFE runtime IDs.
-    ///
-    /// This API installs ALE_AUTH_CONNECT_V4/V6 plus OUTBOUND_TRANSPORT_V4/V6
-    /// filters. The transport layers also see third-party/raw transport packets
-    /// and traffic in previously authorized ALE flows. This is still not a
-    /// complete release kill switch: keep Connect disabled until physical
-    /// interface classification, network-control exceptions, endpoint bootstrap,
-    /// routes/DNS, crash recovery, and physical-adapter packet-capture acceptance
-    /// are complete.
     /// Install a WFP plan while a live Windows egress snapshot remains current.
     ///
+    /// The authenticated restricted Agent service must call this route-aware API.
     /// The snapshot owns route/interface notification subscriptions and binds
     /// each VPN endpoint permit to the exact physical interface selected by
-    /// Windows. The generation is checked before the journaled transaction,
-    /// before BFE begin, immediately before commit, and after verification.
+    /// Windows. The generation is checked before journaling, before BFE begin,
+    /// immediately before commit, and after committed-filter verification.
+    ///
+    /// This is not yet a complete release kill switch. Keep Connect disabled
+    /// until encrypted endpoint bootstrap, network-control exceptions, atomic
+    /// route/DNS/engine lifecycle, crash recovery, and packet-capture acceptance
+    /// are complete.
     pub fn install_egress_policy_snapshot_for_service_sid(
         &mut self,
         snapshot: &crate::windows_egress_snapshot::WindowsEgressSnapshot,
@@ -498,26 +497,6 @@ impl WfpEngine {
             journal_store,
             journal,
             || snapshot.ensure_current(),
-        )
-    }
-
-    /// Synthetic unbound install retained only for the disposable restricted
-    /// Service-SID recovery acceptance probe. Production connection code must
-    /// use `install_egress_policy_snapshot_for_service_sid`.
-    pub(crate) fn install_egress_policy_for_service_sid(
-        &mut self,
-        spec: &crate::wfp_policy::EgressPolicySpec,
-        service_sid: &str,
-        journal_store: &crate::recovery_journal::RecoveryJournalStore,
-        journal: &mut crate::recovery_journal::RecoveryJournal,
-    ) -> Result<FilterInstallReport, String> {
-        let plan = spec.compile_plan()?;
-        self.install_compiled_egress_policy_plan_for_service_sid(
-            plan,
-            service_sid,
-            journal_store,
-            journal,
-            || Ok(()),
         )
     }
 
@@ -678,19 +657,16 @@ impl WfpEngine {
         })
     }
 
-    /// Restricted-SID CI acceptance: install a bounded synthetic policy through
-    /// the same production transaction primitive, reload its durable journal,
-    /// remove only the exact Agent-owned keys, verify idempotent absence, and
-    /// finally remove the journal. The caller must use TEST-NET endpoints and a
-    /// deliberately nonexistent interface identity on an ephemeral Windows runner.
-    /// Restricted-SID CI acceptance: exercise the real persistent install
-    /// transaction with TEST-NET endpoints and a deliberately nonexistent
-    /// interface identity, then reload the journal, remove exact filter keys,
-    /// verify idempotent absence, and remove the test journal. The caller must
-    /// use this only on an ephemeral Windows test runner.
+    /// Restricted-SID CI acceptance for the production route-bound compiler:
+    /// commit a two-interface/two-endpoint synthetic policy, reload the durable
+    /// journal, remove only exact Agent-owned keys, verify idempotent absence,
+    /// and finally remove the journal. TEST-NET destinations and deliberately
+    /// nonexistent interface identities are permitted only on an ephemeral
+    /// Windows runner; this is not a production connection API.
     pub fn exercise_journaled_filter_recovery_for_service_sid(
         &mut self,
         spec: &crate::wfp_policy::EgressPolicySpec,
+        bindings: &[crate::wfp_policy::EndpointEgressBinding],
         service_sid: &str,
         journal_store: &crate::recovery_journal::RecoveryJournalStore,
         session_id: u64,
@@ -699,15 +675,21 @@ impl WfpEngine {
             return Err("The WFP recovery acceptance test requires a non-zero journal session ID.".into());
         }
         self.ensure_open()?;
-        let plan = spec.compile_plan()?;
-        if plan.filters.is_empty() || plan.filters.len() > 8 {
-            return Err("The WFP recovery acceptance test requires a bounded eight-filter dual-stack ALE/transport plan.".into());
+        let plan = spec.compile_plan_with_resolved_egress(bindings)?;
+        if plan.filters.len() != 12 {
+            return Err("The WFP recovery acceptance test requires an exact 12-filter, two-interface route-bound dual-stack plan.".into());
         }
+        let expected_filter_count = plan.filters.len();
 
         let mut journal = crate::recovery_journal::RecoveryJournal::new(session_id);
-        let installation =
-            self.install_egress_policy_for_service_sid(spec, service_sid, journal_store, &mut journal)?;
-        if installation.installed_filter_count != plan.filters.len()
+        let installation = self.install_compiled_egress_policy_plan_for_service_sid(
+            plan,
+            service_sid,
+            journal_store,
+            &mut journal,
+            || Ok(()),
+        )?;
+        if installation.installed_filter_count != expected_filter_count
             || !installation.runtime_ids_checkpointed
         {
             return Err("The persistent WFP install did not return a complete committed-policy report.".into());
@@ -720,14 +702,14 @@ impl WfpEngine {
         let loaded_journal = loaded.iter()
             .find(|item| item.session_id == session_id)
             .ok_or_else(|| "The newly committed WFP recovery journal was not found after reload.".to_string())?;
-        let keys_match = loaded_journal.firewall_filters.len() == plan.filters.len()
+        let keys_match = loaded_journal.firewall_filters.len() == expected_filter_count
             && loaded_journal.firewall_filters.iter().all(|record| record.filter_id.is_some());
         if !keys_match {
             return Err("The reloaded WFP recovery journal did not preserve all stable keys and runtime IDs.".into());
         }
 
         let removal = self.remove_owned_filters(&loaded_journal.firewall_filters)?;
-        if removal.removed_filter_count != plan.filters.len()
+        if removal.removed_filter_count != expected_filter_count
             || removal.already_absent_filter_count != 0
         {
             return Err("The first journaled recovery pass did not delete every committed test filter exactly once.".into());
@@ -735,7 +717,7 @@ impl WfpEngine {
 
         let idempotent = self.remove_owned_filters(&loaded_journal.firewall_filters)?;
         if idempotent.removed_filter_count != 0
-            || idempotent.already_absent_filter_count != plan.filters.len()
+            || idempotent.already_absent_filter_count != expected_filter_count
         {
             return Err("The second journaled recovery pass did not confirm every filter was already absent.".into());
         }
@@ -885,7 +867,7 @@ impl WfpEngine {
 
         let mut interface_luid = planned.interface_luid;
         let mut remote_port = 0u16;
-        let mut ip_protocol = 0u8;
+        let ip_protocol;
         let mut remote_v4 = FWP_V4_ADDR_AND_MASK { addr: 0, mask: u32::MAX };
         let mut remote_v6 = FWP_V6_ADDR_AND_MASK { addr: [0; 16], prefixLength: 128 };
         let mut expected = vec![ExpectedCondition::InterfaceLuid(interface_luid)];
@@ -1246,7 +1228,7 @@ mod recovery_guid_tests {
 mod live_bfe_transaction_tests {
     use super::WfpEngine;
     use crate::wfp_policy::{
-        EgressPolicySpec, PhysicalInterface, TransportProtocol, VpnEndpoint,
+        EgressPolicySpec, EndpointEgressBinding, PhysicalInterface, TransportProtocol, VpnEndpoint,
     };
 
     /// This test deliberately runs only on a disposable, elevated Windows runner.
@@ -1256,32 +1238,43 @@ mod live_bfe_transaction_tests {
     #[test]
     #[ignore = "requires an elevated disposable Windows runner with BFE running"]
     fn live_bfe_adds_reads_deletes_and_aborts_a_dual_stack_filter_plan() {
-        let spec = EgressPolicySpec {
-            physical_interfaces: vec![PhysicalInterface {
-                interface_luid: 1,
-                interface_index: 1,
-            }],
-            vpn_endpoints: vec![
-                VpnEndpoint {
-                    address: "198.51.100.7".parse().expect("valid TEST-NET-2 IPv4 address"),
-                    port: 443,
-                    protocol: TransportProtocol::Tcp,
-                },
-                VpnEndpoint {
-                    address: "2001:db8::7".parse().expect("valid documentation IPv6 address"),
-                    port: 443,
-                    protocol: TransportProtocol::Tcp,
-                },
-            ],
+        let first = PhysicalInterface {
+            interface_luid: 0x0001_0000_0000_0007,
+            interface_index: 7,
         };
+        let second = PhysicalInterface {
+            interface_luid: 0x0001_0000_0000_000B,
+            interface_index: 11,
+        };
+        let ipv4 = VpnEndpoint {
+            address: "198.51.100.7".parse().expect("valid TEST-NET-2 IPv4 address"),
+            port: 443,
+            protocol: TransportProtocol::Tcp,
+        };
+        let ipv6 = VpnEndpoint {
+            address: "2001:db8::7".parse().expect("valid documentation IPv6 address"),
+            port: 443,
+            protocol: TransportProtocol::Tcp,
+        };
+        let spec = EgressPolicySpec {
+            physical_interfaces: vec![first, second],
+            vpn_endpoints: vec![ipv4, ipv6],
+        };
+        let bindings = [
+            EndpointEgressBinding { endpoint: ipv4, egress: first },
+            EndpointEgressBinding { endpoint: ipv6, egress: second },
+        ];
+        let plan = spec
+            .compile_plan_with_resolved_egress(&bindings)
+            .expect("the two endpoint routes must bind to exact candidate interfaces");
 
         let mut engine = WfpEngine::open_local().expect("open local BFE as the test runner");
         let report = engine
-            .validate_egress_policy_transaction(&spec)
-            .expect("BFE should add, read back, delete, and roll back the test filters");
+            .validate_egress_policy_plan_transaction(plan, std::ptr::null_mut())
+            .expect("BFE should add, read back, delete, and roll back every route-bound filter");
 
         assert_eq!(report.validated_filter_count, report.rolled_back_filter_count);
-        assert_eq!(report.validated_filter_count, 8);
+        assert_eq!(report.validated_filter_count, 12);
     }
 }
 

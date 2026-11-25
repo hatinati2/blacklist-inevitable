@@ -79,4 +79,4 @@ Before normal connection functionality is implemented:
 
 The route-aware policy compiler requires a one-to-one binding from every numeric VPN endpoint to the current Windows-selected physical interface. It emits the four block filters on every candidate NIC, but each endpoint permit exists only on its own resolved LUID/index. The Windows egress snapshot holds IPv4/IPv6 route and interface change subscriptions from before discovery until the WFP install attempt completes, and the install routine rechecks the snapshot before transaction start and before commit. These checks are point-in-time guards, not an atomic route lock.
 
-Only the route-aware snapshot installation API is suitable for future production connection use. The unbound policy installation helper is crate-private and exists only for the disposable restricted-Service-SID recovery probe; it must not be wired into Connect.
+Only the route-aware snapshot installation API is suitable for future production connection use. The WFP acceptance probe compiles explicit route-bound test bindings; no unbound policy installation helper is exposed. This still does not authorize Connect.

@@ -47,6 +47,16 @@ impl LocalProxyStatus {
     }
 }
 
+struct WipingCredentials(BTreeMap<String, String>);
+
+impl Drop for WipingCredentials {
+    fn drop(&mut self) {
+        for value in self.0.values_mut() {
+            value.zeroize();
+        }
+    }
+}
+
 struct Session {
     profile_id: String,
     port: u16,
@@ -150,34 +160,50 @@ impl LocalProxyRuntime {
             inner.starting = true;
         }
 
-        let result = self
-            .start_reserved(app, &profile, credentials, supervisor)
-            .await;
+        // Startup owns a long-lived child process and credential-bearing config.
+        // Run it in a detached task so cancellation of the Tauri invoke future
+        // cannot abandon the reservation or drop a live Child without cleanup.
+        let runtime = self.clone();
+        let app = app.clone();
+        let supervisor = supervisor.clone();
+        let credentials = WipingCredentials(credentials.clone());
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
 
-        let mut inner = self.inner.lock().await;
-        inner.starting = false;
-        let response = match result {
-            Ok(session) => {
-                let status = LocalProxyStatus {
-                    active: true,
-                    profile_id: Some(session.profile_id.clone()),
-                    host: Some("127.0.0.1".to_string()),
-                    port: Some(session.port),
-                    username: Some(session.username.clone()),
-                    password: Some(session.password.clone()),
-                    detail: format!(
-                        "Local SOCKS5 proxy is listening on 127.0.0.1:{}; system routing and TUN are unchanged.",
-                        session.port
-                    ),
-                };
-                inner.active = Some(session);
-                Ok(status)
-            }
-            Err(error) => Err(error),
-        };
-        drop(inner);
-        self.changed.notify_one();
-        response
+        tokio::spawn(async move {
+            let result = runtime
+                .start_reserved(&app, &profile, &credentials.0, &supervisor)
+                .await;
+
+            let mut inner = runtime.inner.lock().await;
+            inner.starting = false;
+            let response = match result {
+                Ok(session) => {
+                    let status = LocalProxyStatus {
+                        active: true,
+                        profile_id: Some(session.profile_id.clone()),
+                        host: Some("127.0.0.1".to_string()),
+                        port: Some(session.port),
+                        username: Some(session.username.clone()),
+                        password: Some(session.password.clone()),
+                        detail: format!(
+                            "Local SOCKS5 proxy is listening on 127.0.0.1:{}; system routing and TUN are unchanged.",
+                            session.port
+                        ),
+                    };
+                    inner.active = Some(session);
+                    Ok(status)
+                }
+                Err(error) => Err(error),
+            };
+            drop(inner);
+            runtime.changed.notify_one();
+            let _ = response_tx.send(response);
+        });
+
+        response_rx.await.map_err(|_| {
+            "The local proxy startup task stopped unexpectedly. Check proxy status before retrying."
+                .to_string()
+        })?
     }
 
     async fn start_reserved(

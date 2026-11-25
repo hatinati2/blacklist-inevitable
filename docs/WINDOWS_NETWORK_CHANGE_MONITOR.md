@@ -6,7 +6,7 @@
 
 ## Registration and callback behavior
 
-The monitor registers `NotifyRouteChange2(AF_UNSPEC, ...)` and `NotifyIpInterfaceChange(AF_UNSPEC, ...)`. Both registrations must succeed before a caller takes its initial `NetworkEpoch`. If either registration fails, any successful earlier registration is cancelled and monitor creation fails closed.
+The monitor registers `NotifyRouteChange2(AF_UNSPEC, ...)` and `NotifyIpInterfaceChange(AF_UNSPEC, ...)`. Both registrations must succeed before a caller takes its initial `NetworkEpoch`. If either registration fails, any successful earlier registration is cancelled and monitor creation fails closed. Starting or stopping a monitor also advances the generation, so snapshots cannot be reused across a period when no notifications were being observed.
 
 The callbacks are intentionally minimal: they do not allocate, acquire locks, retain or dereference OS-owned row pointers, or call cancellation APIs. Each callback only increments a process-wide atomic generation. If the 64-bit generation would wrap, the monitor becomes permanently invalid rather than permitting an ABA match.
 

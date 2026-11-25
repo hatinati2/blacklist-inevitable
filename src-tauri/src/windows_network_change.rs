@@ -150,6 +150,9 @@ mod windows {
                 ));
             }
 
+            // Invalidate any snapshot from a previous monitor lifetime. This
+            // also closes the gap in which no subscription was active.
+            NETWORK_GENERATION.mark_changed();
             monitor.active = true;
             Ok(monitor)
         }
@@ -180,6 +183,8 @@ mod windows {
         }
 
         fn cancel_registered_handles(&mut self) -> Result<(), String> {
+            let had_registration =
+                self.active || self.handles.iter().any(|handle| !handle.is_null());
             let mut failures = Vec::new();
             for (index, handle) in self.handles.iter_mut().enumerate().rev() {
                 if handle.is_null() {
@@ -195,6 +200,11 @@ mod windows {
                 }
             }
             self.active = false;
+            if had_registration {
+                // No snapshot may survive a monitor shutdown or failed
+                // cancellation attempt.
+                NETWORK_GENERATION.mark_changed();
+            }
             if failures.is_empty() {
                 Ok(())
             } else {
@@ -244,6 +254,22 @@ mod tests {
         assert_eq!(latest.generation(), first.generation() + 10);
         assert!(!clock.is_current(first));
         assert!(clock.is_current(latest));
+    }
+
+    #[test]
+    fn monitor_lifecycle_changes_invalidate_snapshots_across_unmonitored_gaps() {
+        let clock = GenerationClock::new();
+        let before_start = clock.snapshot().unwrap();
+
+        // Monitor start establishes a new observed epoch.
+        clock.mark_changed();
+        let during_monitor = clock.snapshot().unwrap();
+        assert!(!clock.is_current(before_start));
+
+        // Monitor shutdown invalidates snapshots made while the callback
+        // registrations were active, even if no callback fired.
+        clock.mark_changed();
+        assert!(!clock.is_current(during_monitor));
     }
 
     #[test]

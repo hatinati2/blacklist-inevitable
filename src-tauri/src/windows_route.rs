@@ -108,6 +108,7 @@ fn validate_inputs(
                 || endpoint.address.is_unspecified()
                 || endpoint.address.is_loopback()
                 || endpoint.address.is_multicast()
+                || matches!(endpoint.address, IpAddr::V6(address) if address.is_unicast_link_local())
                 || endpoint.address == IpAddr::V4(Ipv4Addr::BROADCAST)
         })
     {
@@ -316,6 +317,9 @@ mod tests {
         assert!(validate_inputs(&[endpoint("0.0.0.0", 443)], &[candidate(1, 1)]).is_err());
         assert!(validate_inputs(&[endpoint("127.0.0.1", 443)], &[candidate(1, 1)]).is_err());
         assert!(validate_inputs(&[endpoint("224.0.0.1", 443)], &[candidate(1, 1)]).is_err());
+        // Link-local IPv6 requires a scope/interface ID, which an IpAddr tuple
+        // intentionally does not carry. Do not pass an ambiguous sockaddr to IP Helper.
+        assert!(validate_inputs(&[endpoint("fe80::1", 443)], &[candidate(1, 1)]).is_err());
         assert!(validate_inputs(&[endpoint("203.0.113.8", 0)], &[candidate(1, 1)]).is_err());
     }
 

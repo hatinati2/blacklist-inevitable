@@ -13,7 +13,7 @@ Microsoft API references:
 - https://learn.microsoft.com/en-us/windows/win32/api/netioapi/nf-netioapi-getifentry2
 - https://learn.microsoft.com/en-us/windows/win32/api/netioapi/ns-netioapi-mib_if_row2
 
-The route result is accepted only when the fresh interface record still has hardware and connector flags, is not a filter or endpoint interface, is not a known logical interface type, and its exact LUID/index pair exists in the earlier physical-candidate inventory. If the route resolves over a virtual/tunnel interface, the adapter index changes, or the route-selected interface is not in the inventory, the function fails closed. There is no name-based fallback.
+The route result is accepted only when the fresh interface record still has hardware and connector flags, is not a filter or endpoint interface, is not a known logical interface type, and its exact LUID/index pair exists in the earlier physical-candidate inventory. Link-local IPv6 destinations are rejected because this numeric endpoint model does not carry the scope/interface ID required to disambiguate them. If the route resolves over a virtual/tunnel interface, the adapter index changes, or the route-selected interface is not in the inventory, the function fails closed. There is no name-based fallback.
 
 The resolver validates that endpoint sets are non-empty, bounded, unique, and contain non-zero ports and unicast non-loopback destination IPs. It preserves the exact address/port/protocol tuple in each result.
 

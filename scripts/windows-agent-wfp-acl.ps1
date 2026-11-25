@@ -43,6 +43,10 @@ namespace BlacklistInevitable {
             new Guid("c38d57d1-05a7-4c33-904f-7fbceee60e82");
         private static readonly Guid LayerV6 =
             new Guid("4a72393b-319f-44bc-84c3-ba54dcb3b6b4");
+        private static readonly Guid OutboundTransportV4 =
+            new Guid("09e61aea-d214-46e2-9b21-b26b0b2f28c8");
+        private static readonly Guid OutboundTransportV6 =
+            new Guid("e1735bde-013f-4655-b351-a49e15762df0");
 
         [StructLayout(LayoutKind.Sequential)]
         private struct TrusteeW {
@@ -310,6 +314,8 @@ namespace BlacklistInevitable {
                 case "Sublayer": key = SublayerKey; break;
                 case "LayerV4": key = LayerV4; break;
                 case "LayerV6": key = LayerV6; break;
+                case "OutboundTransportV4": key = OutboundTransportV4; break;
+                case "OutboundTransportV6": key = OutboundTransportV6; break;
                 case "Engine":
                 case "FilterContainer": return IntPtr.Zero;
                 default: throw new ArgumentException("Unsupported WFP ACL target: " + target);
@@ -334,6 +340,8 @@ namespace BlacklistInevitable {
                         out owner, out group, out dacl, out sacl, out descriptor);
                 case "LayerV4":
                 case "LayerV6":
+                case "OutboundTransportV4":
+                case "OutboundTransportV6":
                     return FwpmLayerGetSecurityInfoByKey0(engine, key, DACL_SECURITY_INFORMATION,
                         out owner, out group, out dacl, out sacl, out descriptor);
                 case "FilterContainer":
@@ -356,6 +364,8 @@ namespace BlacklistInevitable {
                         IntPtr.Zero, IntPtr.Zero, dacl, IntPtr.Zero);
                 case "LayerV4":
                 case "LayerV6":
+                case "OutboundTransportV4":
+                case "OutboundTransportV6":
                     return FwpmLayerSetSecurityInfoByKey0(engine, key, DACL_SECURITY_INFORMATION,
                         IntPtr.Zero, IntPtr.Zero, dacl, IntPtr.Zero);
                 case "FilterContainer":
@@ -410,10 +420,12 @@ namespace BlacklistInevitable {
         }
 
         private static readonly string[] Targets = new string[] {
-            "Engine", "Provider", "Sublayer", "LayerV4", "LayerV6", "FilterContainer"
+            "Engine", "Provider", "Sublayer", "LayerV4", "LayerV6",
+            "OutboundTransportV4", "OutboundTransportV6", "FilterContainer"
         };
         private static readonly uint[] Rights = new uint[] {
-            0x00000008, 0x00000082, 0x00000082, 0x00000002, 0x00000002, 0x00000001
+            0x00000008, 0x00000082, 0x00000082, 0x00000002,
+            0x00000002, 0x00000002, 0x00000002, 0x00000001
         };
 
         public static string Provision(string serviceSid) {
@@ -428,7 +440,7 @@ namespace BlacklistInevitable {
                     ChangeServiceAce(engine, Targets[i], serviceSid, Rights[i], false, false);
                     ChangeServiceAce(engine, Targets[i], serviceSid, Rights[i], true, false);
                 }
-                return "Provisioned six object-scoped WFP ACEs for the restricted Agent service SID.";
+                return "Provisioned eight object-scoped WFP ACEs for the restricted Agent service SID.";
             } catch {
                 for (int i = touched.Count - 1; i >= 0; i--) {
                     try {

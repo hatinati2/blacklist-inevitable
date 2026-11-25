@@ -45,6 +45,10 @@ namespace BlacklistInevitable {
             new Guid("c38d57d1-05a7-4c33-904f-7fbceee60e82");
         private static readonly Guid LayerV6 =
             new Guid("4a72393b-319f-44bc-84c3-ba54dcb3b6b4");
+        private static readonly Guid OutboundTransportV4 =
+            new Guid("09e61aea-d214-46e2-9b21-b26b0b2f28c8");
+        private static readonly Guid OutboundTransportV6 =
+            new Guid("e1735bde-013f-4655-b351-a49e15762df0");
 
         [StructLayout(LayoutKind.Sequential)]
         private struct TrusteeW {
@@ -135,6 +139,8 @@ namespace BlacklistInevitable {
                 case "Sublayer": key = SublayerKey; break;
                 case "LayerV4": key = LayerV4; break;
                 case "LayerV6": key = LayerV6; break;
+                case "OutboundTransportV4": key = OutboundTransportV4; break;
+                case "OutboundTransportV6": key = OutboundTransportV6; break;
                 case "Engine":
                 case "FilterContainer":
                     return IntPtr.Zero;
@@ -167,6 +173,8 @@ namespace BlacklistInevitable {
                         break;
                     case "LayerV4":
                     case "LayerV6":
+                    case "OutboundTransportV4":
+                    case "OutboundTransportV6":
                         status = FwpmLayerGetSecurityInfoByKey0(engine, key, DACL_SECURITY_INFORMATION,
                             out owner, out group, out dacl, out sacl, out descriptor);
                         break;
@@ -223,6 +231,8 @@ namespace BlacklistInevitable {
                         break;
                     case "LayerV4":
                     case "LayerV6":
+                    case "OutboundTransportV4":
+                    case "OutboundTransportV6":
                         status = FwpmLayerSetSecurityInfoByKey0(engine, key, DACL_SECURITY_INFORMATION,
                             IntPtr.Zero, IntPtr.Zero, acl, IntPtr.Zero);
                         break;
@@ -278,6 +288,8 @@ namespace BlacklistInevitable {
                             break;
                         case "LayerV4":
                         case "LayerV6":
+                        case "OutboundTransportV4":
+                        case "OutboundTransportV6":
                             readStatus = FwpmLayerGetSecurityInfoByKey0(engine, key, DACL_SECURITY_INFORMATION,
                                 out owner, out group, out dacl, out sacl, out descriptor);
                             break;
@@ -354,6 +366,8 @@ $aclRights = [ordered]@{
     Sublayer = [uint32]0x00000082     # READ | ADD_LINK on Agent sublayer only
     LayerV4 = [uint32]0x00000002      # ADD_LINK on ALE_AUTH_CONNECT_V4 only
     LayerV6 = [uint32]0x00000002      # ADD_LINK on ALE_AUTH_CONNECT_V6 only
+    OutboundTransportV4 = [uint32]0x00000002 # ADD_LINK on OUTBOUND_TRANSPORT_V4 only
+    OutboundTransportV6 = [uint32]0x00000002 # ADD_LINK on OUTBOUND_TRANSPORT_V6 only
     FilterContainer = [uint32]0x00000001 # ADD only; no inheritance to filters
 }
 
@@ -402,7 +416,7 @@ try {
     # The preceding administrator-run live-BFE smoke test creates and validates
     # our persistent provider/sublayer. Snapshot every existing descriptor before
     # mutating any ACL, then grant only at the exact object/container check sites.
-    $targets = @("Engine", "Provider", "Sublayer", "LayerV4", "LayerV6", "FilterContainer")
+    $targets = @("Engine", "Provider", "Sublayer", "LayerV4", "LayerV6", "OutboundTransportV4", "OutboundTransportV6", "FilterContainer")
     foreach ($target in $targets) {
         $originalDacls[$target] = [BlacklistInevitable.WfpScopedAclInterop]::CaptureDaclBase64($target)
         if ([string]::IsNullOrWhiteSpace($originalDacls[$target])) {
@@ -436,9 +450,9 @@ try {
         $report.service_name -ne $serviceName -or
         $report.service_sid_type -ne "RESTRICTED" -or
         $report.outcome -ne "access_granted" -or
-        $report.installed_filter_count -ne 4 -or
-        $report.removed_filter_count -ne 4 -or
-        $report.already_absent_filter_count -ne 4 -or
+        $report.installed_filter_count -ne 8 -or
+        $report.removed_filter_count -ne 8 -or
+        $report.already_absent_filter_count -ne 8 -or
         $report.runtime_ids_checkpointed -ne $true -or
         $report.journal_removed -ne $true -or
         $report.synthetic_filters_committed_during_test -ne $true -or
@@ -461,7 +475,7 @@ finally {
     if ($aclMutationAttempted -and -not [string]::IsNullOrWhiteSpace($sidText)) {
         try {
             & (Join-Path $PSScriptRoot "windows-agent-wfp-acl.ps1") -Action Remove -ServiceSid $sidText | Out-Null
-            Write-Host "Shared Agent WFP ACL provisioner removed its six service SID grants."
+            Write-Host "Shared Agent WFP ACL provisioner removed its eight service SID grants."
         }
         catch {
             $restoreErrors.Add("Shared WFP ACL helper removal: $($_.Exception.Message)")
@@ -481,7 +495,7 @@ finally {
     if ($aclMutationAttempted) {
         # Restore in reverse scope order, continue after individual failures,
         # then independently compare each restored DACL with its saved bytes.
-        $restoreOrder = @("FilterContainer", "LayerV6", "LayerV4", "Sublayer", "Provider", "Engine")
+        $restoreOrder = @("FilterContainer", "OutboundTransportV6", "OutboundTransportV4", "LayerV6", "LayerV4", "Sublayer", "Provider", "Engine")
         foreach ($target in $restoreOrder) {
             try {
                 [BlacklistInevitable.WfpScopedAclInterop]::RestoreDaclBase64($target, $originalDacls[$target])

@@ -2,7 +2,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Manager};
 use tokio::net::TcpStream;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
@@ -60,16 +60,18 @@ pub struct EndpointTestResult {
 #[tauri::command]
 pub async fn get_local_proxy_status(
     app: AppHandle,
-    runtime: State<'_, crate::local_proxy::LocalProxyRuntime>,
-) -> crate::local_proxy::LocalProxyStatus {
+) -> Result<crate::local_proxy::LocalProxyStatus, String> {
+    let runtime = app
+        .state::<crate::local_proxy::LocalProxyRuntime>()
+        .inner()
+        .clone();
     let supervisor = app.state::<ProcessSupervisor>().inner().clone();
-    runtime.status(&supervisor).await
+    Ok(runtime.status(&supervisor).await)
 }
 
 #[tauri::command]
 pub async fn start_local_proxy(
     app: AppHandle,
-    runtime: State<'_, crate::local_proxy::LocalProxyRuntime>,
     profile_id: String,
 ) -> Result<crate::local_proxy::LocalProxyStatus, String> {
     let profile = profile_store::list_profiles(&app)?
@@ -77,6 +79,10 @@ pub async fn start_local_proxy(
         .find(|profile| profile.id == profile_id)
         .ok_or_else(|| "Profile not found.".to_string())?;
     let credentials = profile_store::get_credentials(&profile.id)?;
+    let runtime = app
+        .state::<crate::local_proxy::LocalProxyRuntime>()
+        .inner()
+        .clone();
     let supervisor = app.state::<ProcessSupervisor>().inner().clone();
     runtime
         .start(&app, profile, &credentials, &supervisor)
@@ -86,8 +92,11 @@ pub async fn start_local_proxy(
 #[tauri::command]
 pub async fn stop_local_proxy(
     app: AppHandle,
-    runtime: State<'_, crate::local_proxy::LocalProxyRuntime>,
 ) -> Result<crate::local_proxy::LocalProxyStatus, String> {
+    let runtime = app
+        .state::<crate::local_proxy::LocalProxyRuntime>()
+        .inner()
+        .clone();
     let supervisor = app.state::<ProcessSupervisor>().inner().clone();
     runtime.stop(&supervisor).await
 }

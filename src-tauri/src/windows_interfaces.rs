@@ -208,9 +208,7 @@ pub fn discover_hardware_egress_interfaces() -> Result<Vec<PhysicalInterface>, S
             }
 
             let mut row: MIB_IF_ROW2 = unsafe { std::mem::zeroed() };
-            unsafe {
-                row.InterfaceLuid.Value = luid;
-            }
+            row.InterfaceLuid.Value = luid;
             let row_status = unsafe { GetIfEntry2(&mut row) };
             if row_status != 0 {
                 return Err(format!(

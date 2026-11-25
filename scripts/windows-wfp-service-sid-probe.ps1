@@ -411,11 +411,13 @@ try {
     }
 
     $aclMutationAttempted = $true
+    $wfpAclHelperPath = Join-Path $PSScriptRoot "windows-agent-wfp-acl.ps1"
+    if (-not (Test-Path -LiteralPath $wfpAclHelperPath -PathType Leaf)) {
+        throw "The shared Agent WFP ACL provisioner is missing: $wfpAclHelperPath"
+    }
+    & $wfpAclHelperPath -Action Provision -ServiceSid $sidText | Out-Null
     foreach ($entry in $aclRights.GetEnumerator()) {
-        [BlacklistInevitable.WfpScopedAclInterop]::AddTemporaryServiceAce(
-            $entry.Key, $sidText, [uint32]$entry.Value
-        )
-        Write-Host ("Granted scoped WFP right 0x{0:X8} on {1}." -f [uint32]$entry.Value, $entry.Key)
+        Write-Host ("Provisioned scoped WFP right 0x{0:X8} on {1}." -f [uint32]$entry.Value, $entry.Key)
     }
 
     Start-Service -Name $serviceName -ErrorAction Stop
@@ -455,6 +457,17 @@ try {
     Write-Host "No synthetic filters remain on the disposable runner."
 }
 finally {
+    $restoreErrors = [System.Collections.Generic.List[string]]::new()
+    if ($aclMutationAttempted -and -not [string]::IsNullOrWhiteSpace($sidText)) {
+        try {
+            & (Join-Path $PSScriptRoot "windows-agent-wfp-acl.ps1") -Action Remove -ServiceSid $sidText | Out-Null
+            Write-Host "Shared Agent WFP ACL provisioner removed its six service SID grants."
+        }
+        catch {
+            $restoreErrors.Add("Shared WFP ACL helper removal: $($_.Exception.Message)")
+        }
+    }
+
     if ($serviceCreated) {
         Stop-Service -Name $serviceName -Force -ErrorAction SilentlyContinue
         & (Join-Path $env:WINDIR "System32\sc.exe") delete $serviceName 2>&1 | Out-Null
@@ -465,7 +478,6 @@ finally {
         }
     }
 
-    $restoreErrors = [System.Collections.Generic.List[string]]::new()
     if ($aclMutationAttempted) {
         # Restore in reverse scope order, continue after individual failures,
         # then independently compare each restored DACL with its saved bytes.

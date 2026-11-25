@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use futures_util::StreamExt;
 use serde_json::{json, Map, Value};
+use zeroize::Zeroize;
 
 use crate::process_supervisor::ProcessSupervisor;
 use crate::profiles::ProfileSummary;
@@ -167,6 +168,31 @@ pub fn build_probe_config(
 }
 
 
+/// Owns a temporary engine config containing credential copies and erases
+/// those fields on every return path from endpoint-plan construction.
+struct SensitiveEngineConfig(Value);
+
+impl Drop for SensitiveEngineConfig {
+    fn drop(&mut self) {
+        let Some(outbounds) = self.0.get_mut("outbounds").and_then(Value::as_array_mut) else {
+            return;
+        };
+        for outbound in outbounds {
+            let Some(fields) = outbound.as_object_mut() else { continue };
+            for key in ["uuid", "password", "username"] {
+                if let Some(Value::String(value)) = fields.get_mut(key) {
+                    value.zeroize();
+                }
+            }
+            if let Some(Value::Object(obfs)) = fields.get_mut("obfs") {
+                if let Some(Value::String(password)) = obfs.get_mut("password") {
+                    password.zeroize();
+                }
+            }
+        }
+    }
+}
+
 /// Endpoint tuple derived from the actual outbound config emitted by this adapter.
 /// The plan carries no credentials or rendered engine JSON.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -185,8 +211,8 @@ pub fn build_engine_endpoint_plan(
 ) -> Result<EngineEndpointPlan, String> {
     use crate::wfp_policy::TransportProtocol::{Tcp, Udp};
 
-    let config = build_probe_config(profile, credentials, 17381)?;
-    let outbound = config
+    let config = SensitiveEngineConfig(build_probe_config(profile, credentials, 17381)?);
+    let outbound = config.0
         .get("outbounds")
         .and_then(Value::as_array)
         .and_then(|items| items.first())

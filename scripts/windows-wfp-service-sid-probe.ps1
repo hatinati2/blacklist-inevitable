@@ -430,22 +430,29 @@ try {
     }
 
     $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
-    if ($report.schema_version -ne 1 -or
+    if ($report.schema_version -ne 2 -or
         $report.service_name -ne $serviceName -or
         $report.service_sid_type -ne "RESTRICTED" -or
-        $report.traffic_filters_committed -ne $false -or
         $report.outcome -ne "access_granted" -or
-        $report.validated_filter_count -lt 1 -or
-        $report.rolled_back_filter_count -ne $report.validated_filter_count) {
-        throw "The scoped WFP ACL acceptance test failed. Report: $($report | ConvertTo-Json -Depth 8 -Compress)"
+        $report.installed_filter_count -ne 4 -or
+        $report.removed_filter_count -ne 4 -or
+        $report.already_absent_filter_count -ne 4 -or
+        $report.runtime_ids_checkpointed -ne $true -or
+        $report.journal_removed -ne $true -or
+        $report.synthetic_filters_committed_during_test -ne $true -or
+        $report.synthetic_filters_may_remain -ne $false) {
+        throw "The restricted-SID journaled WFP recovery acceptance test failed. Report: $($report | ConvertTo-Json -Depth 8 -Compress)"
     }
 
     $report | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $artifactPath -Encoding utf8
     Write-Host "Restricted service SID: $sidText"
     Write-Host "WFP access result: $($report.outcome)"
-    Write-Host "Validated filters: $($report.validated_filter_count)"
-    Write-Host "Rolled-back filters: $($report.rolled_back_filter_count)"
-    Write-Host "No traffic filter was committed."
+    Write-Host "Synthetic filters committed: $($report.installed_filter_count)"
+    Write-Host "Synthetic filters removed and verified absent: $($report.removed_filter_count)"
+    Write-Host "Idempotent already-absent confirmations: $($report.already_absent_filter_count)"
+    Write-Host "Runtime IDs persisted in recovery journal: $($report.runtime_ids_checkpointed)"
+    Write-Host "Recovery journal removed after verified cleanup: $($report.journal_removed)"
+    Write-Host "No synthetic filters remain on the disposable runner."
 }
 finally {
     if ($serviceCreated) {

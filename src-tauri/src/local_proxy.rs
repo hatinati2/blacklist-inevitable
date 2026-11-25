@@ -424,7 +424,7 @@ async fn verify_socks_authentication(
         return Err("The local SOCKS5 listener did not require username/password authentication.".to_string());
     }
 
-    let mut auth = Vec::with_capacity(3 + username.len() + password.len());
+    let mut auth = Zeroizing::new(Vec::with_capacity(3 + username.len() + password.len()));
     auth.push(0x01);
     auth.push(username.len() as u8);
     auth.extend_from_slice(username.as_bytes());

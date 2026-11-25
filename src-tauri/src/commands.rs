@@ -59,9 +59,11 @@ pub struct EndpointTestResult {
 
 #[tauri::command]
 pub async fn get_local_proxy_status(
+    app: AppHandle,
     runtime: State<'_, crate::local_proxy::LocalProxyRuntime>,
 ) -> crate::local_proxy::LocalProxyStatus {
-    runtime.status().await
+    let supervisor = app.state::<ProcessSupervisor>().inner().clone();
+    runtime.status(&supervisor).await
 }
 
 #[tauri::command]

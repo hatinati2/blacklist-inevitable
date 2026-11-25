@@ -19,6 +19,16 @@ type DesktopAgentStatus = {
   detail: string;
 };
 
+type LocalProxyStatus = {
+  active: boolean;
+  profileId: string | null;
+  host: string | null;
+  port: number | null;
+  username: string | null;
+  password: string | null;
+  detail: string;
+};
+
 type AppStatus = {
   appName: string;
   version: string;
@@ -77,6 +87,7 @@ type EndpointResult = {
 export default function App() {
   const [status, setStatus] = useState<AppStatus | null>(null);
   const [agentStatus, setAgentStatus] = useState<DesktopAgentStatus | null>(null);
+  const [localProxyStatus, setLocalProxyStatus] = useState<LocalProxyStatus | null>(null);
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [shareText, setShareText] = useState("");
   const [endpointResults, setEndpointResults] = useState<EndpointResult[] | null>(null);
@@ -129,6 +140,16 @@ export default function App() {
     }
   }, []);
 
+
+  const refreshLocalProxyStatus = useCallback(async () => {
+    try {
+      const nextStatus = await invoke<LocalProxyStatus>("get_local_proxy_status");
+      setLocalProxyStatus(nextStatus);
+    } catch {
+      setLocalProxyStatus(null);
+    }
+  }, []);
+
   const refreshProfiles = useCallback(async () => {
     try {
       const nextProfiles = await invoke<Profile[]>("get_profiles");
@@ -168,9 +189,10 @@ export default function App() {
   useEffect(() => {
     void refreshStatus();
     void refreshAgentStatus();
+    void refreshLocalProxyStatus();
     void refreshProfiles();
     void refreshRealDelaySettings();
-  }, [refreshStatus, refreshAgentStatus, refreshProfiles, refreshRealDelaySettings]);
+  }, [refreshStatus, refreshAgentStatus, refreshLocalProxyStatus, refreshProfiles, refreshRealDelaySettings]);
 
   const engines = status?.engines ?? [
     { kind: "sing-box", binaryName: "sing-box", integrationStage: "implemented · preflight only" },
@@ -265,6 +287,35 @@ export default function App() {
     }
   };
 
+
+  const startLocalProxy = async (profileId: string) => {
+    setBusy(true);
+    try {
+      const result = await invoke<LocalProxyStatus>("start_local_proxy", { profileId });
+      setLocalProxyStatus(result);
+      setMessage(result.detail);
+    } catch (error) {
+      setMessage(typeof error === "string" ? error : "Could not start the local SOCKS5 proxy.");
+      await refreshLocalProxyStatus();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const stopLocalProxy = async () => {
+    setBusy(true);
+    try {
+      const result = await invoke<LocalProxyStatus>("stop_local_proxy");
+      setLocalProxyStatus(result);
+      setMessage(result.detail);
+    } catch (error) {
+      setMessage(typeof error === "string" ? error : "Could not stop the local SOCKS5 proxy safely.");
+      await refreshLocalProxyStatus();
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const testRealDelay = async () => {
     setBusy(true);
     setRealDelayResults(null);
@@ -305,7 +356,7 @@ export default function App() {
             <h1>blacklist-inevitable</h1>
           </div>
         </div>
-        <span className="stage-tag">SING-BOX PREFLIGHT</span>
+        <span className="stage-tag">SING-BOX LOCAL PROXY + PREFLIGHT</span>
       </header>
 
       <section className="hero">
@@ -314,7 +365,7 @@ export default function App() {
           <h2>Bring your nodes together. Check the basics first.</h2>
           <p className="hero-description">
             Import supported share links, keep credentials in Windows Credential Manager,
-            validate each generated sing-box config, then measure a real request through that node.
+            validate each generated sing-box config, measure a real request, or start a local SOCKS5 proxy for apps that support manual proxy settings.
           </p>
           <div className="runtime-line">
             <span className="runtime-dot" />
@@ -352,6 +403,31 @@ export default function App() {
           </p>
         )}
       </section>
+
+
+      {localProxyStatus?.active && (
+        <section className="panel local-proxy-panel" aria-live="polite">
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">LOCAL PROXY SESSION</p>
+              <h2>SOCKS5 proxy is running</h2>
+            </div>
+            <span className="agent-state-tag online">Loopback only</span>
+          </div>
+          <p className="panel-copy">
+            Configure a browser or application that supports manual SOCKS5 settings. This does not
+            route all Windows traffic, create a TUN, change system DNS, or provide a kill switch.
+          </p>
+          <div className="proxy-credentials">
+            <p><strong>Server</strong> <code>{localProxyStatus.host}:{localProxyStatus.port}</code></p>
+            <p><strong>Username</strong> <code>{localProxyStatus.username}</code></p>
+            <p><strong>Password</strong> <code>{localProxyStatus.password}</code></p>
+          </div>
+          <button className="secondary-button" onClick={() => void stopLocalProxy()} disabled={busy}>
+            {busy ? "Working…" : "Stop local proxy"}
+          </button>
+        </section>
+      )}
 
       {status && !status.runtimeCleanupHealthy && (
         <section className="runtime-warning" role="alert">
@@ -550,10 +626,18 @@ export default function App() {
                   {!result && !delayResult && (
                     <span className="result-pill neutral">Not tested</span>
                   )}
+                  <button
+                    className="remove-button"
+                    onClick={() => void startLocalProxy(profile.id)}
+                    disabled={busy || previewMode || !status?.singBoxInstalled || !status?.runtimeCleanupHealthy || !!localProxyStatus?.active}
+                    title="Starts an authenticated loopback-only SOCKS5 proxy; it does not enable system-wide VPN routing."
+                  >
+                    Start local SOCKS5
+                  </button>
                   <button className="remove-button" onClick={() => void validateConfig(profile.id)} disabled={busy || previewMode || !status?.singBoxInstalled || !status?.runtimeCleanupHealthy}>
                     Validate config
                   </button>
-                  <button className="remove-button" onClick={() => void removeProfile(profile.id)} disabled={busy || previewMode}>
+                  <button className="remove-button" onClick={() => void removeProfile(profile.id)} disabled={busy || previewMode || localProxyStatus?.profileId === profile.id}>
                     Remove
                   </button>
                 </div>
@@ -571,12 +655,12 @@ export default function App() {
       <section className="notice">
         <div className="notice-icon">i</div>
         <div>
-          <h3>TCP reachability is not Real Delay</h3>
+          <h3>Local proxy is not a system VPN</h3>
           <p>
             The Test config + Real Delay action runs sing-box's native config check, then starts a
-            temporary loopback-only proxy and sends an HTTP 204 request through that node. TCP
-            reachability remains a separate diagnostic. Preflight never enables TUN or changes the
-            Windows system proxy.
+            temporary loopback-only proxy and sends an HTTP 204 request through that node. The
+            Start local SOCKS5 action keeps a separate authenticated proxy available for supported
+            applications. Neither path enables TUN or changes Windows system routing or DNS.
           </p>
         </div>
       </section>

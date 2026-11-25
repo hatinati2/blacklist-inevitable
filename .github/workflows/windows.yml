@@ -2,7 +2,7 @@ name: Windows build
 
 on:
   push:
-    branches: [main, feat/wfp-transactional-removal-smoke, feat/wfp-restricted-service-sid-probe, feat/wfp-restricted-sid-minimum-acl]
+    branches: [main, feat/wfp-transactional-removal-smoke, feat/wfp-restricted-service-sid-probe, feat/wfp-restricted-sid-minimum-acl, feat/wfp-object-scoped-acl]
   pull_request:
     branches: [main, feat/windows-agent-service-installer, feat/agent-credential-handoff, feat/agent-recovery-journal-bootstrap]
   workflow_dispatch:

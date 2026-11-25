@@ -10,6 +10,7 @@ pub mod destination_routing;
 pub mod recovery_journal;
 pub mod wfp_policy;
 pub mod windows_interfaces;
+pub mod windows_route;
 #[cfg(windows)]
 pub mod wfp_engine;
 pub mod split_tunnel;

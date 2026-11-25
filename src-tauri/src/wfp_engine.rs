@@ -461,15 +461,6 @@ impl WfpEngine {
         })
     }
 
-    /// Exercise the persistent filter lifecycle under the restricted service
-    /// SID on a disposable Windows runner: persist stable-key intent first,
-    /// commit synthetic persistent filters, checkpoint their runtime IDs,
-    /// reload the journal, remove only those exact owned filters in a second
-    /// transaction, verify idempotent absence, and finally remove the journal.
-    ///
-    /// This is a CI acceptance primitive only. Callers must use TEST-NET
-    /// endpoints and a non-existent synthetic interface identity; it must not
-    /// be wired to the production connection path.
     /// Install an Agent-owned, persistent outbound ALE policy as one WFP transaction.
     ///
     /// The caller must be the authenticated restricted Agent service. The complete
@@ -617,6 +608,11 @@ impl WfpEngine {
     /// remove only the exact Agent-owned keys, verify idempotent absence, and
     /// finally remove the journal. The caller must use TEST-NET endpoints and a
     /// deliberately nonexistent interface identity on an ephemeral Windows runner.
+    /// Restricted-SID CI acceptance: exercise the real persistent install
+    /// transaction with TEST-NET endpoints and a deliberately nonexistent
+    /// interface identity, then reload the journal, remove exact filter keys,
+    /// verify idempotent absence, and remove the test journal. The caller must
+    /// use this only on an ephemeral Windows test runner.
     pub fn exercise_journaled_filter_recovery_for_service_sid(
         &mut self,
         spec: &crate::wfp_policy::EgressPolicySpec,

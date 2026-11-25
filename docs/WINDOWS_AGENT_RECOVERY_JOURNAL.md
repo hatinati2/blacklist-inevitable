@@ -2,7 +2,7 @@
 
 ## Implemented foundation
 
-`src-tauri/src/recovery_journal.rs` defines a versioned, bounded, non-secret checkpoint format and a file store for the future privileged Windows Agent. It is a persistence primitive only: it does not start sing-box, create a TUN adapter, change routes or DNS, install WFP filters, or run a Windows service.
+`src-tauri/src/recovery_journal.rs` defines a versioned, bounded, non-secret checkpoint format and a file store used by the privileged Windows Agent. The service now performs a deliberately narrow startup recovery for WFP-only sessions; it does not start sing-box, create a TUN adapter, change routes or DNS, or activate a traffic policy.
 
 A journal records only the resource identities and exact previous settings needed for recovery:
 
@@ -42,7 +42,7 @@ The probe uses TEST-NET endpoint addresses and a deliberately non-existent inter
 
 This proves the current scoped ACL and journaled exact-filter-removal path under the restricted service token on the hosted runner. It does not prove that all crash windows have been reconciled, that a filter will be safely removed after sudden power loss, or that Windows 10/11 production installation ACLs have been provisioned. The production service remains status-only and is not wired to these WFP mutations.
 
-This primitive is not yet wired into Agent startup reconciliation, does not install filters, and does not activate a kill switch. No WFP cleanup is attempted automatically until process, TUN, route, DNS, and WFP inventory reconciliation is complete.
+Agent startup now performs a narrowly scoped WFP-only reconciliation before exposing its status pipe. A journal is eligible only when it contains one or more firewall filter records and has no engine process, TUN interface, route, or DNS records. For each eligible session, the service opens BFE and calls `WfpEngine::remove_owned_filters`, which validates provider ownership, sublayer, layer, persistence, stable filter GUID, and any recorded runtime ID; it clears the journal only after the exact keys are independently confirmed absent. If access is denied, identity validation fails, or journal cleanup fails, the session remains unresolved and startup diagnostics report the failure. Journals containing any engine, TUN, route, or DNS state are deliberately deferred without partial cleanup. The Agent remains status-only: this recovery path does not install filters, start sing-box, change routes/DNS, or activate a kill switch.
 
 ## Security boundary and remaining work
 
@@ -52,7 +52,8 @@ The Windows Agent now opens this journal during service startup, before making i
 
 - Provision and verify the service-owned directory DACL during agent installation.
 - Wire a checkpoint before each OS mutation and after each successful mutation.
-- Implement startup reconciliation against actual process, TUN, route, DNS, and WFP state.
+- [x] Reconcile isolated WFP-only startup journals by exact stable filter key; retain the journal on any WFP or journal-cleanup failure.
+- Implement full startup reconciliation against actual process, TUN, route, DNS, and mixed WFP state; mixed-resource sessions remain deferred until reverse-order cleanup is implemented.
 - Implement rollback in reverse order and only remove journal files after verified cleanup.
 - Exercise process/agent crash, forced termination, restart, tampered journal, ACL, and reparse-point cases on real Windows 10/11 machines.
 

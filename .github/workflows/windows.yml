@@ -2,9 +2,9 @@ name: Windows build
 
 on:
   push:
-    branches: [main, feat/agent-network-configured-route-luid-gate, feat/agent-route-luid-canonical-reconciliation, feat/agent-route-protocol-origin-evidence]
+    branches: [main, feat/agent-network-configured-route-luid-gate, feat/agent-route-luid-canonical-reconciliation, feat/agent-route-protocol-origin-evidence, feat/agent-multi-route-prefix-reconciliation]
   pull_request:
-    branches: [main, feat/windows-agent-recovery-intent-planner, feat/agent-network-configured-route-luid-gate, feat/agent-route-luid-canonical-reconciliation]
+    branches: [main, feat/windows-agent-recovery-intent-planner, feat/agent-network-configured-route-luid-gate, feat/agent-route-luid-canonical-reconciliation, feat/agent-route-protocol-origin-evidence]
   workflow_dispatch:
 
 permissions:

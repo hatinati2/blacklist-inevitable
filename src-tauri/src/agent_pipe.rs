@@ -294,6 +294,9 @@ fn prepare_connect_snapshot(
         }
     };
     drop(credentials);
+    // The one-shot IPC credential wrappers are no longer needed: the endpoint
+    // plan contains only the server tuple and transport set, never credentials.
+    drop(agent_credentials);
 
     let capture = runtime.block_on(
         crate::windows_egress_snapshot::WindowsEgressSnapshot::capture_for_endpoint_plan(
@@ -311,7 +314,7 @@ fn prepare_connect_snapshot(
                         request_id,
                         Some(connection.snapshot()),
                         error,
-                        &agent_credentials,
+                        &BTreeMap::new(),
                     );
                 }
             };
@@ -321,7 +324,7 @@ fn prepare_connect_snapshot(
                     request_id,
                     Some(connection.snapshot()),
                     error,
-                    &agent_credentials,
+                    &BTreeMap::new(),
                 );
             }
 
@@ -347,7 +350,7 @@ fn prepare_connect_snapshot(
             request_id,
             Some(connection.snapshot()),
             error,
-            &agent_credentials,
+            &BTreeMap::new(),
         ),
     }
 }

@@ -741,14 +741,37 @@ fn observe_tunnel_unicast_addresses(
     Ok(addresses)
 }
 
-/// Read every IPv4 and IPv6 route row in one IP Helper snapshot, then return
-/// observations only for destinations present in the supplied journal. A
-/// destination with multiple routes is Unknown because the current journal
-/// schema cannot distinguish same-prefix routes on different interfaces.
+/// Append one live route row to every journal key that resolves to the same
+/// canonical prefix. Do not collapse repeated rows: the assessor must be able
+/// to detect indistinguishable duplicates instead of silently picking one.
+fn append_observed_route_state(
+    routes: &mut std::collections::BTreeMap<
+        String,
+        Observation<Vec<crate::recovery_journal::RouteState>>,
+    >,
+    journal_keys: &[String],
+    state: &crate::recovery_journal::RouteState,
+) -> Result<(), String> {
+    for key in journal_keys {
+        match routes.get_mut(key) {
+            Some(observation @ Observation::Absent) => {
+                *observation = Observation::Present(vec![state.clone()]);
+            }
+            Some(Observation::Present(rows)) => rows.push(state.clone()),
+            Some(Observation::Unknown) => {}
+            None => return Err("The route observation snapshot lost a requested journal key.".into()),
+        }
+    }
+    Ok(())
+}
+
+/// Read every IPv4 and IPv6 route row in one IP Helper snapshot. Preserve
+/// every row for each journaled destination prefix; the pure assessor matches
+/// journal mutations against stable route identities within that complete set.
 #[cfg(windows)]
 pub fn observe_recorded_routes(
     journal: &crate::recovery_journal::RecoveryJournal,
-) -> Result<std::collections::BTreeMap<String, Observation<crate::recovery_journal::RouteState>>, String> {
+) -> Result<std::collections::BTreeMap<String, Observation<Vec<crate::recovery_journal::RouteState>>>, String> {
     use std::collections::BTreeMap;
     use windows_sys::Win32::NetworkManagement::IpHelper::{
         FreeMibTable, GetIpForwardTable2, MIB_IPFORWARD_ROW2, MIB_IPFORWARD_TABLE2,
@@ -764,11 +787,11 @@ pub fn observe_recorded_routes(
 
     for record in &journal.routes {
         let canonical = canonicalize_prefix(&record.destination_prefix)?;
-        routes.insert(record.destination_prefix.clone(), Observation::Absent);
-        expected_by_canonical
-            .entry(canonical)
-            .or_default()
-            .push(record.destination_prefix.clone());
+        routes.entry(record.destination_prefix.clone()).or_insert(Observation::Absent);
+        let keys = expected_by_canonical.entry(canonical).or_default();
+        if !keys.contains(&record.destination_prefix) {
+            keys.push(record.destination_prefix.clone());
+        }
     }
 
     let mut table: *mut MIB_IPFORWARD_TABLE2 = std::ptr::null_mut();
@@ -805,60 +828,60 @@ pub fn observe_recorded_routes(
         let Some(journal_keys) = expected_by_canonical.get(&canonical) else {
             continue;
         };
-        if journal_keys.len() != 1 {
+        if row.InterfaceIndex == 0 {
             for key in journal_keys {
                 routes.insert(key.clone(), Observation::Unknown);
             }
             continue;
         }
 
-        if row.InterfaceIndex == 0 {
-            routes.insert(journal_keys[0].clone(), Observation::Unknown);
-            continue;
-        }
-
-        let next_hop_address = sockaddr_address(&row.NextHop)?;
-        if next_hop_address.is_ipv4() != prefix_address.is_ipv4() {
-            routes.insert(journal_keys[0].clone(), Observation::Unknown);
-            continue;
-        }
-        let next_hop = if next_hop_address.is_unspecified() {
-            None
-        } else {
-            Some(next_hop_address)
+        // Interface indexes are reusable. Preserve the kernel NET_LUID and
+        // parse the complete state from this exact MIB_IPFORWARD_ROW2 entry.
+        let state = match route_state_from_row(row, prefix_address) {
+            Ok(state) => state,
+            Err(_) => {
+                for key in journal_keys {
+                    routes.insert(key.clone(), Observation::Unknown);
+                }
+                continue;
+            }
         };
 
-        // Interface indexes are reusable. Preserve the kernel NET_LUID so the
-        // assessment planner can reject a route that now points at another NIC.
-        let interface_luid = unsafe { row.InterfaceLuid.Value };
-        if interface_luid == 0 {
-            routes.insert(journal_keys[0].clone(), Observation::Unknown);
-            continue;
-        }
-        let state = crate::recovery_journal::RouteState {
-            interface_index: row.InterfaceIndex,
-            interface_luid: Some(interface_luid),
-            next_hop,
-            metric: row.Metric,
-            protocol: Some(row.Protocol),
-            origin: Some(row.Origin),
-        };
-
-        let key = &journal_keys[0];
-        match routes.get(key) {
-            Some(Observation::Absent) => {
-                routes.insert(key.clone(), Observation::Present(state));
-            }
-            Some(Observation::Present(_)) | Some(Observation::Unknown) => {
-                routes.insert(key.clone(), Observation::Unknown);
-            }
-            None => {
-                return Err("The route observation snapshot lost a requested journal key.".into());
-            }
-        }
+        append_observed_route_state(&mut routes, journal_keys, &state)?;
     }
 
     Ok(routes)
+}
+
+#[cfg(windows)]
+fn route_state_from_row(
+    row: &windows_sys::Win32::NetworkManagement::IpHelper::MIB_IPFORWARD_ROW2,
+    destination: std::net::IpAddr,
+) -> Result<crate::recovery_journal::RouteState, String> {
+    if row.InterfaceIndex == 0 {
+        return Err("Windows returned a route row with an invalid interface index.".into());
+    }
+    let interface_luid = unsafe { row.InterfaceLuid.Value };
+    if interface_luid == 0 {
+        return Err("Windows returned a route row without a stable interface LUID.".into());
+    }
+    let next_hop_address = sockaddr_address(&row.NextHop)?;
+    if next_hop_address.is_ipv4() != destination.is_ipv4() {
+        return Err("Windows returned a route next hop with a mismatched address family.".into());
+    }
+    let next_hop = if next_hop_address.is_unspecified() {
+        None
+    } else {
+        Some(next_hop_address)
+    };
+    Ok(crate::recovery_journal::RouteState {
+        interface_index: row.InterfaceIndex,
+        interface_luid: Some(interface_luid),
+        next_hop,
+        metric: row.Metric,
+        protocol: Some(row.Protocol),
+        origin: Some(row.Origin),
+    })
 }
 
 #[cfg(windows)]
@@ -944,6 +967,127 @@ impl Drop for OwnedIpHelperTable {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn route_row_accumulator_preserves_all_rows_for_shared_canonical_prefix() {
+        use crate::recovery_journal::RouteState;
+        use std::collections::BTreeMap;
+
+        let mut routes = BTreeMap::from([
+            ("192.0.2.0/24".to_string(), super::Observation::Absent),
+            ("192.0.2.7/24".to_string(), super::Observation::Absent),
+        ]);
+        let keys = vec!["192.0.2.0/24".to_string(), "192.0.2.7/24".to_string()];
+        let first = RouteState {
+            interface_index: 7,
+            interface_luid: Some(700),
+            next_hop: None,
+            metric: 10,
+            protocol: Some(3),
+            origin: Some(0),
+        };
+        let second = RouteState {
+            interface_index: 8,
+            interface_luid: Some(800),
+            next_hop: Some("192.0.2.1".parse().unwrap()),
+            metric: 20,
+            protocol: Some(19),
+            origin: Some(2),
+        };
+
+        super::append_observed_route_state(&mut routes, &keys, &first).unwrap();
+        super::append_observed_route_state(&mut routes, &keys, &second).unwrap();
+
+        for key in &keys {
+            assert_eq!(
+                routes.get(key),
+                Some(&super::Observation::Present(vec![first.clone(), second.clone()]))
+            );
+        }
+    }
+
+    #[test]
+    fn route_row_accumulator_does_not_drop_duplicate_rows() {
+        use crate::recovery_journal::RouteState;
+        use std::collections::BTreeMap;
+
+        let key = "0.0.0.0/0".to_string();
+        let mut routes = BTreeMap::from([(key.clone(), super::Observation::Absent)]);
+        let row = RouteState {
+            interface_index: 7,
+            interface_luid: Some(700),
+            next_hop: None,
+            metric: 10,
+            protocol: Some(3),
+            origin: Some(0),
+        };
+        super::append_observed_route_state(&mut routes, std::slice::from_ref(&key), &row).unwrap();
+        super::append_observed_route_state(&mut routes, std::slice::from_ref(&key), &row).unwrap();
+        assert_eq!(
+            routes.get(&key),
+            Some(&super::Observation::Present(vec![row.clone(), row]))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn constructed_ip_forward_rows_preserve_route_identity_and_provenance() {
+        use super::{append_observed_route_state, route_state_from_row, Observation};
+        use std::collections::BTreeMap;
+        use std::net::Ipv4Addr;
+        use windows_sys::Win32::NetworkManagement::IpHelper::MIB_IPFORWARD_ROW2;
+        use windows_sys::Win32::Networking::WinSock::{
+            AF_INET, SOCKADDR_IN, SOCKADDR_INET,
+        };
+
+        fn address(value: [u8; 4]) -> SOCKADDR_INET {
+            let mut ipv4 = SOCKADDR_IN::default();
+            ipv4.sin_family = AF_INET;
+            unsafe {
+                ipv4.sin_addr.S_un.S_addr = u32::from_ne_bytes(value);
+            }
+            let mut inet = SOCKADDR_INET::default();
+            unsafe { inet.Ipv4 = ipv4; }
+            inet
+        }
+
+        fn row(index: u32, luid: u64, protocol: i32, origin: i32, metric: u32, next_hop: [u8; 4]) -> MIB_IPFORWARD_ROW2 {
+            let mut value: MIB_IPFORWARD_ROW2 = unsafe { std::mem::zeroed() };
+            value.InterfaceIndex = index;
+            unsafe { value.InterfaceLuid.Value = luid; }
+            value.DestinationPrefix.Prefix = address([192, 0, 2, 0]);
+            value.DestinationPrefix.PrefixLength = 24;
+            value.NextHop = address(next_hop);
+            value.Metric = metric;
+            value.Protocol = protocol;
+            value.Origin = origin;
+            value
+        }
+
+        let first_row = row(7, 700, 3, 0, 10, [192, 0, 2, 1]);
+        let second_row = row(8, 800, 19, 2, 20, [192, 0, 2, 2]);
+        let destination: std::net::IpAddr = Ipv4Addr::new(192, 0, 2, 0).into();
+        let first = route_state_from_row(&first_row, destination).unwrap();
+        let second = route_state_from_row(&second_row, destination).unwrap();
+
+        assert_eq!(first.interface_luid, Some(700));
+        assert_eq!(first.protocol, Some(3));
+        assert_eq!(first.origin, Some(0));
+        assert_eq!(second.interface_luid, Some(800));
+        assert_eq!(second.protocol, Some(19));
+        assert_eq!(second.origin, Some(2));
+
+        let mut inventory = BTreeMap::from([
+            ("192.0.2.0/24".to_string(), Observation::Absent),
+        ]);
+        let keys = vec!["192.0.2.0/24".to_string()];
+        append_observed_route_state(&mut inventory, &keys, &first).unwrap();
+        append_observed_route_state(&mut inventory, &keys, &second).unwrap();
+        assert_eq!(
+            inventory.get("192.0.2.0/24"),
+            Some(&Observation::Present(vec![first, second]))
+        );
+    }
+
     #[cfg(windows)]
     #[test]
     fn filetime_conversion_preserves_high_and_low_words() {
@@ -1183,7 +1327,7 @@ mod tests {
             .expect("the live route inventory must be readable");
         assert_eq!(
             observed.get(&destination_prefix),
-            Some(&super::Observation::Present(expected_state))
+            Some(&super::Observation::Present(vec![expected_state]))
         );
     }
 

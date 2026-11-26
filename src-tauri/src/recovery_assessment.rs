@@ -47,9 +47,10 @@ pub struct RecoverySnapshot {
     pub engine: Observation<EngineProcessRecord>,
     /// Full journaled tunnel identity and assigned unicast address inventory.
     pub tunnel: Observation<TunnelInterfaceRecord>,
-    /// Entries are keyed by the exact destination prefix stored in the journal.
-    /// An omitted key is Unknown, never implicitly Absent.
-    pub routes: BTreeMap<String, Observation<RouteState>>,
+    /// Each key contains the complete set of live route rows for that destination.
+    /// An omitted key is Unknown, never implicitly Absent. Rows are not selected
+    /// by enumeration order; the assessor matches stable route identities.
+    pub routes: BTreeMap<String, Observation<Vec<RouteState>>>,
     /// Entries are keyed by Windows interface index. An omitted key is Unknown.
     pub dns: BTreeMap<u32, Observation<DnsConfiguration>>,
     /// This must be a complete provider-scoped WFP enumeration. Runtime filter
@@ -59,6 +60,8 @@ pub struct RecoverySnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteAssessment {
+    /// Position in the validated journal; allows multiple route records per prefix.
+    pub route_index: usize,
     pub destination_prefix: String,
     pub disposition: ResourceDisposition,
 }
@@ -359,33 +362,17 @@ pub fn build_recovery_intent_plan(
         disposition => push_recovery_plan_blocker(&mut blockers,RecoveryPlanResource::Tunnel, disposition),
     }
 
-    let mut route_assessments = BTreeMap::new();
-    let mut duplicate_route_assessments = BTreeSet::new();
-    for item in &assessment.routes {
-        if route_assessments
-            .insert(item.destination_prefix.clone(), item.disposition)
-            .is_some()
+    if assessment.routes.len() != journal.routes.len() {
+        return Err("The recovery assessment route inventory does not match the journal.".to_string());
+    }
+    for (route_index, record) in journal.routes.iter().enumerate() {
+        let route_assessment = &assessment.routes[route_index];
+        if route_assessment.route_index != route_index
+            || route_assessment.destination_prefix != record.destination_prefix
         {
-            duplicate_route_assessments.insert(item.destination_prefix.clone());
+            return Err("The recovery assessment route ordering does not match the journal.".to_string());
         }
-    }
-    for destination_prefix in duplicate_route_assessments {
-        push_recovery_plan_blocker(&mut blockers,
-            RecoveryPlanResource::Route(destination_prefix),
-            ResourceDisposition::Conflict,
-        );
-    }
-
-    let journal_route_keys = journal
-        .routes
-        .iter()
-        .map(|record| record.destination_prefix.clone())
-        .collect::<BTreeSet<_>>();
-    for record in &journal.routes {
-        let disposition = route_assessments
-            .get(&record.destination_prefix)
-            .copied()
-            .unwrap_or(ResourceDisposition::Unknown);
+        let disposition = route_assessment.disposition;
         match disposition {
             ResourceDisposition::VerifiedClean => {}
             ResourceDisposition::NeedsCleanup => {
@@ -403,8 +390,24 @@ pub fn build_recovery_intent_plan(
             }
             ResourceDisposition::NeedsRestore => {
                 let expected_current = match snapshot.routes.get(&record.destination_prefix) {
-                    Some(Observation::Present(actual)) if same_route_state(actual, &record.applied) => {
-                        Some(actual.clone())
+                    Some(Observation::Present(actual_routes)) => {
+                        let matching = actual_routes
+                            .iter()
+                            .filter(|actual| same_route_state(actual, &record.applied))
+                            .cloned()
+                            .collect::<Vec<RouteState>>();
+                        match matching.as_slice() {
+                            [actual] => Some(actual.clone()),
+                            [] => None,
+                            _ => {
+                                push_recovery_plan_blocker(
+                                    &mut blockers,
+                                    RecoveryPlanResource::Route(record.destination_prefix.clone()),
+                                    ResourceDisposition::Unknown,
+                                );
+                                continue;
+                            }
+                        }
                     }
                     Some(Observation::Absent) => None,
                     _ => {
@@ -438,14 +441,6 @@ pub fn build_recovery_intent_plan(
                 RecoveryPlanResource::Route(record.destination_prefix.clone()),
                 other,
             ),
-        }
-    }
-    for extra in route_assessments.keys() {
-        if !journal_route_keys.contains(extra) {
-            push_recovery_plan_blocker(&mut blockers,
-                RecoveryPlanResource::Route(extra.clone()),
-                ResourceDisposition::Conflict,
-            );
         }
     }
 
@@ -673,7 +668,9 @@ pub fn assess_recovery(
     let routes: Vec<_> = journal
         .routes
         .iter()
-        .map(|record| RouteAssessment {
+        .enumerate()
+        .map(|(route_index, record)| RouteAssessment {
+            route_index,
             destination_prefix: record.destination_prefix.clone(),
             disposition: assess_route(
                 record,
@@ -804,7 +801,7 @@ fn same_route_state(left: &RouteState, right: &RouteState) -> bool {
 
 fn assess_route(
     record: &RouteMutationRecord,
-    observed: Option<&Observation<RouteState>>,
+    observed: Option<&Observation<Vec<RouteState>>>,
 ) -> ResourceDisposition {
     let Some(observed) = observed else {
         return ResourceDisposition::Unknown;
@@ -819,32 +816,89 @@ fn assess_route(
         return ResourceDisposition::Unknown;
     }
 
-    match observed {
-        Observation::Unknown => ResourceDisposition::Unknown,
+    let rows = match observed {
+        Observation::Unknown => return ResourceDisposition::Unknown,
         Observation::Absent => {
-            if record.previous.is_none() {
+            return if record.previous.is_none() {
                 ResourceDisposition::VerifiedClean
             } else {
-                // A route that existed before the session must be restored,
-                // even when the session's route is now absent.
                 ResourceDisposition::NeedsRestore
-            }
+            };
         }
-        Observation::Present(actual) => {
-            if !has_complete_route_state_evidence(actual) {
-                ResourceDisposition::Unknown
-            } else if record.previous.as_ref().is_some_and(|previous| same_route_state(previous, actual)) {
+        Observation::Present(rows) if rows.is_empty() => {
+            return if record.previous.is_none() {
                 ResourceDisposition::VerifiedClean
-            } else if same_route_state(actual, &record.applied) {
-                if record.previous.is_some() {
-                    ResourceDisposition::NeedsRestore
-                } else {
-                    ResourceDisposition::NeedsCleanup
-                }
             } else {
-                ResourceDisposition::Conflict
-            }
+                ResourceDisposition::NeedsRestore
+            };
         }
+        Observation::Present(rows) => rows,
+    };
+
+    // A bad row means this prefix inventory is not complete enough to reason
+    // about ownership. Other same-prefix routes are allowed, but every row
+    // must carry the stable identity/provenance fields before we ignore it.
+    if rows.iter().any(|row| !has_complete_route_state_evidence(row)) {
+        return ResourceDisposition::Unknown;
+    }
+    let mut observed_identities = BTreeSet::new();
+    for row in rows {
+        let identity = (
+            row.interface_luid,
+            row.next_hop,
+            row.metric,
+            row.protocol,
+            row.origin,
+        );
+        if !observed_identities.insert(identity) {
+            return ResourceDisposition::Unknown;
+        }
+    }
+
+    let applied_matches = rows
+        .iter()
+        .filter(|actual| same_route_state(actual, &record.applied))
+        .count();
+    let previous_matches = record.previous.as_ref().map_or(0, |previous| {
+        rows.iter()
+            .filter(|actual| same_route_state(actual, previous))
+            .count()
+    });
+    let expected_luids = std::iter::once(record.applied.interface_luid)
+        .chain(record.previous.as_ref().map(|previous| previous.interface_luid))
+        .collect::<BTreeSet<_>>();
+    if rows.iter().any(|actual| {
+        expected_luids.contains(&actual.interface_luid)
+            && !same_route_state(actual, &record.applied)
+            && !record.previous.as_ref().is_some_and(|previous| same_route_state(actual, previous))
+    }) {
+        // A row on an expected interface but with different forwarding or
+        // provenance fields may be a modified journaled route, not an
+        // unrelated same-prefix route on another adapter.
+        return ResourceDisposition::Conflict;
+    }
+
+    if applied_matches > 1 || previous_matches > 1 {
+        return ResourceDisposition::Unknown;
+    }
+    if applied_matches == 1 && previous_matches == 1 {
+        // Both exact states at once can mean concurrent route ownership or an
+        // incomplete transaction. Do not guess which row may be removed.
+        return ResourceDisposition::Conflict;
+    }
+    if applied_matches == 1 {
+        return if record.previous.is_some() {
+            ResourceDisposition::NeedsRestore
+        } else {
+            ResourceDisposition::NeedsCleanup
+        };
+    }
+    if previous_matches == 1 || record.previous.is_none() {
+        ResourceDisposition::VerifiedClean
+    } else {
+        // Neither exact row exists; a prior route must be recreated by a
+        // future reviewed executor, even if unrelated same-prefix routes remain.
+        ResourceDisposition::NeedsRestore
     }
 }
 
@@ -1128,7 +1182,7 @@ mod tests {
         snapshot.tunnel = Observation::Present(tunnel());
         snapshot.routes.insert(
             route.destination_prefix.clone(),
-            Observation::Present(route.applied.clone()),
+            Observation::Present(vec![route.applied.clone()]),
         );
         snapshot.dns.insert(
             dns.interface_index,
@@ -1375,11 +1429,11 @@ mod tests {
         let mut snapshot = empty_snapshot();
         snapshot.routes.insert(
             first.destination_prefix.clone(),
-            Observation::Present(first.applied.clone()),
+            Observation::Present(vec![first.applied.clone()]),
         );
         snapshot.routes.insert(
             second.destination_prefix.clone(),
-            Observation::Present(second.applied.clone()),
+            Observation::Present(vec![second.applied.clone()]),
         );
         let assessment = assess_recovery(&journal, &snapshot);
         assert!(assessment.routes.iter().all(|item| {
@@ -1399,6 +1453,128 @@ mod tests {
             RecoveryIntent::RemoveAppliedRoute { destination_prefix, .. }
                 if destination_prefix == "203.0.113.0/24"
         ));
+    }
+
+    #[test]
+    fn multiple_same_prefix_routes_are_matched_by_stable_identity() {
+        let mut journal = RecoveryJournal::new(108);
+        let mut first = route_record();
+        first.destination_prefix = "192.0.2.0/24".into();
+        first.previous = None;
+        let mut second = route_record();
+        second.destination_prefix = "192.0.2.0/24".into();
+        second.previous = None;
+        second.applied.interface_index = 29;
+        second.applied.interface_luid = Some(0x0001_0000_0000_0029);
+        second.applied.protocol = Some(29);
+        second.applied.origin = Some(9);
+        journal.routes = vec![first.clone(), second.clone()];
+        journal.validate().unwrap();
+
+        let mut unrelated = first.applied.clone();
+        unrelated.interface_index = 31;
+        unrelated.interface_luid = Some(0x0001_0000_0000_0031);
+        unrelated.protocol = Some(31);
+        unrelated.origin = Some(1);
+
+        let mut snapshot = empty_snapshot();
+        snapshot.routes.insert(
+            first.destination_prefix.clone(),
+            Observation::Present(vec![
+                second.applied.clone(),
+                unrelated,
+                first.applied.clone(),
+            ]),
+        );
+
+        let assessment = assess_recovery(&journal, &snapshot);
+        assert_eq!(assessment.routes.len(), 2);
+        assert_eq!(assessment.routes[0].route_index, 0);
+        assert_eq!(assessment.routes[1].route_index, 1);
+        assert!(assessment.routes.iter().all(|item| {
+            item.disposition == ResourceDisposition::NeedsCleanup
+        }));
+
+        let plan = build_recovery_intent_plan(
+            &journal,
+            std::slice::from_ref(&journal),
+            &snapshot,
+            &assessment,
+        ).unwrap();
+        assert_eq!(plan.state, RecoveryPlanState::ReadyForReview);
+        assert_eq!(plan.intents.len(), 2);
+    }
+
+    #[test]
+    fn duplicate_same_prefix_route_rows_are_unknown_and_block_all_intents() {
+        let mut journal = RecoveryJournal::new(109);
+        let mut route = route_record();
+        route.destination_prefix = "203.0.113.0/24".into();
+        route.previous = None;
+        journal.routes.push(route.clone());
+
+        let mut duplicate = route.applied.clone();
+        duplicate.interface_index = duplicate.interface_index.wrapping_add(1);
+
+        let mut snapshot = empty_snapshot();
+        snapshot.routes.insert(
+            route.destination_prefix.clone(),
+            Observation::Present(vec![route.applied.clone(), duplicate]),
+        );
+        let assessment = assess_recovery(&journal, &snapshot);
+        assert_eq!(assessment.routes[0].disposition, ResourceDisposition::Unknown);
+
+        let plan = build_recovery_intent_plan(
+            &journal,
+            std::slice::from_ref(&journal),
+            &snapshot,
+            &assessment,
+        ).unwrap();
+        assert_eq!(plan.state, RecoveryPlanState::Blocked);
+        assert!(plan.intents.is_empty());
+        assert!(!plan.journal_removal_authorized);
+    }
+
+    #[test]
+    fn both_previous_and_applied_rows_present_for_one_mutation_is_conflict() {
+        let mut journal = RecoveryJournal::new(112);
+        let mut route = route_record();
+        route.destination_prefix = "198.51.100.0/24".into();
+        journal.routes.push(route.clone());
+
+        let mut snapshot = empty_snapshot();
+        snapshot.routes.insert(
+            route.destination_prefix.clone(),
+            Observation::Present(vec![
+                route.applied,
+                route.previous.unwrap(),
+            ]),
+        );
+        assert_eq!(
+            assess_recovery(&journal, &snapshot).routes[0].disposition,
+            ResourceDisposition::Conflict
+        );
+    }
+
+    #[test]
+    fn same_prefix_inventory_with_incomplete_unrelated_row_is_unknown() {
+        let mut journal = RecoveryJournal::new(111);
+        let mut route = route_record();
+        route.destination_prefix = "198.51.100.0/24".into();
+        route.previous = None;
+        journal.routes.push(route.clone());
+
+        let mut incomplete = route.applied.clone();
+        incomplete.interface_luid = None;
+        let mut snapshot = empty_snapshot();
+        snapshot.routes.insert(
+            route.destination_prefix.clone(),
+            Observation::Present(vec![route.applied, incomplete]),
+        );
+        assert_eq!(
+            assess_recovery(&journal, &snapshot).routes[0].disposition,
+            ResourceDisposition::Unknown
+        );
     }
 
     #[test]
@@ -1476,7 +1652,7 @@ mod tests {
         let mut snapshot = empty_snapshot();
         snapshot.routes.insert(
             route.destination_prefix.clone(),
-            Observation::Present(route.applied.clone()),
+            Observation::Present(vec![route.applied.clone()]),
         );
         let assessment = assess_recovery(&journal, &snapshot);
         assert_eq!(assessment.routes[0].disposition, ResourceDisposition::Unknown);
@@ -1588,7 +1764,7 @@ mod tests {
 
         snapshot.routes.insert(
             "0.0.0.0/0".into(),
-            Observation::Present(applied),
+            Observation::Present(vec![applied]),
         );
         assert_eq!(
             assess_recovery(&journal, &snapshot).routes[0].disposition,
@@ -1597,7 +1773,7 @@ mod tests {
 
         snapshot.routes.insert(
             "0.0.0.0/0".into(),
-            Observation::Present(previous),
+            Observation::Present(vec![previous]),
         );
         assert_eq!(
             assess_recovery(&journal, &snapshot).routes[0].disposition,
@@ -1615,7 +1791,7 @@ mod tests {
         let mut snapshot = empty_snapshot();
         snapshot.routes.insert(
             record.destination_prefix.clone(),
-            Observation::Present(record.applied.clone()),
+            Observation::Present(vec![record.applied.clone()]),
         );
         assert_eq!(
             assess_recovery(&journal, &snapshot).routes[0].disposition,
@@ -1755,7 +1931,7 @@ mod tests {
     }
 
     #[test]
-    fn reused_interface_index_with_a_different_luid_is_a_route_conflict() {
+    fn reused_interface_index_with_a_different_luid_is_not_mistaken_for_the_previous_route() {
         let mut journal = RecoveryJournal::new(92);
         let record = route_record();
         let previous = record.previous.clone().unwrap();
@@ -1767,11 +1943,11 @@ mod tests {
         observed.interface_luid = Some(0x0001_0000_0000_FFFF);
         snapshot.routes.insert(
             record.destination_prefix,
-            Observation::Present(observed),
+            Observation::Present(vec![observed]),
         );
 
         let result = assess_recovery(&journal, &snapshot);
-        assert_eq!(result.routes[0].disposition, ResourceDisposition::Conflict);
+        assert_eq!(result.routes[0].disposition, ResourceDisposition::NeedsRestore);
         assert!(!result.can_remove_journal);
     }
 
@@ -1788,7 +1964,7 @@ mod tests {
         observed_previous.interface_index = observed_previous.interface_index.wrapping_add(7);
         snapshot.routes.insert(
             record.destination_prefix.clone(),
-            Observation::Present(observed_previous),
+            Observation::Present(vec![observed_previous]),
         );
         assert_eq!(
             assess_recovery(&journal, &snapshot).routes[0].disposition,
@@ -1799,7 +1975,7 @@ mod tests {
         observed_applied.interface_index = observed_applied.interface_index.wrapping_add(11);
         snapshot.routes.insert(
             record.destination_prefix,
-            Observation::Present(observed_applied),
+            Observation::Present(vec![observed_applied]),
         );
         assert_eq!(
             assess_recovery(&journal, &snapshot).routes[0].disposition,
@@ -1817,7 +1993,7 @@ mod tests {
         let mut snapshot = empty_snapshot();
         snapshot.routes.insert(
             record.destination_prefix,
-            Observation::Present(record.applied),
+            Observation::Present(vec![record.applied]),
         );
 
         let result = assess_recovery(&journal, &snapshot);
@@ -1837,7 +2013,7 @@ mod tests {
         changed_protocol.protocol = Some(10_001);
         snapshot.routes.insert(
             record.destination_prefix.clone(),
-            Observation::Present(changed_protocol),
+            Observation::Present(vec![changed_protocol]),
         );
         assert_eq!(
             assess_recovery(&journal, &snapshot).routes[0].disposition,
@@ -1848,7 +2024,7 @@ mod tests {
         changed_origin.origin = Some(10_002);
         snapshot.routes.insert(
             record.destination_prefix.clone(),
-            Observation::Present(changed_origin),
+            Observation::Present(vec![changed_origin]),
         );
         assert_eq!(
             assess_recovery(&journal, &snapshot).routes[0].disposition,
@@ -1872,7 +2048,7 @@ mod tests {
             let mut snapshot = empty_snapshot();
             snapshot.routes.insert(
                 record.destination_prefix.clone(),
-                Observation::Present(record.applied.clone()),
+                Observation::Present(vec![record.applied.clone()]),
             );
 
             let assessment = assess_recovery(&journal, &snapshot);
@@ -1900,7 +2076,7 @@ mod tests {
             }
             snapshot.routes.insert(
                 journal.routes[0].destination_prefix.clone(),
-                Observation::Present(incomplete_observation),
+                Observation::Present(vec![incomplete_observation]),
             );
             let assessment = assess_recovery(&journal, &snapshot);
             assert_eq!(assessment.routes[0].disposition, ResourceDisposition::Unknown);
@@ -2046,7 +2222,7 @@ mod tests {
         snapshot.engine = Observation::Present(expected_engine);
         snapshot.routes.insert(
             route.destination_prefix,
-            Observation::Present(route.previous.unwrap()),
+            Observation::Present(vec![route.previous.unwrap()]),
         );
 
         let result = assess_recovery(&journal, &snapshot);

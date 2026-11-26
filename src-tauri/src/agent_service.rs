@@ -174,9 +174,16 @@ fn assess_startup_journals(journals: &[RecoveryJournal]) -> AgentRecoveryStatus 
                 .entry(tunnel.interface_guid.to_ascii_lowercase())
                 .or_default() += 1;
         }
+        // Multiple route records for one prefix inside the same journal are
+        // independently attributable by their applied route identity. A prefix
+        // shared across different unresolved sessions remains blocked.
+        let mut route_keys_in_journal = BTreeSet::new();
         for record in &journal.routes {
             let key = crate::recovery_observer::canonicalize_prefix(&record.destination_prefix)
                 .unwrap_or_else(|_| record.destination_prefix.clone());
+            route_keys_in_journal.insert(key);
+        }
+        for key in route_keys_in_journal {
             *route_key_counts.entry(key).or_default() += 1;
         }
         for record in &journal.dns {

@@ -137,3 +137,6 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 .agent-state-tag.offline { color: #e6b5a5; border-color: rgba(224, 155, 125, 0.22); background: rgba(224, 155, 125, 0.07); }
 .agent-connection-line { display: flex; align-items: center; gap: 16px; padding-top: 10px; border-top: 1px solid rgba(142, 164, 194, 0.1); color: #aab9cb; font-size: 11px; }
 .agent-connection-line strong { color: #e1eaf5; text-transform: capitalize; }
+
+.agent-panel .hint-text { max-width: 760px; }
+.agent-panel .secondary-button { margin-top: 12px; }

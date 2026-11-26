@@ -251,13 +251,16 @@ fn assess_dns(
         return ResourceDisposition::Unknown;
     };
 
-    // Compact DHCP/static records predate the complete DNS model. They remain
-    // deserializable, but cannot prove profile, search-list, and DoH state.
+    // Compact DHCP/static records and pre-LUID journals remain deserializable,
+    // but cannot prove the historical interface identity or full DNS state.
     let Some(expected_guid) = record.interface_guid.as_deref().and_then(normalize_guid) else {
         return ResourceDisposition::Unknown;
     };
-    if complete_dns_interface(&record.previous, &expected_guid).is_none()
-        || complete_dns_interface(&record.applied, &expected_guid).is_none()
+    let Some(expected_luid) = record.interface_luid.filter(|luid| *luid != 0) else {
+        return ResourceDisposition::Unknown;
+    };
+    if complete_dns_interface(&record.previous, &expected_guid, expected_luid).is_none()
+        || complete_dns_interface(&record.applied, &expected_guid, expected_luid).is_none()
     {
         return ResourceDisposition::Unknown;
     }
@@ -270,11 +273,12 @@ fn assess_dns(
             if let DnsConfiguration::Interface(interface) = actual {
                 if normalize_guid(&interface.interface_guid)
                     .is_some_and(|guid| guid != expected_guid)
+                    || interface.interface_luid.is_some_and(|luid| luid != expected_luid)
                 {
                     return ResourceDisposition::Conflict;
                 }
             }
-            if complete_dns_interface(actual, &expected_guid).is_none() {
+            if complete_dns_interface(actual, &expected_guid, expected_luid).is_none() {
                 return ResourceDisposition::Unknown;
             }
 
@@ -292,6 +296,7 @@ fn assess_dns(
 fn complete_dns_interface<'a>(
     configuration: &'a DnsConfiguration,
     expected_guid: &str,
+    expected_luid: u64,
 ) -> Option<&'a crate::recovery_journal::DnsInterfaceConfiguration> {
     let DnsConfiguration::Interface(interface) = configuration else {
         return None;
@@ -300,7 +305,7 @@ fn complete_dns_interface<'a>(
         return None;
     }
     let actual_guid = normalize_guid(&interface.interface_guid)?;
-    if actual_guid == expected_guid {
+    if actual_guid == expected_guid && interface.interface_luid == Some(expected_luid) {
         Some(interface)
     } else {
         None
@@ -454,6 +459,7 @@ mod tests {
     fn complete_dns(server4: &str, server6: &str) -> DnsConfiguration {
         DnsConfiguration::Interface(crate::recovery_journal::DnsInterfaceConfiguration {
             interface_guid: "4d36e972-e325-11ce-bfc1-08002be10318".into(),
+            interface_luid: Some(0x0001_0000_0000_000C),
             ipv4: Some(dns_stack(false, server4, server4)),
             ipv6: Some(dns_stack(true, server6, server6)),
         })
@@ -633,6 +639,7 @@ mod tests {
         journal.dns.push(DnsMutationRecord {
             interface_index: 12,
             interface_guid: Some("4d36e972-e325-11ce-bfc1-08002be10318".into()),
+            interface_luid: Some(0x0001_0000_0000_000C),
             applied: applied.clone(),
             previous: previous.clone(),
         });
@@ -668,6 +675,7 @@ mod tests {
         journal.dns.push(DnsMutationRecord {
             interface_index: 12,
             interface_guid: Some("4d36e972-e325-11ce-bfc1-08002be10318".into()),
+            interface_luid: Some(0x0001_0000_0000_000C),
             applied,
             previous,
         });
@@ -690,6 +698,7 @@ mod tests {
         let different_interface = DnsConfiguration::Interface(
             crate::recovery_journal::DnsInterfaceConfiguration {
                 interface_guid: "6d6f8e80-62d4-4b90-a1b8-10ac74e55e20".into(),
+                interface_luid: Some(0x0001_0000_0000_000D),
                 ipv4: Some(dns_stack(false, "192.0.2.53", "192.0.2.53")),
                 ipv6: Some(dns_stack(true, "2001:db8::53", "2001:db8::53")),
             },
@@ -792,6 +801,7 @@ mod tests {
         let record = DnsMutationRecord {
             interface_index: 12,
             interface_guid: Some("4d36e972-e325-11ce-bfc1-08002be10318".into()),
+            interface_luid: Some(0x0001_0000_0000_000C),
             applied: complete_dns("198.18.0.1", "fd00::53"),
             previous: complete_dns("192.0.2.53", "2001:db8::53"),
         };

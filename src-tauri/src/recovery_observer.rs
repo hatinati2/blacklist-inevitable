@@ -211,7 +211,10 @@ pub fn observe_recorded_dns(
     let Some((interface_index, interface_luid)) = read_identity()? else {
         return Ok(Observation::Absent);
     };
-    if interface_index != expected.interface_index || interface_luid != recorded_luid {
+    // InterfaceIndex may change across adapter recreation or reboot. It is
+    // required to be nonzero/unique in each live inventory, but only the
+    // journaled GUID + NET_LUID establish durable identity.
+    if interface_luid != recorded_luid {
         return Ok(Observation::Unknown);
     }
 

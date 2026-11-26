@@ -95,6 +95,16 @@ pub fn prepare_connect_profile(
     send_request(request)
 }
 
+/// Cancel any retained endpoint snapshot in the Agent and release its notifications.
+pub fn cancel_connect_preparation(
+) -> impl std::future::Future<Output = Result<AgentResponse, String>> {
+    send_request(AgentRequest {
+        version: AGENT_PROTOCOL_VERSION,
+        request_id: uuid::Uuid::new_v4().simple().to_string(),
+        operation: AgentOperation::CancelPreparation,
+    })
+}
+
 async fn request_status() -> Result<AgentResponse, String> {
     let request = AgentRequest {
         version: AGENT_PROTOCOL_VERSION,

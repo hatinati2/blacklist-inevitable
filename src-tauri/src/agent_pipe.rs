@@ -129,10 +129,24 @@ pub fn serve(
 
     loop {
         if stop_requested(stop_event) {
+            retire_preparation(&mut prepared_snapshot)?;
             return Ok(());
         }
 
-        if !connect_client_overlapped(pipe, stop_event)? {
+        let connected = match connect_client_overlapped(pipe, stop_event) {
+            Ok(connected) => connected,
+            Err(error) => {
+                let cleanup = retire_preparation(&mut prepared_snapshot);
+                return match cleanup {
+                    Ok(()) => Err(error),
+                    Err(cleanup_error) => Err(format!(
+                        "{error}; retained endpoint snapshot shutdown also failed: {cleanup_error}"
+                    )),
+                };
+            }
+        };
+        if !connected {
+            retire_preparation(&mut prepared_snapshot)?;
             return Ok(());
         }
 
@@ -161,6 +175,7 @@ pub fn serve(
         unsafe { DisconnectNamedPipe(pipe) };
 
         if stop_requested(stop_event) {
+            retire_preparation(&mut prepared_snapshot)?;
             return Ok(());
         }
 
@@ -178,6 +193,19 @@ fn stop_requested(stop_event: HANDLE) -> bool {
 
 struct PreparedConnectSnapshot {
     snapshot: crate::windows_egress_snapshot::WindowsEgressSnapshot,
+}
+
+/// Explicitly unregister route/interface notifications and release the retained snapshot.
+fn retire_preparation(
+    prepared: &mut Option<PreparedConnectSnapshot>,
+) -> Result<bool, String> {
+    match prepared.take() {
+        Some(item) => {
+            item.snapshot.shutdown()?;
+            Ok(true)
+        }
+        None => Ok(false),
+    }
 }
 
 /// Temporary credential copies are erased even if endpoint preparation returns early.
@@ -351,6 +379,29 @@ fn handle_authenticated_connection(
         }
         AgentOperation::PrepareConnect { payload } => {
             prepare_connect_snapshot(request.request_id, payload, connection, runtime, prepared)
+        }
+        AgentOperation::CancelPreparation => {
+            match retire_preparation(prepared) {
+                Ok(true) => {
+                    let mut response =
+                        AgentResponse::ok(request.request_id, Some(connection.snapshot()));
+                    response.detail = Some(
+                        "The retained endpoint snapshot was cancelled and its network-change notifications were unregistered.".to_string(),
+                    );
+                    response
+                }
+                Ok(false) => {
+                    let mut response =
+                        AgentResponse::ok(request.request_id, Some(connection.snapshot()));
+                    response.detail = Some("There was no retained endpoint snapshot to cancel.".to_string());
+                    response
+                }
+                Err(error) => AgentResponse::rejected_with_connection(
+                    request.request_id,
+                    Some(connection.snapshot()),
+                    format!("The retained endpoint snapshot could not be fully retired: {error}"),
+                ),
+            }
         }
         AgentOperation::Connect { .. }
         | AgentOperation::Disconnect { .. }

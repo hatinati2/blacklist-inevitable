@@ -57,6 +57,7 @@ pub fn run() {
             commands::stop_local_proxy,
             commands::submit_agent_connect_request,
             commands::prepare_agent_connect_request,
+            commands::cancel_agent_connect_preparation,
             commands::get_profiles,
             commands::import_profiles,
             commands::delete_profile,

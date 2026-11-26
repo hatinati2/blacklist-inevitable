@@ -123,6 +123,8 @@ pub enum AgentOperation {
     PrepareConnect {
         payload: AgentConnectPayload,
     },
+    /// Release any retained read-only preparation snapshot and unregister its notifications.
+    CancelPreparation,
     Connect {
         payload: AgentConnectPayload,
     },

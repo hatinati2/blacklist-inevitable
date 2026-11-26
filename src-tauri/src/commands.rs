@@ -145,6 +145,12 @@ pub async fn prepare_agent_connect_request(
     .await
 }
 
+/// Release the Agent's retained endpoint snapshot without starting or stopping a VPN.
+#[tauri::command]
+pub async fn cancel_agent_connect_preparation() -> Result<crate::agent_protocol::AgentResponse, String> {
+    crate::agent_client::cancel_connect_preparation().await
+}
+
 #[tauri::command]
 pub async fn get_app_status(app: AppHandle) -> AppStatus {
     let supervisor = app.state::<ProcessSupervisor>().inner().clone();

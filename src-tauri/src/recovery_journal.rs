@@ -13,7 +13,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -280,15 +280,28 @@ impl RecoveryJournal {
         if self.routes.len() > MAX_ROUTES {
             return Err("The recovery journal contains too many route mutations.".to_string());
         }
-        let mut destinations = BTreeSet::new();
+        let mut route_identities = BTreeSet::new();
         for route in &self.routes {
-            let (network, _) = parse_prefix(&route.destination_prefix)?;
-            if !destinations.insert(route.destination_prefix.as_str()) {
-                return Err("The recovery journal contains a duplicate route destination.".to_string());
-            }
+            let (network, prefix) = parse_prefix(&route.destination_prefix)?;
+            let canonical_network = canonical_network_address(network, prefix);
             validate_route_state(&route.applied, network)?;
             if let Some(previous) = &route.previous {
                 validate_route_state(previous, network)?;
+            }
+            // A prefix may legitimately have routes on several interfaces.
+            // Ownership uniqueness is the canonical prefix plus the durable
+            // applied route fields; InterfaceIndex is intentionally excluded.
+            let identity = (
+                canonical_network,
+                prefix,
+                route.applied.interface_luid,
+                route.applied.next_hop,
+                route.applied.metric,
+                route.applied.protocol,
+                route.applied.origin,
+            );
+            if !route_identities.insert(identity) {
+                return Err("The recovery journal contains a duplicate applied route identity.".to_string());
             }
         }
         if self.dns.len() > MAX_DNS_INTERFACES {
@@ -402,6 +415,19 @@ fn parse_prefix(value: &str) -> Result<(IpAddr, u8), String> {
         return Err("The recovery journal route prefix length is out of range.".to_string());
     }
     Ok((address, prefix))
+}
+
+fn canonical_network_address(address: IpAddr, prefix: u8) -> IpAddr {
+    match address {
+        IpAddr::V4(address) => {
+            let mask = if prefix == 0 { 0 } else { u32::MAX << (32 - prefix) };
+            IpAddr::V4(Ipv4Addr::from(u32::from(address) & mask))
+        }
+        IpAddr::V6(address) => {
+            let mask = if prefix == 0 { 0 } else { u128::MAX << (128 - prefix) };
+            IpAddr::V6(Ipv6Addr::from(u128::from(address) & mask))
+        }
+    }
 }
 
 fn validate_route_state(state: &RouteState, destination: IpAddr) -> Result<(), String> {
@@ -1163,6 +1189,22 @@ mod tests {
         let mut no_routes = network_configured_journal(99);
         no_routes.routes.clear();
         assert!(no_routes.validate().unwrap_err().contains("route and DNS mutations"));
+    }
+
+    #[test]
+    fn allows_same_prefix_routes_with_distinct_stable_route_identities() {
+        let mut journal = example_journal(110, 1);
+        let mut second = journal.routes[0].clone();
+        second.applied.interface_index = 99;
+        second.applied.interface_luid = Some(0x0001_0000_0000_0099);
+        second.applied.protocol = Some(99);
+        second.applied.origin = Some(7);
+        journal.routes.push(second);
+        journal.validate().unwrap();
+
+        let mut duplicate = journal.clone();
+        duplicate.routes[1].applied.interface_index = 100;
+        assert!(duplicate.validate().unwrap_err().contains("duplicate applied route identity"));
     }
 
     #[test]

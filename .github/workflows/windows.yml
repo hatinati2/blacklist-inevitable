@@ -2,9 +2,9 @@ name: Windows build
 
 on:
   push:
-    branches: [main, feat/agent-network-configured-route-luid-gate]
+    branches: [main, feat/agent-network-configured-route-luid-gate, feat/agent-route-luid-canonical-reconciliation]
   pull_request:
-    branches: [main, feat/windows-agent-recovery-intent-planner]
+    branches: [main, feat/windows-agent-recovery-intent-planner, feat/agent-network-configured-route-luid-gate]
   workflow_dispatch:
 
 permissions:

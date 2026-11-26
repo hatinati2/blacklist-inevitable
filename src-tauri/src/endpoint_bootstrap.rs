@@ -90,17 +90,38 @@ impl EndpointBootstrapResolver {
         port: u16,
         protocol: crate::wfp_policy::TransportProtocol,
     ) -> Result<Vec<crate::wfp_policy::VpnEndpoint>, String> {
+        self.resolve_vpn_endpoints_for_protocols(server, port, &[protocol]).await
+    }
+
+    /// Resolve the hostname once and map its bounded address set to every
+    /// transport the validated engine outbound can use for this endpoint.
+    pub async fn resolve_vpn_endpoints_for_protocols(
+        &self,
+        server: &str,
+        port: u16,
+        protocols: &[crate::wfp_policy::TransportProtocol],
+    ) -> Result<Vec<crate::wfp_policy::VpnEndpoint>, String> {
         if port == 0 {
             return Err("The VPN endpoint transport port must be non-zero.".into());
         }
-        let addresses = self.resolve_server(server).await?;
-        if addresses.is_empty() || addresses.len() > MAX_ENDPOINTS {
-            return Err("The VPN endpoint address set is empty or exceeds the bounded route/WFP policy capacity.".into());
+        let unique_protocols = protocols.iter().copied().collect::<BTreeSet<_>>();
+        if unique_protocols.is_empty() || unique_protocols.len() != protocols.len() {
+            return Err("The VPN endpoint transport set is empty or contains duplicates.".into());
         }
-        Ok(addresses
-            .into_iter()
-            .map(|address| crate::wfp_policy::VpnEndpoint { address, port, protocol })
-            .collect())
+        let addresses = self.resolve_server(server).await?;
+        let endpoint_count = addresses.len().checked_mul(unique_protocols.len())
+            .ok_or_else(|| "The VPN endpoint transport set exceeded its bounded capacity.".to_string())?;
+        if endpoint_count == 0 || endpoint_count > MAX_ENDPOINTS {
+            return Err("The resolved VPN endpoint transport set is empty or exceeds the bounded route/WFP policy capacity.".into());
+        }
+        let mut endpoints = Vec::with_capacity(endpoint_count);
+        for address in addresses {
+            for protocol in &unique_protocols {
+                endpoints.push(crate::wfp_policy::VpnEndpoint { address, port, protocol: *protocol });
+            }
+        }
+        endpoints.sort_unstable();
+        Ok(endpoints)
     }
 
     async fn resolve_family(&self, domain: &str, kind: RecordType) -> Result<Vec<IpAddr>, String> {
@@ -495,6 +516,31 @@ mod tests {
             port: 8443,
             protocol: crate::wfp_policy::TransportProtocol::Udp,
         }]);
+    }
+
+    #[tokio::test]
+    async fn maps_numeric_endpoint_to_all_explicit_protocols_without_repeating_dns() {
+        let resolver = EndpointBootstrapResolver::new().unwrap();
+        let endpoints = resolver.resolve_vpn_endpoints_for_protocols(
+            "203.0.113.8",
+            443,
+            &[
+                crate::wfp_policy::TransportProtocol::Tcp,
+                crate::wfp_policy::TransportProtocol::Udp,
+            ],
+        ).await.unwrap();
+        assert_eq!(endpoints, vec![
+            crate::wfp_policy::VpnEndpoint {
+                address: "203.0.113.8".parse().unwrap(),
+                port: 443,
+                protocol: crate::wfp_policy::TransportProtocol::Tcp,
+            },
+            crate::wfp_policy::VpnEndpoint {
+                address: "203.0.113.8".parse().unwrap(),
+                port: 443,
+                protocol: crate::wfp_policy::TransportProtocol::Udp,
+            },
+        ]);
     }
 
     #[tokio::test]

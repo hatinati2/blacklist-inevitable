@@ -88,7 +88,7 @@ Naive import/config mapping is implemented for a bounded subset; remote authenti
 - [ ] Verify DNS handling and traffic routing without leaking traffic outside the selected tunnel.
 - [ ] Implement Agent-owned WFP physical-egress kill switch independent of sing-box's dynamic strict-route filters; retain protection across engine failure and define Agent-crash/reboot persistence and recovery.
 - [x] Add a standalone fail-closed DoH endpoint resolver with numeric Cloudflare resolver addresses, TLS hostname validation, dual-stack A/AAAA and bounded CNAME processing; keep Connect disabled until Agent integration and packet-level acceptance.
-- [ ] Compose encrypted endpoint resolution directly with Windows route-bound snapshot capture; require an explicit engine-derived transport tuple and never fall back to system DNS.
+- [x] Compose encrypted endpoint resolution directly with Windows route-bound snapshot capture; derive the exact TCP/UDP tuple set from the validated sing-box outbound and never fall back to system DNS.
 - [ ] Implement encrypted VPN-endpoint DNS bootstrap with no system-DNS/plaintext fallback; keep in-session DoH on the VPN path.
 - [ ] Add a Strict Privacy mode that forbids incompatible Direct destination and per-app bypass exceptions; clearly label other modes that intentionally permit physical egress.
 - [ ] Verify IPv4/IPv6 routing, DNS/DoT/DoQ/DoH, local discovery and all non-tunnel egress with Windows 10/11 physical-adapter packet captures across connect/disconnect/crash/recovery/network-change cases.

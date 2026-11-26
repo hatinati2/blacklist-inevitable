@@ -330,8 +330,10 @@ fn validate_snapshot(
 }
 
 /// Query the documented root\StandardCimv2 DNS Client classes for one journaled
-/// interface. The result is diagnostic evidence only; it is not a recovery
-/// snapshot and is never inserted into RecoverySnapshot.
+/// interface. The journal stores its GUID and diagnostic index; the unique live
+/// NET_LUID is resolved from that GUID, then GUID/LUID/index/alias are rechecked
+/// after WMI returns. The historical journal does not persist a NET_LUID.
+/// The result is diagnostic evidence only and never enters RecoverySnapshot.
 #[cfg(windows)]
 pub fn observe_recorded_dns_wmi(
     expected: &crate::recovery_journal::DnsMutationRecord,

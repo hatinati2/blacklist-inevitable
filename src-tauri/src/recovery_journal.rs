@@ -929,6 +929,7 @@ mod tests {
         journal.dns.push(DnsMutationRecord {
             interface_index: 12,
             interface_guid: Some("4d36e972-e325-11ce-bfc1-08002be10318".into()),
+            interface_luid: None,
             applied: DnsConfiguration::Static(vec!["198.18.0.1".parse().unwrap()]),
             previous: DnsConfiguration::Dhcp,
         });
@@ -1117,6 +1118,7 @@ mod tests {
         journal.dns.push(DnsMutationRecord {
             interface_index: 12,
             interface_guid: Some("4d36e972-e325-11ce-bfc1-08002be10318".into()),
+            interface_luid: Some(0x0001_0000_0000_000C),
             applied: complete_dns_configuration(),
             previous: complete_dns_configuration(),
         });
@@ -1125,6 +1127,51 @@ mod tests {
         let encoded = serde_json::to_vec(&journal).unwrap();
         let decoded: RecoveryJournal = serde_json::from_slice(&encoded).unwrap();
         assert_eq!(decoded, journal);
+    }
+
+    #[test]
+    fn rejects_dns_luid_zero_duplicate_and_snapshot_mismatch() {
+        let mut journal = RecoveryJournal::new(83);
+        journal.dns.push(DnsMutationRecord {
+            interface_index: 12,
+            interface_guid: Some("4d36e972-e325-11ce-bfc1-08002be10318".into()),
+            interface_luid: Some(0),
+            applied: complete_dns_configuration(),
+            previous: complete_dns_configuration(),
+        });
+        assert!(journal.validate().is_err());
+
+        let mut journal = RecoveryJournal::new(84);
+        journal.dns.push(DnsMutationRecord {
+            interface_index: 12,
+            interface_guid: Some("4d36e972-e325-11ce-bfc1-08002be10318".into()),
+            interface_luid: Some(0x0001_0000_0000_000C),
+            applied: complete_dns_configuration(),
+            previous: complete_dns_configuration(),
+        });
+        journal.dns.push(DnsMutationRecord {
+            interface_index: 13,
+            interface_guid: Some("6d6f8e80-62d4-4b90-a1b8-10ac74e55e20".into()),
+            interface_luid: Some(0x0001_0000_0000_000C),
+            applied: complete_dns_configuration(),
+            previous: complete_dns_configuration(),
+        });
+        assert!(journal.validate().is_err());
+
+        let mut journal = RecoveryJournal::new(85);
+        let mut mismatched = match complete_dns_configuration() {
+            DnsConfiguration::Interface(config) => config,
+            _ => unreachable!(),
+        };
+        mismatched.interface_luid = Some(0x0001_0000_0000_000D);
+        journal.dns.push(DnsMutationRecord {
+            interface_index: 12,
+            interface_guid: Some(mismatched.interface_guid.clone()),
+            interface_luid: Some(0x0001_0000_0000_000C),
+            applied: DnsConfiguration::Interface(mismatched),
+            previous: complete_dns_configuration(),
+        });
+        assert!(journal.validate().is_err());
     }
 
     #[test]
@@ -1138,6 +1185,7 @@ mod tests {
         journal.dns.push(DnsMutationRecord {
             interface_index: 12,
             interface_guid: Some(incomplete.interface_guid.clone()),
+            interface_luid: Some(0x0001_0000_0000_000C),
             applied: DnsConfiguration::Interface(incomplete),
             previous: complete_dns_configuration(),
         });
@@ -1153,6 +1201,7 @@ mod tests {
         journal.dns.push(DnsMutationRecord {
             interface_index: 12,
             interface_guid: Some(mismatched.interface_guid.clone()),
+            interface_luid: Some(0x0001_0000_0000_000C),
             applied: DnsConfiguration::Interface(mismatched),
             previous: complete_dns_configuration(),
         });
@@ -1179,6 +1228,7 @@ mod tests {
         journal.dns.push(DnsMutationRecord {
             interface_index: 12,
             interface_guid: Some(configuration.interface_guid.clone()),
+            interface_luid: Some(0x0001_0000_0000_000C),
             applied: DnsConfiguration::Interface(configuration.clone()),
             previous: complete_dns_configuration(),
         });
@@ -1252,6 +1302,7 @@ mod tests {
             .remove("interfaceGuid");
         let decoded: RecoveryJournal = serde_json::from_value(legacy).unwrap();
         assert_eq!(decoded.dns[0].interface_guid, None);
+        assert_eq!(decoded.dns[0].interface_luid, None);
         decoded.validate().unwrap();
     }
 

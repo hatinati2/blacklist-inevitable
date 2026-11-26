@@ -44,7 +44,9 @@ pub struct DnsWmiServerFamily {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DnsWmiClientSettings {
-    pub protocol_if_type: u16,
+    /// Optional provider-supplied cross-check. AddressFamily on the separate
+    /// server-address class remains the authoritative WMI family discriminator.
+    pub protocol_if_type: Option<u16>,
     pub connection_specific_suffix: Option<String>,
     pub connection_specific_suffix_search_list: Option<Vec<String>>,
     pub register_this_connections_address: Option<bool>,
@@ -137,7 +139,7 @@ fn decode_wmi_snapshot(bytes: &[u8], process_succeeded: bool) -> Result<RawWmiSn
 
     for (collection, fields) in [
         ("serverAddresses", &["InterfaceIndex", "InterfaceAlias", "AddressFamily", "ServerAddresses"][..]),
-        ("clients", &["InterfaceIndex", "InterfaceAlias", "ProtocolIFType", "ConnectionSpecificSuffix", "ConnectionSpecificSuffixSearchList", "RegisterThisConnectionsAddress", "UseSuffixWhenRegistering", "DHCPOptionsToUse"][..]),
+        ("clients", &["InterfaceIndex", "InterfaceAlias", "ConnectionSpecificSuffix", "ConnectionSpecificSuffixSearchList", "RegisterThisConnectionsAddress", "UseSuffixWhenRegistering", "DHCPOptionsToUse"][..]),
         ("globalSettings", &["ProtocolIFType", "AppendPrimarySuffixes", "AppendParentSuffixes", "DNSSuffixesToAppend", "UseSuffixSearchList", "SuffixSearchList", "UseDevolution", "DevolutionLevel"][..]),
     ] {
         let rows = object.get(collection).and_then(serde_json::Value::as_array)
@@ -285,10 +287,10 @@ fn validate_snapshot(
         {
             return Err("The DNS WMI client row does not match the contemporaneous interface index and alias.".into());
         }
-        let protocol = row.protocol_if_type
-            .ok_or_else(|| "The DNS WMI client row omitted ProtocolIFType.".to_string())?;
-        if !is_supported_client_protocol_if_type(protocol) || !seen_client_protocols.insert(protocol) {
-            return Err("The DNS WMI client inventory contains an unsupported or duplicate protocol row.".into());
+        if let Some(protocol) = row.protocol_if_type {
+            if !is_supported_client_protocol_if_type(protocol) || !seen_client_protocols.insert(protocol) {
+                return Err("The DNS WMI client inventory contains an unsupported or duplicate protocol row.".into());
+            }
         }
         if row.connection_specific_suffix.as_ref().is_some_and(|v| v.len() > MAX_SUFFIX_BYTES || v.contains('\0')) {
             return Err("The DNS WMI connection suffix is malformed or oversized.".into());
@@ -299,7 +301,7 @@ fn validate_snapshot(
         }
 
         client_settings.push(DnsWmiClientSettings {
-            protocol_if_type: protocol,
+            protocol_if_type: row.protocol_if_type,
             connection_specific_suffix: row.connection_specific_suffix,
             connection_specific_suffix_search_list: row.connection_specific_suffix_search_list,
             register_this_connections_address: row.register_this_connections_address,
@@ -307,17 +309,6 @@ fn validate_snapshot(
             dhcp_options_to_use: row.dhcp_options_to_use,
         });
     }
-    for family in &seen_families {
-        let client_family_present = match *family {
-            2 => seen_client_protocols.contains(&4096) || seen_client_protocols.contains(&4098),
-            23 => seen_client_protocols.contains(&4097) || seen_client_protocols.contains(&4098),
-            _ => false,
-        };
-        if !client_family_present {
-            return Err("The DNS WMI server-address family is not represented by the DNS client protocol inventory.".into());
-        }
-    }
-
     let mut seen_global_protocols = BTreeSet::new();
     let mut global_settings = Vec::with_capacity(global_rows.len());
     for row in global_rows {
@@ -680,7 +671,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_missing_effective_family_and_client_protocol_mismatch() {
+    fn rejects_missing_effective_family_and_unsupported_optional_client_protocol() {
         let mut snapshot = raw_snapshot();
         snapshot.server_addresses = Some(vec![RawServerAddress {
             interface_index: Some(7),
@@ -693,8 +684,18 @@ mod tests {
         assert!(validate_snapshot(snapshot, &identity(), &[v4], &[v6]).is_err());
 
         let mut snapshot = raw_snapshot();
-        snapshot.clients.as_mut().unwrap()[0].protocol_if_type = Some(4096);
+        snapshot.clients.as_mut().unwrap()[0].protocol_if_type = Some(65_000);
         assert!(validate_snapshot(snapshot, &identity(), &[v4], &[v6]).is_err());
+    }
+
+    #[test]
+    fn client_protocol_type_is_optional_but_retained_when_returned() {
+        let mut snapshot = raw_snapshot();
+        snapshot.clients.as_mut().unwrap()[0].protocol_if_type = None;
+        let v4: IpAddr = "192.0.2.53".parse().unwrap();
+        let v6: IpAddr = "2001:db8::53".parse().unwrap();
+        let result = validate_snapshot(snapshot, &identity(), &[v4], &[v6]).unwrap();
+        assert_eq!(result.client_settings[0].protocol_if_type, None);
     }
 
     #[test]

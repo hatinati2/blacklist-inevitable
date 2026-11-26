@@ -37,6 +37,19 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci --include=optional
 
+      - name: Parse Windows DoH acceptance PowerShell
+        shell: pwsh
+        run: |
+          $scriptPath = Join-Path $PWD "scripts/windows-doh-inventory-acceptance.ps1"
+          if (-not (Test-Path -LiteralPath $scriptPath -PathType Leaf)) { throw "Missing DoH acceptance script: $scriptPath" }
+          $tokens = $null
+          $parseErrors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$parseErrors) | Out-Null
+          if ($parseErrors.Count -gt 0) {
+            $parseErrors | ForEach-Object { Write-Error $_.Message }
+            throw "The Windows DoH acceptance script contains PowerShell syntax errors."
+          }
+
       - name: Verify Tauri Windows CLI binding
         run: npm ls @tauri-apps/cli @tauri-apps/cli-win32-x64-msvc
 

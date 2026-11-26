@@ -11,6 +11,7 @@ pub mod recovery_journal;
 pub mod recovery_assessment;
 pub mod recovery_observer;
 pub mod dns_wmi;
+pub mod dns_doh;
 pub mod wfp_policy;
 #[cfg(windows)]
 pub mod wfp_engine;

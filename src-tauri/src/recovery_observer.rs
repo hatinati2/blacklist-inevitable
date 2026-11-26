@@ -119,6 +119,458 @@ pub fn observe_agent_wfp_filters(
 
 
 
+/// Read one authoritative per-interface DNS settings snapshot and the
+/// effective resolver addresses returned by GetAdaptersAddresses.
+///
+/// GetInterfaceDnsSettings v3 returns the stack selected by its IPV6 flag;
+/// this API does not document a caller-selectable second family (input Flags
+/// must be zero). Therefore this observer deliberately returns only the stack
+/// positively identified by Windows and leaves the other stack None. The pure
+/// recovery assessor will keep such a partial observation Unknown; it can
+/// never authorize journal removal or DNS restoration.
+#[cfg(windows)]
+pub fn observe_recorded_dns(
+    expected: &crate::recovery_journal::DnsMutationRecord,
+) -> Result<Observation<crate::recovery_journal::DnsConfiguration>, String> {
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        FreeInterfaceDnsSettings, GetIfTable2, GetInterfaceDnsSettings, MIB_IF_ROW2,
+        MIB_IF_TABLE2, DNS_INTERFACE_SETTINGS, DNS_INTERFACE_SETTINGS3,
+        DNS_INTERFACE_SETTINGS_VERSION3,
+    };
+
+    const MAX_INTERFACES: usize = 2048;
+
+    let Some(expected_guid_text) = expected.interface_guid.as_deref() else {
+        return Ok(Observation::Unknown);
+    };
+    let expected_guid = uuid::Uuid::parse_str(expected_guid_text)
+        .map_err(|_| "The recorded DNS interface GUID is invalid.".to_string())?;
+    if !expected_guid.to_string().eq_ignore_ascii_case(expected_guid_text) {
+        return Ok(Observation::Unknown);
+    }
+
+    let (interface_index, interface_luid) = {
+        let mut table: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
+        let status = unsafe { GetIfTable2(&mut table) };
+        if status != 0 {
+            if !table.is_null() {
+                unsafe {
+                    windows_sys::Win32::NetworkManagement::IpHelper::FreeMibTable(table.cast())
+                };
+            }
+            return Err(format!("GetIfTable2 failed while identifying the DNS interface (Windows error {status})."));
+        }
+        if table.is_null() {
+            return Err("GetIfTable2 returned a null DNS interface table.".into());
+        }
+        let _table = OwnedIpHelperTable(table.cast());
+
+        let count = unsafe { (*table).NumEntries as usize };
+        if count > MAX_INTERFACES {
+            return Err("The Windows interface inventory exceeds its safe bound.".into());
+        }
+        let rows = unsafe {
+            std::slice::from_raw_parts(
+                std::ptr::addr_of!((*table).Table).cast::<MIB_IF_ROW2>(),
+                count,
+            )
+        };
+
+        let mut found = None;
+        for row in rows {
+            let actual_guid = uuid::Uuid::from_u128(guid_to_u128(&row.InterfaceGuid));
+            if actual_guid != expected_guid {
+                continue;
+            }
+            if found.is_some() {
+                return Err("Windows returned duplicate rows for the recorded DNS interface GUID.".into());
+            }
+            let luid = unsafe { row.InterfaceLuid.Value };
+            if row.InterfaceIndex == 0 || luid == 0 {
+                return Err("Windows returned an invalid DNS interface identity.".into());
+            }
+            found = Some((row.InterfaceIndex, luid));
+        }
+        let Some(found) = found else {
+            return Ok(Observation::Absent);
+        };
+        found
+    };
+
+    // GetInterfaceDnsSettings requires Version only on input and Flags zero.
+    // Version 3 is required for complete per-server DoH properties; older
+    // systems that cannot return it remain Unknown instead of silently
+    // downgrading to a DHCP/static-only representation.
+    let mut settings = DNS_INTERFACE_SETTINGS3::default();
+    settings.Version = DNS_INTERFACE_SETTINGS_VERSION3;
+    settings.Flags = 0;
+    let status = unsafe {
+        GetInterfaceDnsSettings(
+            uuid_to_windows_guid(expected_guid),
+            (&mut settings as *mut DNS_INTERFACE_SETTINGS3).cast::<DNS_INTERFACE_SETTINGS>(),
+        )
+    };
+    if status != 0 {
+        return Err(format!("GetInterfaceDnsSettings v3 failed with Windows error {status}."));
+    }
+    let settings_ptr = (&mut settings as *mut DNS_INTERFACE_SETTINGS3).cast::<DNS_INTERFACE_SETTINGS>();
+    let _settings = OwnedInterfaceDnsSettings(settings_ptr);
+
+    // The address list provides effective DNS servers (including dynamic
+    // configuration); it is deliberately separate from configured and profile
+    // name-server lists returned by GetInterfaceDnsSettings.
+    let effective = observe_effective_dns_servers(interface_luid)?;
+    let is_ipv6 = settings.Flags
+        & windows_sys::Win32::NetworkManagement::IpHelper::DNS_SETTING_IPV6 as u64
+        != 0;
+    let effective_name_servers = if is_ipv6 {
+        effective.ipv6
+    } else {
+        effective.ipv4
+    };
+
+    let stack = copy_dns_stack(&settings, effective_name_servers)?;
+    let interface = crate::recovery_journal::DnsInterfaceConfiguration {
+        interface_guid: expected_guid.to_string(),
+        ipv4: (!is_ipv6).then_some(stack.clone()),
+        ipv6: is_ipv6.then_some(stack),
+    };
+
+    // Keep the current index as a consistency check. Interface GUID is the
+    // durable identity and the assessor also compares it before using a result.
+    if interface_index == 0 {
+        return Ok(Observation::Unknown);
+    }
+
+    Ok(Observation::Present(
+        crate::recovery_journal::DnsConfiguration::Interface(interface),
+    ))
+}
+
+#[cfg(windows)]
+struct OwnedInterfaceDnsSettings(*mut windows_sys::Win32::NetworkManagement::IpHelper::DNS_INTERFACE_SETTINGS);
+
+#[cfg(windows)]
+impl Drop for OwnedInterfaceDnsSettings {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe {
+                windows_sys::Win32::NetworkManagement::IpHelper::FreeInterfaceDnsSettings(self.0);
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+struct EffectiveDnsServers {
+    ipv4: Vec<std::net::IpAddr>,
+    ipv6: Vec<std::net::IpAddr>,
+}
+
+#[cfg(windows)]
+fn observe_effective_dns_servers(
+    expected_interface_luid: u64,
+) -> Result<EffectiveDnsServers, String> {
+    use std::collections::BTreeSet;
+    use windows_sys::Win32::Foundation::ERROR_BUFFER_OVERFLOW;
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        GetAdaptersAddresses, IP_ADAPTER_ADDRESSES_LH, GAA_FLAG_SKIP_ANYCAST,
+        GAA_FLAG_SKIP_MULTICAST, GAA_FLAG_SKIP_UNICAST,
+    };
+    use windows_sys::Win32::Networking::WinSock::AF_UNSPEC;
+
+    const MAX_ADAPTERS: usize = 2048;
+    const MAX_DNS_SERVERS: usize = 64;
+    const MAX_BUFFER_RETRIES: usize = 3;
+    let flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_UNICAST;
+
+    let mut required_size = 0u32;
+    let initial_status = unsafe {
+        GetAdaptersAddresses(
+            AF_UNSPEC as u32,
+            flags,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut required_size,
+        )
+    };
+    if initial_status != ERROR_BUFFER_OVERFLOW || required_size == 0 {
+        return Err(format!(
+            "GetAdaptersAddresses size query was inconclusive (Windows error {initial_status})."
+        ));
+    }
+
+    let mut buffer = vec![0u64; (required_size as usize).div_ceil(std::mem::size_of::<u64>())];
+    let mut adapters = std::ptr::null_mut::<IP_ADAPTER_ADDRESSES_LH>();
+    let mut completed = false;
+    for _ in 0..MAX_BUFFER_RETRIES {
+        required_size = (buffer.len() * std::mem::size_of::<u64>()) as u32;
+        let status = unsafe {
+            GetAdaptersAddresses(
+                AF_UNSPEC as u32,
+                flags,
+                std::ptr::null_mut(),
+                buffer.as_mut_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>(),
+                &mut required_size,
+            )
+        };
+        if status == ERROR_BUFFER_OVERFLOW {
+            if required_size == 0 {
+                return Err("GetAdaptersAddresses returned an invalid required buffer size.".into());
+            }
+            buffer.resize(
+                (required_size as usize).div_ceil(std::mem::size_of::<u64>()),
+                0,
+            );
+            continue;
+        }
+        if status != 0 {
+            return Err(format!("GetAdaptersAddresses failed with Windows error {status}."));
+        }
+        adapters = buffer.as_mut_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>();
+        completed = true;
+        break;
+    }
+    if !completed || adapters.is_null() {
+        return Err("GetAdaptersAddresses did not produce a complete adapter snapshot.".into());
+    }
+
+    let mut current = adapters;
+    let mut visited = BTreeSet::new();
+    let mut matched = None;
+    for _ in 0..MAX_ADAPTERS {
+        if current.is_null() {
+            break;
+        }
+        if !visited.insert(current as usize) {
+            return Err("GetAdaptersAddresses returned a cyclic adapter list.".into());
+        }
+        let adapter = unsafe { &*current };
+        let luid = unsafe { adapter.Luid.Value };
+        if luid == expected_interface_luid {
+            if matched.is_some() {
+                return Err("GetAdaptersAddresses returned duplicate rows for the DNS interface LUID.".into());
+            }
+            matched = Some(adapter.FirstDnsServerAddress);
+        }
+        current = adapter.Next;
+    }
+    if !current.is_null() {
+        return Err("The Windows adapter inventory exceeds its safe bound.".into());
+    }
+    let Some(mut server) = matched else {
+        return Err("GetAdaptersAddresses did not return the DNS interface LUID.".into());
+    };
+
+    let mut ipv4 = Vec::new();
+    let mut ipv6 = Vec::new();
+    let mut all_seen = BTreeSet::new();
+    let mut visited_servers = BTreeSet::new();
+    for _ in 0..MAX_DNS_SERVERS {
+        if server.is_null() {
+            break;
+        }
+        if !visited_servers.insert(server as usize) {
+            return Err("GetAdaptersAddresses returned a cyclic DNS server list.".into());
+        }
+        let entry = unsafe { &*server };
+        let address = socket_address_to_ip(&entry.Address)?;
+        if !all_seen.insert(address) {
+            return Err("GetAdaptersAddresses returned duplicate DNS server addresses.".into());
+        }
+        if address.is_ipv4() {
+            ipv4.push(address);
+        } else {
+            ipv6.push(address);
+        }
+        server = entry.Next;
+    }
+    if !server.is_null() {
+        return Err("The DNS server list exceeds its safe bound.".into());
+    }
+
+    Ok(EffectiveDnsServers { ipv4, ipv6 })
+}
+
+#[cfg(windows)]
+fn socket_address_to_ip(
+    address: &windows_sys::Win32::Networking::WinSock::SOCKET_ADDRESS,
+) -> Result<std::net::IpAddr, String> {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    use windows_sys::Win32::Networking::WinSock::{
+        AF_INET, AF_INET6, SOCKADDR, SOCKADDR_IN, SOCKADDR_IN6,
+    };
+
+    if address.lpSockaddr.is_null() || address.iSockaddrLength < std::mem::size_of::<u16>() as i32 {
+        return Err("Windows returned an invalid DNS socket address.".into());
+    }
+    let family = unsafe { (*address.lpSockaddr).sa_family };
+    match family {
+        AF_INET if address.iSockaddrLength as usize >= std::mem::size_of::<SOCKADDR_IN>() => {
+            let sockaddr = unsafe { &*(address.lpSockaddr.cast::<SOCKADDR_IN>()) };
+            Ok(IpAddr::V4(Ipv4Addr::from(
+                unsafe { sockaddr.sin_addr.S_un.S_addr }.to_ne_bytes(),
+            )))
+        }
+        AF_INET6 if address.iSockaddrLength as usize >= std::mem::size_of::<SOCKADDR_IN6>() => {
+            let sockaddr = unsafe { &*(address.lpSockaddr.cast::<SOCKADDR_IN6>()) };
+            Ok(IpAddr::V6(Ipv6Addr::from(unsafe {
+                sockaddr.sin6_addr.u.Byte
+            })))
+        }
+        _ => {
+            let _ = std::mem::size_of::<SOCKADDR>();
+            Err("Windows returned a DNS socket address with an unsupported family or length.".into())
+        }
+    }
+}
+
+#[cfg(windows)]
+fn copy_dns_stack(
+    settings: &windows_sys::Win32::NetworkManagement::IpHelper::DNS_INTERFACE_SETTINGS3,
+    effective_name_servers: Vec<std::net::IpAddr>,
+) -> Result<crate::recovery_journal::DnsStackConfiguration, String> {
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        DNS_SERVER_PROPERTY_VERSION1, DnsServerDohProperty,
+    };
+
+    const MAX_DNS_PROPERTIES: usize = 8;
+    let name_servers_text = unsafe { copy_pwstr(settings.NameServer, 2048)? };
+    let profile_servers_text = unsafe { copy_pwstr(settings.ProfileNameServer, 2048)? };
+    let domain = unsafe { copy_pwstr(settings.Domain, 512)? };
+    let search_list = unsafe { copy_pwstr(settings.SearchList, 4096)? };
+    let supplemental_search_list = unsafe { copy_pwstr(settings.SupplementalSearchList, 4096)? };
+
+    let name_servers = parse_dns_ip_list(name_servers_text.as_deref())?;
+    let profile_name_servers = parse_dns_ip_list(profile_servers_text.as_deref())?;
+    let search_list = parse_dns_name_list(search_list.as_deref())?;
+    let supplemental_search_list = parse_dns_name_list(supplemental_search_list.as_deref())?;
+
+    let copy_properties = |count: u32,
+                           properties: *const windows_sys::Win32::NetworkManagement::IpHelper::DNS_SERVER_PROPERTY|
+     -> Result<Vec<crate::recovery_journal::DnsDohServerProperty>, String> {
+        if count as usize > MAX_DNS_PROPERTIES {
+            return Err("The Windows DNS-over-HTTPS property array exceeds its safe bound.".into());
+        }
+        if count == 0 {
+            if !properties.is_null() {
+                return Err("Windows returned a non-null DNS property array with zero entries.".into());
+            }
+            return Ok(Vec::new());
+        }
+        if properties.is_null() {
+            return Err("Windows returned a null DNS property array with non-zero entries.".into());
+        }
+        let rows = unsafe { std::slice::from_raw_parts(properties, count as usize) };
+        let mut result = Vec::with_capacity(rows.len());
+        for row in rows {
+            if row.Version != DNS_SERVER_PROPERTY_VERSION1 || row.Type != DnsServerDohProperty {
+                return Err("Windows returned an unsupported DNS server property type/version.".into());
+            }
+            let doh = unsafe { row.Property.DohSettings };
+            if doh.is_null() {
+                return Err("Windows returned a null DNS-over-HTTPS settings pointer.".into());
+            }
+            let template = unsafe { copy_pwstr((*doh).Template, 2048)? };
+            result.push(crate::recovery_journal::DnsDohServerProperty {
+                version: row.Version,
+                server_index: row.ServerIndex,
+                property_type: row.Type as u32,
+                flags: unsafe { (*doh).Flags },
+                template,
+            });
+        }
+        Ok(result)
+    };
+
+    let server_properties = copy_properties(settings.cServerProperties, settings.ServerProperties)?;
+    let profile_server_properties =
+        copy_properties(settings.cProfileServerProperties, settings.ProfileServerProperties)?;
+
+    Ok(crate::recovery_journal::DnsStackConfiguration {
+        settings_version: settings.Version,
+        encrypted_dns_adapter_flags: None,
+        name_servers,
+        profile_name_servers,
+        effective_name_servers,
+        domain,
+        search_list,
+        supplemental_search_list,
+        registration_enabled: settings.RegistrationEnabled,
+        register_adapter_name: settings.RegisterAdapterName,
+        enable_llmnr: settings.EnableLLMNR,
+        query_adapter_name: settings.QueryAdapterName,
+        disable_unconstrained_queries: settings.DisableUnconstrainedQueries,
+        settings_flags: settings.Flags,
+        server_properties,
+        profile_server_properties,
+    })
+}
+
+#[cfg(windows)]
+unsafe fn copy_pwstr(
+    value: windows_sys::core::PWSTR,
+    maximum_units: usize,
+) -> Result<Option<String>, String> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    let mut length = 0usize;
+    while length < maximum_units {
+        if *value.add(length) == 0 {
+            let units = std::slice::from_raw_parts(value, length);
+            return String::from_utf16(units)
+                .map(Some)
+                .map_err(|_| "Windows returned an invalid UTF-16 DNS setting.".to_string());
+        }
+        length += 1;
+    }
+    Err("A Windows DNS string exceeded its safe bound or was not terminated.".into())
+}
+
+#[cfg(windows)]
+fn parse_dns_ip_list(value: Option<&str>) -> Result<Option<Vec<std::net::IpAddr>>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let mut result = Vec::new();
+    for token in value.split(|ch: char| ch == ',' || ch.is_ascii_whitespace()).filter(|s| !s.is_empty()) {
+        result.push(token.parse().map_err(|_| "Windows returned an invalid DNS server address.".to_string())?);
+        if result.len() > 8 {
+            return Err("A Windows DNS server list exceeded its safe bound.".into());
+        }
+    }
+    Ok(Some(result))
+}
+
+#[cfg(windows)]
+fn parse_dns_name_list(value: Option<&str>) -> Result<Option<Vec<String>>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let result: Vec<String> = value
+        .split(|ch: char| ch == ',' || ch.is_ascii_whitespace())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    if result.len() > 32 || result.iter().any(|s| s.len() > 253) {
+        return Err("A Windows DNS search list exceeded its safe bound.".into());
+    }
+    Ok(Some(result))
+}
+
+#[cfg(windows)]
+fn uuid_to_windows_guid(value: uuid::Uuid) -> windows_sys::core::GUID {
+    let bytes = value.as_bytes();
+    windows_sys::core::GUID {
+        data1: u32::from_be_bytes(bytes[0..4].try_into().unwrap()),
+        data2: u16::from_be_bytes(bytes[4..6].try_into().unwrap()),
+        data3: u16::from_be_bytes(bytes[6..8].try_into().unwrap()),
+        data4: bytes[8..16].try_into().unwrap(),
+    }
+}
+
+#[cfg(windows)]
 /// Observe a recorded TUN adapter and its complete IPv4/IPv6 unicast address
 /// inventory. The stable interface GUID selects the adapter; its NET_LUID
 /// correlates address-table rows so a reused interface index cannot steal them.
@@ -501,6 +953,37 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn dns_server_lists_preserve_both_ip_families_and_order() {
+        assert_eq!(
+            super::parse_dns_ip_list(Some("192.0.2.53, 1.1.1.1")).unwrap(),
+            Some(vec!["192.0.2.53".parse().unwrap(), "1.1.1.1".parse().unwrap()])
+        );
+        assert_eq!(
+            super::parse_dns_ip_list(Some("2001:db8::53, 2606:4700:4700::1111")).unwrap(),
+            Some(vec![
+                "2001:db8::53".parse().unwrap(),
+                "2606:4700:4700::1111".parse().unwrap(),
+            ])
+        );
+        assert!(super::parse_dns_ip_list(Some("not-an-address")).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn dns_search_lists_preserve_order_and_reject_oversized_entries() {
+        assert_eq!(
+            super::parse_dns_name_list(Some("example.test, internal.test corp.test")).unwrap(),
+            Some(vec![
+                "example.test".to_string(),
+                "internal.test".to_string(),
+                "corp.test".to_string(),
+            ])
+        );
+        assert!(super::parse_dns_name_list(Some(&"x".repeat(254))).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn route_prefixes_are_compared_in_canonical_network_form() {
         assert_eq!(
             super::canonicalize_ip_prefix("203.0.113.129".parse().unwrap(), 24).unwrap(),
@@ -513,4 +996,89 @@ mod tests {
         assert!(super::canonicalize_ip_prefix("203.0.113.1".parse().unwrap(), 33).is_err());
         assert!(super::canonicalize_ip_prefix("2001:db8::1".parse().unwrap(), 129).is_err());
     }
+    /// This test is intentionally read-only. It exercises the native DNS APIs
+    /// on a real Windows runner and asserts that the current probe never
+    /// mislabels its one-family response as a complete dual-stack snapshot.
+    #[cfg(windows)]
+    #[test]
+    fn live_dns_observer_reports_only_the_family_identified_by_windows() {
+        use crate::recovery_journal::{DnsConfiguration, DnsMutationRecord};
+        use windows_sys::Win32::NetworkManagement::IpHelper::{
+            GetIfTable2, MIB_IF_ROW2, MIB_IF_TABLE2,
+        };
+
+        let mut table: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
+        let status = unsafe { GetIfTable2(&mut table) };
+        assert_eq!(status, 0, "GetIfTable2 failed with Windows error {status}");
+        assert!(!table.is_null(), "GetIfTable2 returned a null interface table");
+        let _table = super::OwnedIpHelperTable(table.cast());
+
+        let count = unsafe { (*table).NumEntries as usize };
+        assert!(count <= 2048, "Windows returned an oversized interface inventory");
+        let rows = unsafe {
+            std::slice::from_raw_parts(
+                std::ptr::addr_of!((*table).Table).cast::<MIB_IF_ROW2>(),
+                count,
+            )
+        };
+
+        let mut eligible = 0usize;
+        let mut observed = false;
+        let mut errors = Vec::new();
+        for row in rows {
+            let luid = unsafe { row.InterfaceLuid.Value };
+            if row.InterfaceIndex == 0 || luid == 0 {
+                continue;
+            }
+
+            let effective = match super::observe_effective_dns_servers(luid) {
+                Ok(value) if !value.ipv4.is_empty() || !value.ipv6.is_empty() => value,
+                _ => continue,
+            };
+            let _ = effective;
+            eligible += 1;
+
+            let interface_guid =
+                uuid::Uuid::from_u128(super::guid_to_u128(&row.InterfaceGuid)).to_string();
+            let record = DnsMutationRecord {
+                interface_index: row.InterfaceIndex,
+                interface_guid: Some(interface_guid.clone()),
+                applied: DnsConfiguration::Dhcp,
+                previous: DnsConfiguration::Dhcp,
+            };
+
+            match super::observe_recorded_dns(&record) {
+                Ok(super::Observation::Present(DnsConfiguration::Interface(interface))) => {
+                    assert_eq!(interface.interface_guid, interface_guid);
+                    assert_ne!(
+                        interface.ipv4.is_some(),
+                        interface.ipv6.is_some(),
+                        "The current GetInterfaceDnsSettings observer must expose exactly one stack"
+                    );
+                    observed = true;
+                    break;
+                }
+                Ok(super::Observation::Present(_)) => {
+                    panic!("The DNS observer returned an unexpected configuration variant")
+                }
+                Ok(super::Observation::Absent | super::Observation::Unknown) => {}
+                Err(error) if errors.len() < 8 => errors.push(error),
+                Err(_) => {}
+            }
+        }
+
+        if eligible == 0 {
+            eprintln!(
+                "Skipping live DNS API assertion: this Windows runner exposed no adapter with an effective DNS server."
+            );
+            return;
+        }
+
+        assert!(
+            observed,
+            "No eligible Windows interface produced a readable v3 DNS snapshot; errors: {}",
+            errors.join(" | ")
+        );
+    }
+
 }

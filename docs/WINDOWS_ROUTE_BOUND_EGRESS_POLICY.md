@@ -32,6 +32,10 @@ The initial DoH request occurs before snapshot capture and before any tunnel exi
 
 ## Consistency boundary
 
+The recovery journal now has an explicit `egressProtected` phase. The Agent may record that phase only after the route-bound WFP filter transaction commits, every exact filter identity is read back successfully, and the snapshot generation is still current. The connection state machine separately requires `InstallingEgressProtection` → `EgressProtected` before `StartingEngine`; an uncertain WFP commit/read-back or journal checkpoint must keep engine startup blocked.
+
+This is a state/journal barrier, not the full Connect transaction. The current Agent IPC still rejects Connect and Disconnect. It does not configure routes or DNS, start sing-box, prove link-control exceptions, or establish a verified tunnel.
+
 The epoch is a point-in-time invalidation guard, not a route lock. A route can still change after a final generation check and before or immediately after a WFP commit. The commit caller must retain the snapshot, treat invalidation as failed preparation, keep the engine stopped, and leave the durable WFP intent journal for exact recovery. A future connection state machine must serialize route/DNS/WFP/engine state and reconcile it on crash/reboot.
 
 ## Remaining security gates

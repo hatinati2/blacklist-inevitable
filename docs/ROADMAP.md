@@ -91,8 +91,9 @@ Naive import/config mapping is implemented for a bounded subset; remote authenti
 - [x] Compose encrypted endpoint resolution directly with Windows route-bound snapshot capture; derive the exact TCP/UDP tuple set from the validated sing-box outbound and never fall back to system DNS.
 - [x] Add an authenticated Agent-only preparation request that validates the profile, captures and retains a read-only route-bound endpoint snapshot, erases temporary credential copies, and discards snapshots after route/interface invalidation; keep Connect disabled.
 - [x] Add explicit cancellation of retained preparation snapshots, bind them to a reserved EndpointPrepared session, prevent overlapping preparation attempts, and retire route/interface notifications on cancellation, invalidation, and normal Agent service shutdown.
+- [x] Add a session-state barrier that requires Agent egress protection to be committed, journaled, and read-back verified before engine startup can begin; uncertain protection state fails closed.
 - [x] Expose read-only endpoint preparation and cancellation in the desktop UI without enabling VPN Connect.
-- [ ] Consume the retained snapshot in a serialized Agent-owned WFP/route/DNS/engine transaction; keep in-session DoH on the VPN path.
+- [ ] Consume the retained snapshot in a serialized Agent-owned WFP/route/DNS/engine transaction; keep in-session DoH on the VPN path. The state and journal now expose an explicit WFP-protection barrier, but the end-to-end transaction and normal Connect remain disabled.
 - [ ] Add a Strict Privacy mode that forbids incompatible Direct destination and per-app bypass exceptions; clearly label other modes that intentionally permit physical egress.
 - [ ] Verify IPv4/IPv6 routing, DNS/DoT/DoQ/DoH, local discovery and all non-tunnel egress with Windows 10/11 physical-adapter packet captures across connect/disconnect/crash/recovery/network-change cases.
 

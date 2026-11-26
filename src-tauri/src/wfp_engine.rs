@@ -650,6 +650,20 @@ impl WfpEngine {
             format!("{error} The WFP filters remain committed and journaled; do not start the engine and reconcile the exact filter keys.")
         })?;
 
+        // "EgressProtected" is a durable barrier, not merely a successful BFE
+        // commit. It is recorded only after exact filter identities have been
+        // read back and the route-bound snapshot is still current. A failed
+        // checkpoint leaves the preceding exact-key journal available for
+        // startup reconciliation and must never authorize engine startup.
+        committed.phase = crate::recovery_journal::JournalPhase::EgressProtected;
+        committed.revision = committed
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| "The recovery journal revision overflowed after egress-policy verification; exact filter intents remain durable.".to_string())?;
+        journal_store.persist(&committed).map_err(|error| {
+            format!("Agent egress filters are committed and verified, but the EgressProtected checkpoint failed: {error}. Do not start the engine; retain the journal for recovery.")
+        })?;
+
         *journal = committed;
         Ok(FilterInstallReport {
             installed_filter_count: keys.len(),
@@ -702,7 +716,8 @@ impl WfpEngine {
         let loaded_journal = loaded.iter()
             .find(|item| item.session_id == session_id)
             .ok_or_else(|| "The newly committed WFP recovery journal was not found after reload.".to_string())?;
-        let keys_match = loaded_journal.firewall_filters.len() == expected_filter_count
+        let keys_match = loaded_journal.phase == crate::recovery_journal::JournalPhase::EgressProtected
+            && loaded_journal.firewall_filters.len() == expected_filter_count
             && loaded_journal.firewall_filters.iter().all(|record| record.filter_id.is_some());
         if !keys_match {
             return Err("The reloaded WFP recovery journal did not preserve all stable keys and runtime IDs.".into());

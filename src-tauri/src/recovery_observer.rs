@@ -741,6 +741,30 @@ fn observe_tunnel_unicast_addresses(
     Ok(addresses)
 }
 
+/// Append one live route row to every journal key that resolves to the same
+/// canonical prefix. Do not collapse repeated rows: the assessor must be able
+/// to detect indistinguishable duplicates instead of silently picking one.
+fn append_observed_route_state(
+    routes: &mut std::collections::BTreeMap<
+        String,
+        Observation<Vec<crate::recovery_journal::RouteState>>,
+    >,
+    journal_keys: &[String],
+    state: &crate::recovery_journal::RouteState,
+) -> Result<(), String> {
+    for key in journal_keys {
+        match routes.get_mut(key) {
+            Some(observation @ Observation::Absent) => {
+                *observation = Observation::Present(vec![state.clone()]);
+            }
+            Some(Observation::Present(rows)) => rows.push(state.clone()),
+            Some(Observation::Unknown) => {}
+            None => return Err("The route observation snapshot lost a requested journal key.".into()),
+        }
+    }
+    Ok(())
+}
+
 /// Read every IPv4 and IPv6 route row in one IP Helper snapshot. Preserve
 /// every row for each journaled destination prefix; the pure assessor matches
 /// journal mutations against stable route identities within that complete set.
@@ -842,20 +866,7 @@ pub fn observe_recorded_routes(
             origin: Some(row.Origin),
         };
 
-        for key in journal_keys {
-            match routes.get_mut(key) {
-                Some(observation @ Observation::Absent) => {
-                    *observation = Observation::Present(vec![state.clone()]);
-                }
-                Some(Observation::Present(rows)) => {
-                    rows.push(state.clone());
-                }
-                Some(Observation::Unknown) => {}
-                None => {
-                    return Err("The route observation snapshot lost a requested journal key.".into());
-                }
-            }
-        }
+        append_observed_route_state(&mut routes, journal_keys, &state)?;
     }
 
     Ok(routes)
@@ -944,6 +955,67 @@ impl Drop for OwnedIpHelperTable {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn route_row_accumulator_preserves_all_rows_for_shared_canonical_prefix() {
+        use crate::recovery_journal::RouteState;
+        use std::collections::BTreeMap;
+
+        let mut routes = BTreeMap::from([
+            ("192.0.2.0/24".to_string(), super::Observation::Absent),
+            ("192.0.2.7/24".to_string(), super::Observation::Absent),
+        ]);
+        let keys = vec!["192.0.2.0/24".to_string(), "192.0.2.7/24".to_string()];
+        let first = RouteState {
+            interface_index: 7,
+            interface_luid: Some(700),
+            next_hop: None,
+            metric: 10,
+            protocol: Some(3),
+            origin: Some(0),
+        };
+        let second = RouteState {
+            interface_index: 8,
+            interface_luid: Some(800),
+            next_hop: Some("192.0.2.1".parse().unwrap()),
+            metric: 20,
+            protocol: Some(19),
+            origin: Some(2),
+        };
+
+        super::append_observed_route_state(&mut routes, &keys, &first).unwrap();
+        super::append_observed_route_state(&mut routes, &keys, &second).unwrap();
+
+        for key in &keys {
+            assert_eq!(
+                routes.get(key),
+                Some(&super::Observation::Present(vec![first.clone(), second.clone()]))
+            );
+        }
+    }
+
+    #[test]
+    fn route_row_accumulator_does_not_drop_duplicate_rows() {
+        use crate::recovery_journal::RouteState;
+        use std::collections::BTreeMap;
+
+        let key = "0.0.0.0/0".to_string();
+        let mut routes = BTreeMap::from([(key.clone(), super::Observation::Absent)]);
+        let row = RouteState {
+            interface_index: 7,
+            interface_luid: Some(700),
+            next_hop: None,
+            metric: 10,
+            protocol: Some(3),
+            origin: Some(0),
+        };
+        super::append_observed_route_state(&mut routes, std::slice::from_ref(&key), &row).unwrap();
+        super::append_observed_route_state(&mut routes, std::slice::from_ref(&key), &row).unwrap();
+        assert_eq!(
+            routes.get(&key),
+            Some(&super::Observation::Present(vec![row.clone(), row]))
+        );
+    }
+
     #[cfg(windows)]
     #[test]
     fn filetime_conversion_preserves_high_and_low_words() {

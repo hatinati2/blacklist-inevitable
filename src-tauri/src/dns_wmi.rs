@@ -438,8 +438,8 @@ mod windows {
             }
             let index = row.InterfaceIndex;
             let luid = unsafe { row.InterfaceLuid.Value };
-            if index == 0 || luid == 0 || expected.interface_index != index {
-                return Err("The journaled DNS interface index is stale or inconsistent with its stable GUID.".into());
+            if index == 0 || luid == 0 {
+                return Err("Windows returned an invalid current DNS interface index or NET_LUID.".into());
             }
             let alias_end = row.Alias.iter().position(|unit| *unit == 0)
                 .ok_or_else(|| "GetIfTable2 returned an unterminated interface alias.".to_string())?;

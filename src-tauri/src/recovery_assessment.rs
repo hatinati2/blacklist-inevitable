@@ -709,6 +709,21 @@ mod tests {
             assess_recovery(&journal, &snapshot).dns[0].disposition,
             ResourceDisposition::Conflict
         );
+
+        // Same GUID but a different historical NET_LUID is also a conflict.
+        let changed_luid = DnsConfiguration::Interface(
+            crate::recovery_journal::DnsInterfaceConfiguration {
+                interface_guid: "4d36e972-e325-11ce-bfc1-08002be10318".into(),
+                interface_luid: Some(0x0001_0000_0000_000D),
+                ipv4: Some(dns_stack(false, "192.0.2.53", "192.0.2.53")),
+                ipv6: Some(dns_stack(true, "2001:db8::53", "2001:db8::53")),
+            },
+        );
+        snapshot.dns.insert(12, Observation::Present(changed_luid));
+        assert_eq!(
+            assess_recovery(&journal, &snapshot).dns[0].disposition,
+            ResourceDisposition::Conflict
+        );
     }
 
     #[test]
@@ -743,6 +758,37 @@ mod tests {
             assess_recovery(&journal, &snapshot).dns[0].disposition,
             ResourceDisposition::Unknown
         );
+    }
+
+    #[test]
+    fn complete_legacy_dns_snapshot_without_historical_luid_remains_unknown() {
+        let mut previous = match complete_dns("192.0.2.53", "2001:db8::53") {
+            DnsConfiguration::Interface(config) => config,
+            _ => unreachable!(),
+        };
+        previous.interface_luid = None;
+        let mut applied = match complete_dns("198.18.0.1", "fd00::53") {
+            DnsConfiguration::Interface(config) => config,
+            _ => unreachable!(),
+        };
+        applied.interface_luid = None;
+
+        let record = DnsMutationRecord {
+            interface_index: 12,
+            interface_guid: Some("4d36e972-e325-11ce-bfc1-08002be10318".into()),
+            interface_luid: None,
+            applied: DnsConfiguration::Interface(applied.clone()),
+            previous: DnsConfiguration::Interface(previous.clone()),
+        };
+        let mut journal = RecoveryJournal::new(104);
+        journal.dns.push(record);
+        journal.validate().unwrap();
+
+        let mut snapshot = empty_snapshot();
+        snapshot.dns.insert(12, Observation::Present(DnsConfiguration::Interface(previous)));
+        let assessment = assess_recovery(&journal, &snapshot);
+        assert_eq!(assessment.dns[0].disposition, ResourceDisposition::Unknown);
+        assert!(!assessment.can_remove_journal);
     }
 
     #[test]

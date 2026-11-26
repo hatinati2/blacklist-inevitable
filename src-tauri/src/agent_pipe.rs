@@ -1,8 +1,8 @@
 //! Windows-only authenticated named-pipe transport for the privileged Agent.
 //!
-//! The listener is deliberately status-only in this milestone. It accepts only
-//! the active physical-console user's token/session, rejects remote pipe clients,
-//! uses a protected DACL, and never forwards network-mutating operations.
+//! The listener exposes status and read-only endpoint preparation in this milestone.
+//! It accepts only the active physical-console user's token/session, rejects remote
+//! pipe clients, uses a protected DACL, and never forwards network-mutating operations.
 
 use std::collections::BTreeMap;
 use std::slice;

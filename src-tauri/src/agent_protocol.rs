@@ -26,7 +26,7 @@ const MAX_CREDENTIAL_KEY_BYTES: usize = 32;
 const MAX_CREDENTIAL_VALUE_BYTES: usize = 8192;
 
 /// A credential string that erases its owned bytes when dropped. Deserializing
-/// each value into this type also protects partially decoded Connect requests.
+/// each value into this type also protects partially decoded PrepareConnect/Connect requests.
 pub struct AgentSecret(String);
 
 impl AgentSecret {
@@ -103,7 +103,7 @@ impl From<ProfileSummary> for AgentProfile {
     }
 }
 
-/// The credential map is only accepted on a single Connect request. The
+/// The credential map is accepted only on one authenticated PrepareConnect or Connect request. The
 /// service must use it in memory to build its per-session engine config and
 /// must never log, persist, or echo this object.
 #[derive(Serialize, Deserialize)]

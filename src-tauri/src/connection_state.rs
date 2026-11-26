@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 pub enum ConnectionPhase {
     Disconnected,
     Preparing,
+    EndpointPrepared,
     StartingEngine,
     ConfiguringNetwork,
     Connected,
@@ -111,6 +112,74 @@ impl ConnectionCoordinator {
         Ok(session_id)
     }
 
+    /// Mark the route-bound endpoint plan as prepared without claiming VPN connectivity.
+    pub fn endpoint_prepared(&self, session_id: u64) -> Result<(), String> {
+        self.transition(
+            session_id,
+            ConnectionPhase::Preparing,
+            ConnectionPhase::EndpointPrepared,
+        )
+    }
+
+    /// Abort a preparation attempt. Reconnect is allowed only after its temporary
+    /// resources have been confirmed released.
+    pub fn abort_preparation(
+        &self,
+        session_id: u64,
+        cleanup_confirmed: bool,
+        detail: Option<String>,
+    ) -> Result<(), String> {
+        self.finish_preparation_state(
+            session_id,
+            ConnectionPhase::Preparing,
+            cleanup_confirmed,
+            detail,
+        )
+    }
+
+    /// Cancel a retained endpoint snapshot belonging to this exact session.
+    pub fn finish_preparation_cancellation(
+        &self,
+        session_id: u64,
+        cleanup_confirmed: bool,
+        detail: Option<String>,
+    ) -> Result<(), String> {
+        self.finish_preparation_state(
+            session_id,
+            ConnectionPhase::EndpointPrepared,
+            cleanup_confirmed,
+            detail,
+        )
+    }
+
+    fn finish_preparation_state(
+        &self,
+        session_id: u64,
+        expected: ConnectionPhase,
+        cleanup_confirmed: bool,
+        detail: Option<String>,
+    ) -> Result<(), String> {
+        let mut inner = self.lock();
+        ensure_session(&inner.snapshot, session_id)?;
+        if inner.snapshot.phase != expected {
+            return Err(format!(
+                "Preparation completion is invalid while the connection is {:?}; expected {:?}.",
+                inner.snapshot.phase, expected
+            ));
+        }
+
+        if cleanup_confirmed {
+            inner.snapshot = disconnected_snapshot();
+        } else {
+            inner.snapshot.phase = ConnectionPhase::Failed;
+            inner.snapshot.cleanup_healthy = false;
+            inner.snapshot.detail = Some(detail.unwrap_or_else(|| {
+                "Endpoint preparation cleanup could not be confirmed; reconnect is blocked.".to_string()
+            }));
+        }
+        Ok(())
+    }
+
     pub fn begin_engine(&self, session_id: u64) -> Result<(), String> {
         self.transition(
             session_id,
@@ -174,6 +243,7 @@ impl ConnectionCoordinator {
         match inner.snapshot.phase {
             ConnectionPhase::Disconnecting => Ok(()),
             ConnectionPhase::Preparing
+            | ConnectionPhase::EndpointPrepared
             | ConnectionPhase::StartingEngine
             | ConnectionPhase::ConfiguringNetwork
             | ConnectionPhase::Connected
@@ -343,6 +413,65 @@ mod tests {
 
         coordinator.network_verified(session).unwrap();
         assert_eq!(coordinator.snapshot().phase, ConnectionPhase::Connected);
+    }
+
+    #[test]
+    fn endpoint_preparation_reserves_and_releases_the_exact_session() {
+        let coordinator = ConnectionCoordinator::new();
+        let session = coordinator.begin_connect("profile-1").unwrap();
+
+        assert_eq!(coordinator.snapshot().phase, ConnectionPhase::Preparing);
+        coordinator.endpoint_prepared(session).unwrap();
+        assert_eq!(
+            coordinator.snapshot().phase,
+            ConnectionPhase::EndpointPrepared
+        );
+        assert!(coordinator.begin_connect("profile-2").is_err());
+
+        coordinator
+            .finish_preparation_cancellation(session, true, None)
+            .unwrap();
+        assert_eq!(coordinator.snapshot().phase, ConnectionPhase::Disconnected);
+
+        let next = coordinator.begin_connect("profile-2").unwrap();
+        assert_ne!(session, next);
+    }
+
+    #[test]
+    fn preparation_abort_blocks_reconnect_when_cleanup_is_uncertain() {
+        let coordinator = ConnectionCoordinator::new();
+        let session = coordinator.begin_connect("profile-1").unwrap();
+        coordinator
+            .abort_preparation(
+                session,
+                false,
+                Some("notification handle cleanup failed".to_string()),
+            )
+            .unwrap();
+
+        let snapshot = coordinator.snapshot();
+        assert_eq!(snapshot.phase, ConnectionPhase::Failed);
+        assert!(!snapshot.cleanup_healthy);
+        assert!(coordinator.begin_connect("profile-2").is_err());
+    }
+
+    #[test]
+    fn stale_preparation_cancellation_cannot_reset_a_newer_session() {
+        let coordinator = ConnectionCoordinator::new();
+        let old = coordinator.begin_connect("profile-1").unwrap();
+        coordinator.endpoint_prepared(old).unwrap();
+        coordinator
+            .finish_preparation_cancellation(old, true, None)
+            .unwrap();
+
+        let current = coordinator.begin_connect("profile-2").unwrap();
+        assert_ne!(old, current);
+        assert!(coordinator
+            .finish_preparation_cancellation(old, true, None)
+            .unwrap_err()
+            .contains("stale"));
+        assert_eq!(coordinator.snapshot().session_id, Some(current));
+        assert_eq!(coordinator.snapshot().phase, ConnectionPhase::Preparing);
     }
 
     #[test]

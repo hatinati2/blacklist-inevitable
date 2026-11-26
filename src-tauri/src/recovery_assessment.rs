@@ -430,6 +430,7 @@ mod tests {
         DnsMutationRecord {
             interface_index: 12,
             interface_guid: Some("4d36e972-e325-11ce-bfc1-08002be10318".into()),
+            interface_luid: None,
             applied: DnsConfiguration::Static(vec!["198.18.0.1".parse().unwrap()]),
             previous: DnsConfiguration::Dhcp,
         }

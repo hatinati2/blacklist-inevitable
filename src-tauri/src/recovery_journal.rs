@@ -246,7 +246,7 @@ impl RecoveryJournal {
                 }))
         {
             return Err(
-                "The journal phase requires a complete, committed, stable-key WFP protection record."
+                "The journal phase requires a complete, committed WFP filter set with stable keys and runtime IDs."
                     .to_string(),
             );
         }
@@ -693,6 +693,37 @@ mod tests {
         assert_eq!(loaded[0].session_id, 42);
         assert_eq!(loaded[0].revision, 3);
         assert_eq!(loaded[0].phase, JournalPhase::EngineStarted);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn accepts_only_the_complete_ordered_session_phase_sequence() {
+        let (root, store) = store();
+        store.persist(&RecoveryJournal::new(85)).unwrap();
+
+        let mut protected = example_journal(85, 2);
+        protected.phase = JournalPhase::EgressProtected;
+        store.persist(&protected).unwrap();
+
+        let mut engine = protected.clone();
+        engine.revision = 3;
+        engine.phase = JournalPhase::EngineStarted;
+        store.persist(&engine).unwrap();
+
+        let mut tunnel = engine.clone();
+        tunnel.revision = 4;
+        tunnel.phase = JournalPhase::TunnelCreated;
+        store.persist(&tunnel).unwrap();
+
+        let mut network = tunnel;
+        network.revision = 5;
+        network.phase = JournalPhase::NetworkConfigured;
+        store.persist(&network).unwrap();
+
+        let loaded = store.load_unresolved().unwrap();
+        assert_eq!(loaded[0].phase, JournalPhase::NetworkConfigured);
+        assert_eq!(loaded[0].revision, 5);
 
         fs::remove_dir_all(root).unwrap();
     }

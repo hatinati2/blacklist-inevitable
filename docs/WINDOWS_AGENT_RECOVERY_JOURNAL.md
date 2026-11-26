@@ -8,7 +8,7 @@ A journal records only the resource identities and exact previous settings neede
 
 - Engine PID plus its Windows process-creation timestamp, so recovery can distinguish PID reuse.
 - TUN adapter GUID, interface index, alias, MTU, and assigned addresses.
-- Each route state applied by the session and the previous route state, if one existed. Route states now also retain the stable interface NET_LUID; interface indexes are diagnostic only because Windows can reuse them. A NetworkConfigured checkpoint is rejected unless every applied and previous route state has a nonzero LUID.
+- Each route state applied by the session and the previous route state, if one existed. Route states retain the stable interface NET_LUID, next hop, route metric, and the raw Windows `NL_ROUTE_PROTOCOL` and `NL_ROUTE_ORIGIN` values from the same `MIB_IPFORWARD_ROW2` entry. Protocol/origin values are stored as raw signed integers so unknown future enum values round-trip unchanged. Interface indexes are diagnostic only because Windows can reuse them. Legacy route journals that omit any stable identity or protocol/origin evidence remain readable but cannot authorize reconciliation.
 - DNS configuration per interface and IP family: adapter name servers, profile-specific name servers, effective resolver addresses, connection domain, search and supplemental search lists, dynamic-registration/LLMNR/query flags, and per-server DoH templates/options. IPv4 and IPv6 snapshots are separate; a journaled DNS mutation is valid only when both are present. The prior compact DHCP/static representation remains readable for older records.
 - WFP provider/layer GUIDs, stable filter GUIDs when available, and BFE runtime filter IDs owned by the session. The stable filter GUID is the deletion/read-back key; the runtime ID is diagnostic only.
 
@@ -20,16 +20,20 @@ The schema does not contain profile credentials, share links, engine JSON, comma
 
 A NetworkConfigured checkpoint is accepted only when it contains at least
 one route mutation and one DNS mutation. Every applied route state and every
-recorded previous route state must carry a stable, nonzero Windows NET_LUID;
-an interface index alone is not enough. Every DNS mutation must bind to a
-stable interface GUID and contain complete IPv4 and IPv6 snapshots for both
-its previous and applied settings. Legacy compact DNS records and route
+recorded previous route state must carry a stable, nonzero Windows NET_LUID
+and the raw Windows route protocol and origin values; an interface index alone
+is not enough. Missing protocol/origin fields in legacy journals remain
+readable but cannot pass this gate. Every DNS mutation must bind to a stable
+interface GUID and contain complete IPv4 and IPv6 snapshots for both its
+previous and applied settings. Legacy compact DNS records and route
 records with missing LUIDs remain readable, but cannot be used to create a
 NetworkConfigured checkpoint. The read-only route assessor independently
-requires LUID evidence and compares route identity by NET_LUID, next hop, and
-metric. Interface indexes are diagnostic only and may change across adapter
-enumeration; they cannot override a matching stable LUID or establish identity
-when the LUID is missing.
+requires LUID, protocol, and origin evidence and compares route identity by
+NET_LUID, next hop, metric, protocol, and origin. Missing fields in either the
+journal or the live observation result in Unknown; a changed protocol or origin
+is a conflict and cannot produce an executable intent. Interface indexes are
+diagnostic only and may change across adapter enumeration; they cannot override
+a matching stable LUID or establish identity when the LUID is missing.
 
 ## Storage and recovery semantics
 
@@ -61,7 +65,7 @@ The `can_remove_journal` result is true only when every recorded resource is pos
 
 - The engine-process probe opens the journaled PID with only query and synchronize rights, checks its wait state, reads the kernel FILETIME creation value, and checks liveness again. A PID that no longer exists is reported absent; access denied, API failures, and inconclusive states are errors and must become `Unknown`. The creation timestamp is compared by the assessment planner, so PID reuse is a conflict rather than permission to terminate another process.
 - The tunnel-interface probe reads `GetIfTable2` and matches the stable interface GUID, then reads the complete IPv4/IPv6 unicast address table with `GetUnicastIpAddressTable(AF_UNSPEC)`. Address rows are correlated by the adapter's stable NET_LUID and their interface index is checked as a live consistency value. The observer records and compares the assigned address plus on-link prefix length for every address, rejects duplicate/invalid/oversized inventories, and returns Unknown on any API or inventory error. Version-1 journals that predate address-prefix recording still deserialize, but their empty `addressDetails` cannot authorize a positive TUN identity match and therefore remain Unknown. See [GetUnicastIpAddressTable](https://learn.microsoft.com/windows/win32/api/netioapi/nf-netioapi-getunicastipaddresstable) and [MIB_UNICASTIPADDRESS_ROW](https://learn.microsoft.com/windows/win32/api/netioapi/ns-netioapi-mib_unicastipaddress_row).
-- The route probe reads the full IPv4/IPv6 table with `GetIpForwardTable2(AF_UNSPEC)`, frees the IP Helper snapshot with `FreeMibTable`, and compares canonical destination prefixes, interface indexes, stable interface NET_LUIDs, next hops, and metrics. Legacy route records without a stable LUID remain `Unknown`; a reused interface index alone can never prove that the old route was restored. If a destination prefix has multiple rows, it reports `Unknown`: the current journal schema keys routes only by destination prefix and cannot safely disambiguate multiple interfaces.
+- The route probe reads the full IPv4/IPv6 table with `GetIpForwardTable2(AF_UNSPEC)`, frees the IP Helper snapshot with `FreeMibTable`, and compares canonical destination prefixes, interface indexes, stable interface NET_LUIDs, next hops, metrics, and the raw `Protocol` and `Origin` values from each matching `MIB_IPFORWARD_ROW2`. Legacy route records without a stable LUID or protocol/origin evidence remain `Unknown`; a reused interface index alone can never prove that the old route was restored. If a destination prefix has multiple rows, it reports `Unknown`: the current journal schema keys routes only by destination prefix and cannot safely disambiguate multiple interfaces.
 - The WFP probe calls `WfpEngine::enumerate_owned_filters`. It begins an explicit read-only BFE transaction, positively verifies that the stable product provider and sublayer both exist with their persistent flags and expected ownership, creates a provider-key-scoped enumeration handle, reads every bounded page, verifies each returned provider and stable filter GUID, destroys the enumeration handle, and commits the read-only transaction. It returns `Present(empty)` only after the provider and sublayer have been verified and a complete successful enumeration is empty. A missing/non-persistent provider or sublayer, any API error, or an inventory above the 256-filter journal bound remains `Unknown`.
 - The DNS probe calls `GetInterfaceDnsSettings` with version 3 (the only version documented by the current function reference with per-server DoH properties), setting only `Version` and leaving input `Flags` zero. It always frees the returned settings with `FreeInterfaceDnsSettings`. It separately reads the effective DNS server list from `GetAdaptersAddresses(AF_UNSPEC)`, correlating the adapter by stable NET_LUID and bounding/rejecting incomplete or cyclic linked lists. Adapter-configured and profile-configured server lists remain separate from effective resolver addresses; search/domain and per-server DoH properties are copied and validated without mutating the OS. The function returns only the IP family identified by the returned `DNS_SETTING_IPV6` bit, leaving the other family absent. Since the documented Get API does not let the caller request the second family (its input Flags must be zero), this observer is intentionally partial: the pure assessor reports `Unknown` for a journal requiring both IPv4 and IPv6. It does not authorize cleanup, restore, or journal removal. Version 4's encrypted-DNS adapter flags are retained in the journal schema but are not claimed by this observer until GetInterfaceDnsSettings documents and a supported Windows API path exposes that version.
 

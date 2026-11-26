@@ -81,17 +81,71 @@ pub struct RouteMutationRecord {
     pub previous: Option<RouteState>,
 }
 
+/// One per-server DNS-over-HTTPS setting returned by the Windows DNS API.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DnsDohServerProperty {
+    pub version: u32,
+    pub server_index: u32,
+    pub property_type: u32,
+    pub flags: u32,
+    pub template: Option<String>,
+}
+
+/// Exact settings returned for one address family. Optional strings/lists
+/// preserve the distinction between an absent Windows value and an explicit
+/// configured list. Effective resolver addresses remain separate from the
+/// adapter/profile-configured name-server lists.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DnsStackConfiguration {
+    pub settings_version: u32,
+    pub encrypted_dns_adapter_flags: Option<u32>,
+    pub name_servers: Option<Vec<IpAddr>>,
+    pub profile_name_servers: Option<Vec<IpAddr>>,
+    pub effective_name_servers: Vec<IpAddr>,
+    pub domain: Option<String>,
+    pub search_list: Option<Vec<String>>,
+    pub supplemental_search_list: Option<Vec<String>>,
+    pub registration_enabled: u32,
+    pub register_adapter_name: u32,
+    pub enable_llmnr: u32,
+    pub query_adapter_name: u32,
+    pub disable_unconstrained_queries: u32,
+    pub settings_flags: u64,
+    pub server_properties: Vec<DnsDohServerProperty>,
+    pub profile_server_properties: Vec<DnsDohServerProperty>,
+}
+
+/// A recovery-grade DNS snapshot is complete only when Windows returned both
+/// family settings for the same stable interface GUID. A missing family is
+/// Unknown, never an implicit "no DNS" configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DnsInterfaceConfiguration {
+    pub interface_guid: String,
+    pub ipv4: Option<DnsStackConfiguration>,
+    pub ipv6: Option<DnsStackConfiguration>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "servers", rename_all = "camelCase")]
 pub enum DnsConfiguration {
+    /// Legacy version-1 representation. It is not sufficient for
+    /// NetworkConfigured recovery acceptance.
     Dhcp,
     Static(Vec<IpAddr>),
+    /// Complete configured and effective DNS state for both IP families.
+    Interface(DnsInterfaceConfiguration),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DnsMutationRecord {
     pub interface_index: u32,
+    /// Stable interface identity; absent only in legacy records.
+    #[serde(default)]
+    pub interface_guid: Option<String>,
     pub applied: DnsConfiguration,
     pub previous: DnsConfiguration,
 }
@@ -195,12 +249,20 @@ impl RecoveryJournal {
             return Err("The recovery journal contains too many DNS interface mutations.".to_string());
         }
         let mut dns_interfaces = BTreeSet::new();
+        let mut dns_interface_guids = BTreeSet::new();
         for change in &self.dns {
             if change.interface_index == 0 || !dns_interfaces.insert(change.interface_index) {
-                return Err("The recovery journal contains an invalid or duplicate DNS interface.".to_string());
+                return Err("The recovery journal contains an invalid or duplicate DNS interface index.".to_string());
+            }
+            if let Some(guid) = &change.interface_guid {
+                validate_guid(guid)?;
+                if !dns_interface_guids.insert(guid.as_str()) {
+                    return Err("The recovery journal contains a duplicate stable DNS interface GUID.".to_string());
+                }
             }
             validate_dns_configuration(&change.applied)?;
             validate_dns_configuration(&change.previous)?;
+            validate_dns_interface_binding(change)?;
         }
         if self.firewall_filters.len() > MAX_FIREWALL_FILTERS {
             return Err("The recovery journal contains too many firewall filter identities.".to_string());
@@ -269,13 +331,23 @@ impl RecoveryJournal {
             return Err("The journal phase requires a verified tunnel interface identity.".to_string());
         }
 
-        if self.phase == JournalPhase::NetworkConfigured
-            && (self.routes.is_empty() || self.dns.is_empty())
-        {
-            return Err(
-                "The network-configured journal phase requires recorded route and DNS mutations."
-                    .to_string(),
-            );
+        if self.phase == JournalPhase::NetworkConfigured {
+            if self.routes.is_empty() || self.dns.is_empty() {
+                return Err(
+                    "The network-configured journal phase requires recorded route and DNS mutations."
+                        .to_string(),
+                );
+            }
+            if self.dns.iter().any(|change| {
+                change.interface_guid.is_none()
+                    || !is_complete_dual_stack(&change.previous)
+                    || !is_complete_dual_stack(&change.applied)
+            }) {
+                return Err(
+                    "NetworkConfigured requires stable-GUID DNS snapshots with complete IPv4 and IPv6 state for both previous and applied settings."
+                        .to_string(),
+                );
+            }
         }
 
         Ok(())
@@ -318,15 +390,168 @@ fn validate_route_state(state: &RouteState, destination: IpAddr) -> Result<(), S
     Ok(())
 }
 
+const MAX_DNS_EFFECTIVE_SERVERS: usize = 64;
+const MAX_DNS_PROPERTIES: usize = 8;
+const MAX_DNS_SEARCH_NAMES: usize = 32;
+const MAX_DNS_TEXT_BYTES: usize = 4096;
+const DNS_INTERFACE_SETTINGS_VERSION3: u32 = 3;
+const DNS_SERVER_PROPERTY_VERSION1: u32 = 1;
+const DNS_SERVER_PROPERTY_TYPE_DOH: u32 = 1;
+
 fn validate_dns_configuration(configuration: &DnsConfiguration) -> Result<(), String> {
-    if let DnsConfiguration::Static(servers) = configuration {
-        if servers.is_empty() || servers.len() > MAX_DNS_SERVERS {
-            return Err("The recovery journal contains an invalid DNS server list.".to_string());
+    match configuration {
+        DnsConfiguration::Dhcp => Ok(()),
+        DnsConfiguration::Static(servers) => validate_dns_ip_list(servers, None, MAX_DNS_SERVERS),
+        DnsConfiguration::Interface(interface) => {
+            validate_guid(&interface.interface_guid)?;
+            let ipv4 = interface.ipv4.as_ref().ok_or_else(|| {
+                "The DNS interface snapshot is missing its IPv4 settings.".to_string()
+            })?;
+            let ipv6 = interface.ipv6.as_ref().ok_or_else(|| {
+                "The DNS interface snapshot is missing its IPv6 settings.".to_string()
+            })?;
+            validate_dns_stack(ipv4, true)?;
+            validate_dns_stack(ipv6, false)
         }
-        let unique: BTreeSet<_> = servers.iter().collect();
-        if unique.len() != servers.len() {
-            return Err("The recovery journal contains duplicate DNS servers.".to_string());
+    }
+}
+
+fn validate_dns_interface_binding(change: &DnsMutationRecord) -> Result<(), String> {
+    for configuration in [&change.applied, &change.previous] {
+        if let DnsConfiguration::Interface(interface) = configuration {
+            let Some(recorded_guid) = change.interface_guid.as_deref() else {
+                return Err("A full DNS snapshot requires a stable interface GUID in its mutation record.".into());
+            };
+            if !interface.interface_guid.eq_ignore_ascii_case(recorded_guid) {
+                return Err("The DNS snapshot GUID does not match its mutation-record interface GUID.".into());
+            }
         }
+    }
+    Ok(())
+}
+
+fn is_complete_dual_stack(configuration: &DnsConfiguration) -> bool {
+    matches!(
+        configuration,
+        DnsConfiguration::Interface(DnsInterfaceConfiguration {
+            ipv4: Some(_),
+            ipv6: Some(_),
+            ..
+        })
+    )
+}
+
+fn validate_dns_stack(stack: &DnsStackConfiguration, ipv4: bool) -> Result<(), String> {
+    if stack.settings_version != DNS_INTERFACE_SETTINGS_VERSION3 {
+        return Err("The DNS snapshot uses an unsupported interface-settings version.".into());
+    }
+    validate_dns_ip_list(
+        stack.effective_name_servers.as_slice(),
+        Some(ipv4),
+        MAX_DNS_EFFECTIVE_SERVERS,
+    )?;
+    if let Some(servers) = &stack.name_servers {
+        validate_dns_ip_list(servers, Some(ipv4), MAX_DNS_SERVERS)?;
+    }
+    if let Some(servers) = &stack.profile_name_servers {
+        validate_dns_ip_list(servers, Some(ipv4), MAX_DNS_SERVERS)?;
+    }
+
+    for flag in [
+        stack.registration_enabled,
+        stack.register_adapter_name,
+        stack.enable_llmnr,
+        stack.query_adapter_name,
+    ] {
+        if flag > 1 {
+            return Err("The DNS snapshot contains a non-boolean setting flag.".into());
+        }
+    }
+
+    if let Some(domain) = stack.domain.as_deref() {
+        validate_dns_text(domain, 253)?;
+    }
+    for names in [
+        stack.search_list.as_ref(),
+        stack.supplemental_search_list.as_ref(),
+    ].into_iter().flatten() {
+        if names.len() > MAX_DNS_SEARCH_NAMES {
+            return Err("The DNS snapshot contains too many search-list entries.".into());
+        }
+        let mut unique = BTreeSet::new();
+        for name in names {
+            validate_dns_text(name, 253)?;
+            if !unique.insert(name.to_ascii_lowercase()) {
+                return Err("The DNS snapshot contains duplicate search-list entries.".into());
+            }
+        }
+    }
+
+    validate_dns_doh_properties(&stack.server_properties, stack.name_servers.as_deref())?;
+    validate_dns_doh_properties(
+        &stack.profile_server_properties,
+        stack.profile_name_servers.as_deref(),
+    )?;
+    Ok(())
+}
+
+fn validate_dns_ip_list(
+    servers: &[IpAddr],
+    ipv4: Option<bool>,
+    maximum: usize,
+) -> Result<(), String> {
+    if servers.len() > maximum || (maximum == MAX_DNS_SERVERS && servers.is_empty()) {
+        return Err("The recovery journal contains an invalid DNS server list.".to_string());
+    }
+    let mut unique = BTreeSet::new();
+    for server in servers {
+        if server.is_unspecified()
+            || server.is_multicast()
+            || ipv4.is_some_and(|expected| server.is_ipv4() != expected)
+            || !unique.insert(*server)
+        {
+            return Err("The DNS server list contains an invalid, duplicate, or wrong-family address.".into());
+        }
+    }
+    Ok(())
+}
+
+fn validate_dns_text(value: &str, maximum: usize) -> Result<(), String> {
+    if value.len() > maximum.min(MAX_DNS_TEXT_BYTES)
+        || value.trim().is_empty()
+        || value.chars().any(char::is_control)
+    {
+        return Err("The DNS snapshot contains an invalid or oversized text value.".into());
+    }
+    Ok(())
+}
+
+fn validate_dns_doh_properties(
+    properties: &[DnsDohServerProperty],
+    servers: Option<&[IpAddr]>,
+) -> Result<(), String> {
+    if properties.len() > MAX_DNS_PROPERTIES {
+        return Err("The DNS-over-HTTPS property list exceeds its safe bound.".into());
+    }
+    if !properties.is_empty() && servers.is_none() {
+        return Err("DNS-over-HTTPS properties require their corresponding configured server list.".into());
+    }
+    let mut indexes = BTreeSet::new();
+    for property in properties {
+        let Some(servers) = servers else {
+            return Err("A DNS-over-HTTPS property has no corresponding server list.".into());
+        };
+        if property.version != DNS_SERVER_PROPERTY_VERSION1
+            || property.property_type != DNS_SERVER_PROPERTY_TYPE_DOH
+            || property.server_index as usize >= servers.len()
+            || !indexes.insert(property.server_index)
+        {
+            return Err("The DNS-over-HTTPS property version or server index is invalid.".into());
+        }
+        let Some(template) = property.template.as_deref() else {
+            return Err("A DNS-over-HTTPS property is missing its template.".into());
+        };
+        validate_dns_text(template, 2048)?;
     }
     Ok(())
 }
@@ -661,6 +886,7 @@ mod tests {
         });
         journal.dns.push(DnsMutationRecord {
             interface_index: 12,
+            interface_guid: None,
             applied: DnsConfiguration::Static(vec!["198.18.0.1".parse().unwrap()]),
             previous: DnsConfiguration::Dhcp,
         });
@@ -671,6 +897,48 @@ mod tests {
             filter_id: Some(77),
         });
         journal
+    }
+
+    fn example_dns_stack(ipv4: bool) -> DnsStackConfiguration {
+        let server = if ipv4 {
+            "192.0.2.53".parse().unwrap()
+        } else {
+            "2001:db8::53".parse().unwrap()
+        };
+        DnsStackConfiguration {
+            settings_version: DNS_INTERFACE_SETTINGS_VERSION3,
+            encrypted_dns_adapter_flags: None,
+            name_servers: Some(vec![server]),
+            profile_name_servers: None,
+            effective_name_servers: vec![server],
+            domain: Some("example.test".to_string()),
+            search_list: Some(vec!["example.test".to_string()]),
+            supplemental_search_list: Some(Vec::new()),
+            registration_enabled: 1,
+            register_adapter_name: 1,
+            enable_llmnr: 0,
+            query_adapter_name: 1,
+            disable_unconstrained_queries: 0,
+            settings_flags: 0,
+            server_properties: Vec::new(),
+            profile_server_properties: Vec::new(),
+        }
+    }
+
+    fn example_dns_interface(guid: &str) -> DnsInterfaceConfiguration {
+        DnsInterfaceConfiguration {
+            interface_guid: guid.to_string(),
+            ipv4: Some(example_dns_stack(true)),
+            ipv6: Some(example_dns_stack(false)),
+        }
+    }
+
+    fn make_network_configured_dns_complete(journal: &mut RecoveryJournal) {
+        let guid = "4d36e972-e325-11ce-bfc1-08002be10318";
+        let full = DnsConfiguration::Interface(example_dns_interface(guid));
+        journal.dns[0].interface_guid = Some(guid.to_string());
+        journal.dns[0].applied = full.clone();
+        journal.dns[0].previous = full;
     }
 
     #[test]
@@ -719,6 +987,7 @@ mod tests {
         let mut network = tunnel;
         network.revision = 5;
         network.phase = JournalPhase::NetworkConfigured;
+        make_network_configured_dns_complete(&mut network);
         store.persist(&network).unwrap();
 
         let loaded = store.load_unresolved().unwrap();
@@ -726,6 +995,79 @@ mod tests {
         assert_eq!(loaded[0].revision, 5);
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejects_network_configured_phase_with_legacy_or_partial_dns_state() {
+        let mut legacy = example_journal(86, 1);
+        legacy.phase = JournalPhase::NetworkConfigured;
+        assert!(legacy.validate().is_err());
+
+        let mut partial = example_journal(87, 1);
+        partial.phase = JournalPhase::NetworkConfigured;
+        make_network_configured_dns_complete(&mut partial);
+        let DnsConfiguration::Interface(interface) = &mut partial.dns[0].applied else {
+            panic!("test fixture must use an interface DNS snapshot");
+        };
+        interface.ipv6 = None;
+        assert!(partial.validate().is_err());
+
+        let mut no_stable_guid = example_journal(88, 1);
+        no_stable_guid.phase = JournalPhase::NetworkConfigured;
+        make_network_configured_dns_complete(&mut no_stable_guid);
+        no_stable_guid.dns[0].interface_guid = None;
+        assert!(no_stable_guid.validate().is_err());
+    }
+
+    #[test]
+    fn validates_dual_stack_dns_family_identity_and_effective_lists() {
+        let guid = "4d36e972-e325-11ce-bfc1-08002be10318";
+        let mut journal = example_journal(89, 1);
+        let full = DnsConfiguration::Interface(example_dns_interface(guid));
+        journal.dns[0].interface_guid = Some(guid.to_string());
+        journal.dns[0].applied = full.clone();
+        journal.dns[0].previous = full.clone();
+        journal.validate().unwrap();
+
+        let mut wrong_family = full.clone();
+        let DnsConfiguration::Interface(interface) = &mut wrong_family else {
+            unreachable!();
+        };
+        interface.ipv6.as_mut().unwrap().effective_name_servers =
+            vec!["192.0.2.54".parse().unwrap()];
+        assert!(validate_dns_configuration(&wrong_family).is_err());
+
+        let mut mismatched_guid = journal.clone();
+        mismatched_guid.dns[0].interface_guid =
+            Some("6d36e972-e325-11ce-bfc1-08002be10318".to_string());
+        assert!(mismatched_guid.validate().is_err());
+    }
+
+    #[test]
+    fn validates_doh_properties_against_the_exact_server_list() {
+        let mut stack = example_dns_stack(true);
+        stack.server_properties.push(DnsDohServerProperty {
+            version: DNS_SERVER_PROPERTY_VERSION1,
+            server_index: 0,
+            property_type: 1,
+            flags: 0,
+            template: Some("https://dns.example.test/dns-query{?dns}".to_string()),
+        });
+        validate_dns_stack(&stack, true).unwrap();
+
+        stack.server_properties[0].server_index = 2;
+        assert!(validate_dns_stack(&stack, true).is_err());
+    }
+
+    #[test]
+    fn missing_legacy_interface_guid_deserializes_but_cannot_authorize_network_configured() {
+        let json = r#"{
+            "interfaceIndex": 12,
+            "applied": {"kind": "dhcp"},
+            "previous": {"kind": "dhcp"}
+        }"#;
+        let record: DnsMutationRecord = serde_json::from_str(json).unwrap();
+        assert!(record.interface_guid.is_none());
     }
 
     #[test]

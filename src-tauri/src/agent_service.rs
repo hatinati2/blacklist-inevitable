@@ -371,6 +371,7 @@ mod windows_service {
             assert!(!is_wfp_only_recovery_session(&empty));
             empty.dns.push(DnsMutationRecord {
                 interface_index: 7,
+                interface_guid: None,
                 applied: DnsConfiguration::Static(vec![
                     "203.0.113.53".parse().expect("valid test DNS"),
                 ]),

@@ -16,6 +16,25 @@ The schema does not contain profile credentials, share links, engine JSON, comma
 
 `FirewallFilterRecord.filterKey` is optional only for compatibility with older version-1 records that predate stable filter-key recording. Newly created WFP filter records must always include a canonical filter GUID. `filterId` is optional so a complete stable-key intent can be persisted before adding a filter; after a successful BFE read-back, a later journal revision may attach the runtime ID for diagnostics. Recovery must never attempt to delete a legacy filter using only its runtime ID; it must enumerate and reconcile exact provider-owned filters or leave policy cleanup unconfirmed.
 
+## Dual-stack DNS evidence gate
+
+A `NetworkConfigured` checkpoint is accepted only when every journalled DNS
+interface has a stable interface GUID and complete IPv4 and IPv6 snapshots for
+both its previous and applied settings. Each family snapshot preserves adapter
+servers, profile servers, effective resolver addresses, domain/search settings,
+registration/query/LLMNR flags and per-server DoH properties. The two family
+snapshots must belong to the same stable interface GUID. Wrong-family addresses,
+invalid DoH server indexes, partial family data, and legacy DHCP/static-only
+records are rejected for this phase.
+
+This is a journal acceptance rule, not a claim that the live observer already
+provides complete dual-stack data. The current Windows getter path has not yet
+established a documented way to retrieve both family-specific settings in one
+recovery-grade observation. Until that observer is complete and validated on
+Windows 10/11, `NetworkConfigured` cannot be persisted and DNS recovery remains
+blocked. Effective resolver addresses alone are not a substitute for the
+adapter/profile configuration.
+
 ## Monotonic transaction phases
 
 The durable phase is an enforced ordering contract, not a free-form status label.
@@ -33,7 +52,8 @@ Each phase also requires its minimum durable evidence: `EgressProtected` and
 later phases require stable WFP filter keys with committed runtime IDs;
 `EngineStarted` and later require the exact process ID plus creation time;
 `TunnelCreated` and later require the tunnel GUID/index/address record; and
-`NetworkConfigured` requires route and DNS mutation records. The store rejects
+`NetworkConfigured` requires route records and complete dual-stack DNS snapshots
+for both previous and applied settings. The store rejects
 out-of-order or incomplete checkpoints before writing a new revision.
 
 These journal checks do not prove that live Windows resources match the record.

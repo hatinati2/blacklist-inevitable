@@ -180,9 +180,15 @@ fn validate_suffix_list(values: &Option<Vec<String>>, field: &str) -> Result<(),
     Ok(())
 }
 
-fn is_supported_protocol_if_type(value: u16) -> bool {
+fn is_supported_client_protocol_if_type(value: u16) -> bool {
     // MSFT_DNSClient documents 4096 (IPv4), 4097 (IPv6), and 4098 (IPv4/v6).
     matches!(value, 4096 | 4097 | 4098)
+}
+
+fn is_supported_global_protocol_if_type(value: u16) -> bool {
+    // MSFT_DNSClientGlobalSetting documents only separate IPv4 (4096)
+    // and IPv6 (4097) policy rows; 4098 is not listed for this class.
+    matches!(value, 4096 | 4097)
 }
 
 fn validate_snapshot(
@@ -274,7 +280,7 @@ fn validate_snapshot(
         }
         let protocol = row.protocol_if_type
             .ok_or_else(|| "The DNS WMI client row omitted ProtocolIFType.".to_string())?;
-        if !is_supported_protocol_if_type(protocol) || !seen_client_protocols.insert(protocol) {
+        if !is_supported_client_protocol_if_type(protocol) || !seen_client_protocols.insert(protocol) {
             return Err("The DNS WMI client inventory contains an unsupported or duplicate protocol row.".into());
         }
         if row.connection_specific_suffix.as_ref().is_some_and(|v| v.len() > MAX_SUFFIX_BYTES || v.contains('\0')) {
@@ -300,7 +306,7 @@ fn validate_snapshot(
     for row in global_rows {
         let protocol = row.protocol_if_type
             .ok_or_else(|| "The DNS WMI global-settings row omitted ProtocolIFType.".to_string())?;
-        if !is_supported_protocol_if_type(protocol) || !seen_global_protocols.insert(protocol) {
+        if !is_supported_global_protocol_if_type(protocol) || !seen_global_protocols.insert(protocol) {
             return Err("The DNS WMI global-settings inventory contains an unsupported or duplicate protocol row.".into());
         }
         validate_suffix_list(&row.dns_suffixes_to_append, "global suffix list")?;
@@ -643,6 +649,15 @@ mod tests {
             use_suffix_when_registering: None,
             dhcp_options_to_use: None,
         }).collect());
+        assert!(validate_snapshot(snapshot, &identity(), &[v4], &[v6]).is_err());
+    }
+
+    #[test]
+    fn rejects_combined_protocol_type_for_global_settings() {
+        let mut snapshot = raw_snapshot();
+        snapshot.global_settings.as_mut().unwrap()[0].protocol_if_type = Some(4098);
+        let v4: IpAddr = "192.0.2.53".parse().unwrap();
+        let v6: IpAddr = "2001:db8::53".parse().unwrap();
         assert!(validate_snapshot(snapshot, &identity(), &[v4], &[v6]).is_err());
     }
 

@@ -1,9 +1,9 @@
 //! Dedicated Windows Service Control Manager host for the privileged Agent.
 //!
-//! The service owns the local authenticated status-only named pipe. Startup may
-//! remove exact Agent-owned WFP filters for isolated WFP-only recovery journals;
-//! installing traffic policy, starting an engine, TUN, route and DNS operations
-//! remain disabled until the full recovery and packet-capture release gates pass.
+//! The service owns the local authenticated status and read-only preparation pipe.
+//! Startup may remove exact Agent-owned WFP filters for isolated WFP-only recovery
+//! journals; installing traffic policy, starting an engine, TUN, route and DNS
+//! mutations remain disabled until the full recovery and packet-capture gates pass.
 
 #[cfg(windows)]
 mod windows_service {
@@ -222,7 +222,7 @@ mod windows_service {
             .map(|detail| format!(" WFP recovery is incomplete: {detail}."))
             .unwrap_or_default();
         format!(
-            "The privileged Agent is running in status-only mode. Startup journal result: {recovery_state}; {journal_state}. Sessions containing engine, TUN, route, or DNS state are not auto-cleaned. Connect, Disconnect, and Recover remain disabled.{failure_state}"
+            "The privileged Agent is running in status and read-only endpoint-preparation mode. Startup journal result: {recovery_state}; {journal_state}. Sessions containing engine, TUN, route, or DNS state are not auto-cleaned. Connect, Disconnect, and Recover remain disabled.{failure_state}"
         )
     }
 
@@ -590,10 +590,8 @@ mod windows_service {
                         // token. Do not run any further cleanup/status code under it.
                         std::process::exit(ERROR_GEN_FAILURE as i32);
                     }
-                    if !STOP_REQUESTED.load(Ordering::Acquire) {
-                        eprintln!("Agent named-pipe listener stopped unexpectedly: {error}");
-                        exit_code = ERROR_GEN_FAILURE;
-                    }
+                    eprintln!("Agent named-pipe listener or preparation cleanup failed: {error}");
+                    exit_code = ERROR_GEN_FAILURE;
                 }
             }
         }

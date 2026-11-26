@@ -394,9 +394,10 @@ pub fn build_recovery_intent_plan(
                         let matching = actual_routes
                             .iter()
                             .filter(|actual| same_route_state(actual, &record.applied))
-                            .collect::<Vec<_>>();
+                            .cloned()
+                            .collect::<Vec<RouteState>>();
                         match matching.as_slice() {
-                            [actual] => Some((*actual).clone()),
+                            [actual] => Some(actual.clone()),
                             [] => None,
                             _ => {
                                 push_recovery_plan_blocker(
@@ -1435,7 +1436,7 @@ mod tests {
         first.destination_prefix = "192.0.2.0/24".into();
         first.previous = None;
         let mut second = route_record();
-        second.destination_prefix = "192.0.2.7/24".into();
+        second.destination_prefix = "192.0.2.0/24".into();
         second.previous = None;
         second.applied.interface_index = 29;
         second.applied.interface_luid = Some(0x0001_0000_0000_0029);
@@ -1506,6 +1507,27 @@ mod tests {
         assert_eq!(plan.state, RecoveryPlanState::Blocked);
         assert!(plan.intents.is_empty());
         assert!(!plan.journal_removal_authorized);
+    }
+
+    #[test]
+    fn both_previous_and_applied_rows_present_for_one_mutation_is_conflict() {
+        let mut journal = RecoveryJournal::new(112);
+        let mut route = route_record();
+        route.destination_prefix = "198.51.100.0/24".into();
+        journal.routes.push(route.clone());
+
+        let mut snapshot = empty_snapshot();
+        snapshot.routes.insert(
+            route.destination_prefix.clone(),
+            Observation::Present(vec![
+                route.applied,
+                route.previous.unwrap(),
+            ]),
+        );
+        assert_eq!(
+            assess_recovery(&journal, &snapshot).routes[0].disposition,
+            ResourceDisposition::Conflict
+        );
     }
 
     #[test]

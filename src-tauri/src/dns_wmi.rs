@@ -346,9 +346,9 @@ fn validate_snapshot(
 }
 
 /// Query the documented root\StandardCimv2 DNS Client classes for one journaled
-/// interface. The journal stores its GUID and diagnostic index; the unique live
-/// NET_LUID is resolved from that GUID, then GUID/LUID/index/alias are rechecked
-/// after WMI returns. The historical journal does not persist a NET_LUID.
+/// interface. The journal stores the historical GUID + NET_LUID and a
+/// diagnostic index; the current mapping is checked before and after WMI returns.
+/// WMI InterfaceIndex/Alias values are only transient cross-checks.
 /// The result is diagnostic evidence only and never enters RecoverySnapshot.
 #[cfg(windows)]
 pub fn observe_recorded_dns_wmi(
@@ -391,6 +391,12 @@ mod windows {
     ) -> Result<InterfaceIdentity, String> {
         let guid_text = expected.interface_guid.as_deref()
             .ok_or_else(|| "The DNS journal record has no stable interface GUID.".to_string())?;
+        let expected_luid = expected.interface_luid
+            .filter(|luid| *luid != 0)
+            .ok_or_else(|| "The DNS journal record has no historical NET_LUID.".to_string())?;
+        if expected.interface_index == 0 {
+            return Err("The DNS journal interface index is invalid.".into());
+        }
         let expected_guid = uuid::Uuid::parse_str(guid_text)
             .map_err(|_| "The DNS journal interface GUID is malformed.".to_string())?;
         if !expected_guid.to_string().eq_ignore_ascii_case(guid_text) {
@@ -442,6 +448,9 @@ mod windows {
             let luid = unsafe { row.InterfaceLuid.Value };
             if index == 0 || luid == 0 {
                 return Err("Windows returned an invalid current DNS interface index or NET_LUID.".into());
+            }
+            if luid != expected_luid {
+                return Err("The current DNS interface NET_LUID does not match the historical journaled NET_LUID.".into());
             }
             let alias_end = row.Alias.iter().position(|unit| *unit == 0)
                 .ok_or_else(|| "GetIfTable2 returned an unterminated interface alias.".to_string())?;
@@ -801,6 +810,7 @@ mod tests {
             let record = DnsMutationRecord {
                 interface_index: index,
                 interface_guid: Some(guid.clone()),
+                interface_luid: Some(luid),
                 applied: DnsConfiguration::Dhcp,
                 previous: DnsConfiguration::Dhcp,
             };

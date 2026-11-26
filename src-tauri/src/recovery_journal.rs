@@ -148,6 +148,10 @@ pub struct DnsStackConfiguration {
 pub struct DnsInterfaceConfiguration {
     /// Stable adapter GUID. Interface indexes are diagnostic only.
     pub interface_guid: String,
+    /// NET_LUID observed when the mutation was journaled. Missing only in
+    /// legacy version-1 records; such snapshots cannot authorize recovery.
+    #[serde(default)]
+    pub interface_luid: Option<u64>,
     /// None means the observer could not establish a complete stack snapshot.
     pub ipv4: Option<DnsStackConfiguration>,
     pub ipv6: Option<DnsStackConfiguration>,
@@ -171,8 +175,50 @@ pub struct DnsMutationRecord {
     /// Stable adapter identity. Missing only in legacy version-1 journals.
     #[serde(default)]
     pub interface_guid: Option<String>,
+    /// Historical NET_LUID captured at mutation time. Legacy records without
+    /// this field remain readable but cannot produce positive DNS assessments.
+    #[serde(default)]
+    pub interface_luid: Option<u64>,
     pub applied: DnsConfiguration,
     pub previous: DnsConfiguration,
+}
+
+impl DnsMutationRecord {
+    /// Build a new complete DNS mutation record with the adapter identity
+    /// captured before any network mutation. Legacy deserialized records may
+    /// omit NET_LUID, but new records must use this constructor (or satisfy
+    /// the same invariants) and may never infer a historical LUID later.
+    pub fn new(
+        interface_index: u32,
+        interface_guid: String,
+        interface_luid: u64,
+        applied: DnsConfiguration,
+        previous: DnsConfiguration,
+    ) -> Result<Self, String> {
+        if interface_index == 0 || interface_luid == 0 {
+            return Err("A new DNS journal record requires a nonzero interface index and NET_LUID.".into());
+        }
+        validate_guid(&interface_guid)?;
+        for configuration in [&applied, &previous] {
+            validate_dns_configuration(configuration)?;
+            let DnsConfiguration::Interface(snapshot) = configuration else {
+                return Err("A new DNS journal record requires complete dual-stack interface snapshots.".into());
+            };
+            if snapshot.interface_guid != interface_guid
+                || snapshot.interface_luid != Some(interface_luid)
+            {
+                return Err("A DNS snapshot does not match the mutation-time GUID and NET_LUID.".into());
+            }
+        }
+
+        Ok(Self {
+            interface_index,
+            interface_guid: Some(interface_guid),
+            interface_luid: Some(interface_luid),
+            applied,
+            previous,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -287,12 +333,18 @@ impl RecoveryJournal {
             return Err("The recovery journal contains too many DNS interface mutations.".to_string());
         }
         let mut dns_interfaces = BTreeSet::new();
+        let mut dns_luids = BTreeSet::new();
         for change in &self.dns {
             if change.interface_index == 0 || !dns_interfaces.insert(change.interface_index) {
                 return Err("The recovery journal contains an invalid or duplicate DNS interface.".to_string());
             }
             if let Some(interface_guid) = &change.interface_guid {
                 validate_guid(interface_guid)?;
+            }
+            if let Some(interface_luid) = change.interface_luid {
+                if interface_luid == 0 || !dns_luids.insert(interface_luid) {
+                    return Err("The recovery journal contains an invalid or duplicate DNS interface NET_LUID.".to_string());
+                }
             }
             validate_dns_configuration(&change.applied)?;
             validate_dns_configuration(&change.previous)?;
@@ -301,6 +353,9 @@ impl RecoveryJournal {
                     validate_guid(&snapshot.interface_guid)?;
                     if change.interface_guid.as_deref() != Some(snapshot.interface_guid.as_str()) {
                         return Err("The DNS snapshot GUID does not match its journaled interface identity.".to_string());
+                    }
+                    if snapshot.interface_luid == Some(0) || snapshot.interface_luid != change.interface_luid {
+                        return Err("The DNS snapshot NET_LUID does not match its journaled interface identity.".to_string());
                     }
                 }
             }
@@ -372,6 +427,9 @@ fn validate_dns_configuration(configuration: &DnsConfiguration) -> Result<(), St
         }
         DnsConfiguration::Interface(snapshot) => {
             validate_guid(&snapshot.interface_guid)?;
+            if snapshot.interface_luid == Some(0) {
+                return Err("The DNS interface snapshot contains an invalid NET_LUID.".to_string());
+            }
             let ipv4 = snapshot.ipv4.as_ref().ok_or_else(|| {
                 "The recovery journal is missing the IPv4 DNS snapshot.".to_string()
             })?;
@@ -909,6 +967,7 @@ mod tests {
         journal.dns.push(DnsMutationRecord {
             interface_index: 12,
             interface_guid: Some("4d36e972-e325-11ce-bfc1-08002be10318".into()),
+            interface_luid: None,
             applied: DnsConfiguration::Static(vec!["198.18.0.1".parse().unwrap()]),
             previous: DnsConfiguration::Dhcp,
         });
@@ -1052,6 +1111,7 @@ mod tests {
     fn complete_dns_configuration() -> DnsConfiguration {
         DnsConfiguration::Interface(DnsInterfaceConfiguration {
             interface_guid: "4d36e972-e325-11ce-bfc1-08002be10318".into(),
+            interface_luid: Some(0x0001_0000_0000_000C),
             ipv4: Some(dns_stack(false, "192.0.2.53")),
             ipv6: Some(dns_stack(true, "2001:db8::53")),
         })
@@ -1091,11 +1151,56 @@ mod tests {
     }
 
     #[test]
+    fn new_dns_mutation_record_requires_complete_historical_interface_identity() {
+        let applied = complete_dns_configuration();
+        let previous = complete_dns_configuration();
+        let record = DnsMutationRecord::new(
+            12,
+            "4d36e972-e325-11ce-bfc1-08002be10318".into(),
+            0x0001_0000_0000_000C,
+            applied.clone(),
+            previous.clone(),
+        )
+        .unwrap();
+        assert_eq!(record.interface_luid, Some(0x0001_0000_0000_000C));
+
+        assert!(DnsMutationRecord::new(
+            12,
+            "4d36e972-e325-11ce-bfc1-08002be10318".into(),
+            0,
+            applied.clone(),
+            previous.clone(),
+        ).is_err());
+
+        assert!(DnsMutationRecord::new(
+            12,
+            "4d36e972-e325-11ce-bfc1-08002be10318".into(),
+            0x0001_0000_0000_000C,
+            DnsConfiguration::Dhcp,
+            previous,
+        ).is_err());
+
+        let mut wrong_luid = match applied {
+            DnsConfiguration::Interface(config) => config,
+            _ => unreachable!(),
+        };
+        wrong_luid.interface_luid = Some(0x0001_0000_0000_000D);
+        assert!(DnsMutationRecord::new(
+            12,
+            "4d36e972-e325-11ce-bfc1-08002be10318".into(),
+            0x0001_0000_0000_000C,
+            DnsConfiguration::Interface(wrong_luid),
+            complete_dns_configuration(),
+        ).is_err());
+    }
+
+    #[test]
     fn complete_dual_stack_dns_configuration_round_trips() {
         let mut journal = RecoveryJournal::new(76);
         journal.dns.push(DnsMutationRecord {
             interface_index: 12,
             interface_guid: Some("4d36e972-e325-11ce-bfc1-08002be10318".into()),
+            interface_luid: Some(0x0001_0000_0000_000C),
             applied: complete_dns_configuration(),
             previous: complete_dns_configuration(),
         });
@@ -1104,6 +1209,51 @@ mod tests {
         let encoded = serde_json::to_vec(&journal).unwrap();
         let decoded: RecoveryJournal = serde_json::from_slice(&encoded).unwrap();
         assert_eq!(decoded, journal);
+    }
+
+    #[test]
+    fn rejects_dns_luid_zero_duplicate_and_snapshot_mismatch() {
+        let mut journal = RecoveryJournal::new(83);
+        journal.dns.push(DnsMutationRecord {
+            interface_index: 12,
+            interface_guid: Some("4d36e972-e325-11ce-bfc1-08002be10318".into()),
+            interface_luid: Some(0),
+            applied: complete_dns_configuration(),
+            previous: complete_dns_configuration(),
+        });
+        assert!(journal.validate().is_err());
+
+        let mut journal = RecoveryJournal::new(84);
+        journal.dns.push(DnsMutationRecord {
+            interface_index: 12,
+            interface_guid: Some("4d36e972-e325-11ce-bfc1-08002be10318".into()),
+            interface_luid: Some(0x0001_0000_0000_000C),
+            applied: complete_dns_configuration(),
+            previous: complete_dns_configuration(),
+        });
+        journal.dns.push(DnsMutationRecord {
+            interface_index: 13,
+            interface_guid: Some("6d6f8e80-62d4-4b90-a1b8-10ac74e55e20".into()),
+            interface_luid: Some(0x0001_0000_0000_000C),
+            applied: complete_dns_configuration(),
+            previous: complete_dns_configuration(),
+        });
+        assert!(journal.validate().is_err());
+
+        let mut journal = RecoveryJournal::new(85);
+        let mut mismatched = match complete_dns_configuration() {
+            DnsConfiguration::Interface(config) => config,
+            _ => unreachable!(),
+        };
+        mismatched.interface_luid = Some(0x0001_0000_0000_000D);
+        journal.dns.push(DnsMutationRecord {
+            interface_index: 12,
+            interface_guid: Some(mismatched.interface_guid.clone()),
+            interface_luid: Some(0x0001_0000_0000_000C),
+            applied: DnsConfiguration::Interface(mismatched),
+            previous: complete_dns_configuration(),
+        });
+        assert!(journal.validate().is_err());
     }
 
     #[test]
@@ -1117,6 +1267,7 @@ mod tests {
         journal.dns.push(DnsMutationRecord {
             interface_index: 12,
             interface_guid: Some(incomplete.interface_guid.clone()),
+            interface_luid: Some(0x0001_0000_0000_000C),
             applied: DnsConfiguration::Interface(incomplete),
             previous: complete_dns_configuration(),
         });
@@ -1132,6 +1283,7 @@ mod tests {
         journal.dns.push(DnsMutationRecord {
             interface_index: 12,
             interface_guid: Some(mismatched.interface_guid.clone()),
+            interface_luid: Some(0x0001_0000_0000_000C),
             applied: DnsConfiguration::Interface(mismatched),
             previous: complete_dns_configuration(),
         });
@@ -1158,6 +1310,7 @@ mod tests {
         journal.dns.push(DnsMutationRecord {
             interface_index: 12,
             interface_guid: Some(configuration.interface_guid.clone()),
+            interface_luid: Some(0x0001_0000_0000_000C),
             applied: DnsConfiguration::Interface(configuration.clone()),
             previous: complete_dns_configuration(),
         });
@@ -1198,6 +1351,7 @@ mod tests {
         journal.dns.push(DnsMutationRecord {
             interface_index: 12,
             interface_guid: Some(configuration.interface_guid.clone()),
+            interface_luid: Some(0x0001_0000_0000_000C),
             applied: DnsConfiguration::Interface(configuration.clone()),
             previous: DnsConfiguration::Interface(configuration),
         });
@@ -1216,6 +1370,7 @@ mod tests {
         journal.dns.push(DnsMutationRecord {
             interface_index: 12,
             interface_guid: Some(configuration.interface_guid.clone()),
+            interface_luid: Some(0x0001_0000_0000_000C),
             applied: DnsConfiguration::Interface(configuration.clone()),
             previous: DnsConfiguration::Interface(configuration),
         });
@@ -1231,6 +1386,7 @@ mod tests {
             .remove("interfaceGuid");
         let decoded: RecoveryJournal = serde_json::from_value(legacy).unwrap();
         assert_eq!(decoded.dns[0].interface_guid, None);
+        assert_eq!(decoded.dns[0].interface_luid, None);
         decoded.validate().unwrap();
     }
 

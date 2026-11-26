@@ -143,13 +143,22 @@ pub fn observe_recorded_dns(
     let Some(expected_guid_text) = expected.interface_guid.as_deref() else {
         return Ok(Observation::Unknown);
     };
+    let Some(recorded_luid) = expected.interface_luid.filter(|luid| *luid != 0) else {
+        // A current NET_LUID must never be promoted to historical journal data.
+        return Ok(Observation::Unknown);
+    };
     let expected_guid = uuid::Uuid::parse_str(expected_guid_text)
         .map_err(|_| "The recorded DNS interface GUID is invalid.".to_string())?;
-    if !expected_guid.to_string().eq_ignore_ascii_case(expected_guid_text) {
+    if !expected_guid.to_string().eq_ignore_ascii_case(expected_guid_text)
+        || expected.interface_index == 0
+    {
         return Ok(Observation::Unknown);
     }
 
-    let (interface_index, interface_luid) = {
+    // Resolve the journaled GUID against one bounded native inventory. The
+    // journaled LUID is historical evidence; the live table is only compared
+    // against it and is never substituted when the field is absent.
+    let read_identity = || -> Result<Option<(u32, u64)>, String> {
         let mut table: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
         let status = unsafe { GetIfTable2(&mut table) };
         if status != 0 {
@@ -166,8 +175,8 @@ pub fn observe_recorded_dns(
         let _table = OwnedIpHelperTable(table.cast());
 
         let count = unsafe { (*table).NumEntries as usize };
-        if count > MAX_INTERFACES {
-            return Err("The Windows interface inventory exceeds its safe bound.".into());
+        if count == 0 || count > MAX_INTERFACES {
+            return Err("The Windows interface inventory is empty or exceeds its safe bound.".into());
         }
         let rows = unsafe {
             std::slice::from_raw_parts(
@@ -189,13 +198,25 @@ pub fn observe_recorded_dns(
             if row.InterfaceIndex == 0 || luid == 0 {
                 return Err("Windows returned an invalid DNS interface identity.".into());
             }
+            if rows.iter().filter(|other| other.InterfaceIndex == row.InterfaceIndex).count() != 1
+                || rows.iter().filter(|other| unsafe { other.InterfaceLuid.Value } == luid).count() != 1
+            {
+                return Err("Windows returned an ambiguous DNS interface index or NET_LUID mapping.".into());
+            }
             found = Some((row.InterfaceIndex, luid));
         }
-        let Some(found) = found else {
-            return Ok(Observation::Absent);
-        };
-        found
+        Ok(found)
     };
+
+    let Some((interface_index, interface_luid)) = read_identity()? else {
+        return Ok(Observation::Absent);
+    };
+    // InterfaceIndex may change across adapter recreation or reboot. It is
+    // required to be nonzero/unique in each live inventory, but only the
+    // journaled GUID + NET_LUID establish durable identity.
+    if interface_luid != recorded_luid {
+        return Ok(Observation::Unknown);
+    }
 
     // GetInterfaceDnsSettings requires Version only on input and Flags zero.
     // Version 3 is required for complete per-server DoH properties; older
@@ -216,9 +237,8 @@ pub fn observe_recorded_dns(
     let settings_ptr = (&mut settings as *mut DNS_INTERFACE_SETTINGS3).cast::<DNS_INTERFACE_SETTINGS>();
     let _settings = OwnedInterfaceDnsSettings(settings_ptr);
 
-    // The address list provides effective DNS servers (including dynamic
-    // configuration); it is deliberately separate from configured and profile
-    // name-server lists returned by GetInterfaceDnsSettings.
+    // The address list provides effective DNS servers separately from the
+    // configured/profile lists in GetInterfaceDnsSettings.
     let effective = observe_effective_dns_servers(interface_luid)?;
     let is_ipv6 = settings.Flags
         & windows_sys::Win32::NetworkManagement::IpHelper::DNS_SETTING_IPV6 as u64
@@ -230,17 +250,19 @@ pub fn observe_recorded_dns(
     };
 
     let stack = copy_dns_stack(&settings, effective_name_servers)?;
+
+    // The native reads above span multiple API calls. Refuse the observation
+    // if the adapter identity changed while those snapshots were collected.
+    if read_identity()? != Some((interface_index, interface_luid)) {
+        return Ok(Observation::Unknown);
+    }
+
     let interface = crate::recovery_journal::DnsInterfaceConfiguration {
         interface_guid: expected_guid.to_string(),
+        interface_luid: Some(interface_luid),
         ipv4: (!is_ipv6).then_some(stack.clone()),
         ipv6: is_ipv6.then_some(stack),
     };
-
-    // Keep the current index as a consistency check. Interface GUID is the
-    // durable identity and the assessor also compares it before using a result.
-    if interface_index == 0 {
-        return Ok(Observation::Unknown);
-    }
 
     Ok(Observation::Present(
         crate::recovery_journal::DnsConfiguration::Interface(interface),
@@ -1043,6 +1065,7 @@ mod tests {
             let record = DnsMutationRecord {
                 interface_index: row.InterfaceIndex,
                 interface_guid: Some(interface_guid.clone()),
+                interface_luid: Some(unsafe { row.InterfaceLuid.Value }),
                 applied: DnsConfiguration::Dhcp,
                 previous: DnsConfiguration::Dhcp,
             };

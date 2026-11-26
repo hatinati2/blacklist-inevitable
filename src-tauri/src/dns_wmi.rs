@@ -56,7 +56,9 @@ pub struct DnsWmiClientSettings {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DnsWmiGlobalSettings {
-    pub protocol_if_type: u16,
+    /// Optional: some Windows providers omit this documented property at runtime.
+    /// Without it, retain global suffix policy without claiming a family association.
+    pub protocol_if_type: Option<u16>,
     pub append_primary_suffixes: Option<bool>,
     pub append_parent_suffixes: Option<bool>,
     pub dns_suffixes_to_append: Option<Vec<String>>,
@@ -140,7 +142,7 @@ fn decode_wmi_snapshot(bytes: &[u8], process_succeeded: bool) -> Result<RawWmiSn
     for (collection, fields) in [
         ("serverAddresses", &["InterfaceIndex", "InterfaceAlias", "AddressFamily", "ServerAddresses"][..]),
         ("clients", &["InterfaceIndex", "InterfaceAlias", "ConnectionSpecificSuffix", "ConnectionSpecificSuffixSearchList", "RegisterThisConnectionsAddress", "UseSuffixWhenRegistering", "DHCPOptionsToUse"][..]),
-        ("globalSettings", &["ProtocolIFType", "AppendPrimarySuffixes", "AppendParentSuffixes", "DNSSuffixesToAppend", "UseSuffixSearchList", "SuffixSearchList", "UseDevolution", "DevolutionLevel"][..]),
+        ("globalSettings", &["AppendPrimarySuffixes", "AppendParentSuffixes", "DNSSuffixesToAppend", "UseSuffixSearchList", "SuffixSearchList", "UseDevolution", "DevolutionLevel"][..]),
     ] {
         let rows = object.get(collection).and_then(serde_json::Value::as_array)
             .ok_or_else(|| format!("The DNS WMI {collection} inventory is not an array."))?;
@@ -312,15 +314,15 @@ fn validate_snapshot(
     let mut seen_global_protocols = BTreeSet::new();
     let mut global_settings = Vec::with_capacity(global_rows.len());
     for row in global_rows {
-        let protocol = row.protocol_if_type
-            .ok_or_else(|| "The DNS WMI global-settings row omitted ProtocolIFType.".to_string())?;
-        if !is_supported_global_protocol_if_type(protocol) || !seen_global_protocols.insert(protocol) {
-            return Err("The DNS WMI global-settings inventory contains an unsupported or duplicate protocol row.".into());
+        if let Some(protocol) = row.protocol_if_type {
+            if !is_supported_global_protocol_if_type(protocol) || !seen_global_protocols.insert(protocol) {
+                return Err("The DNS WMI global-settings inventory contains an unsupported or duplicate protocol row.".into());
+            }
         }
         validate_suffix_list(&row.dns_suffixes_to_append, "global suffix list")?;
         validate_suffix_list(&row.suffix_search_list, "global suffix search list")?;
         global_settings.push(DnsWmiGlobalSettings {
-            protocol_if_type: protocol,
+            protocol_if_type: row.protocol_if_type,
             append_primary_suffixes: row.append_primary_suffixes,
             append_parent_suffixes: row.append_parent_suffixes,
             dns_suffixes_to_append: row.dns_suffixes_to_append,
@@ -668,6 +670,20 @@ mod tests {
             dhcp_options_to_use: None,
         }).collect());
         assert!(validate_snapshot(snapshot, &identity(), &[v4], &[v6]).is_err());
+    }
+
+    #[test]
+    fn global_protocol_type_is_optional_but_retained_when_returned() {
+        let mut snapshot = raw_snapshot();
+        snapshot.global_settings.as_mut().unwrap()[0].protocol_if_type = None;
+        let v4: IpAddr = "192.0.2.53".parse().unwrap();
+        let v6: IpAddr = "2001:db8::53".parse().unwrap();
+        let result = validate_snapshot(snapshot, &identity(), &[v4], &[v6]).unwrap();
+        assert_eq!(result.global_settings[0].protocol_if_type, None);
+
+        let bytes = br#"{"ok":true,"error":null,"serverAddresses":[],"clients":[],"globalSettings":[{"AppendPrimarySuffixes":true,"AppendParentSuffixes":false,"DNSSuffixesToAppend":[],"UseSuffixSearchList":true,"SuffixSearchList":[],"UseDevolution":false,"DevolutionLevel":0}]}"#;
+        let decoded = decode_wmi_snapshot(bytes, true).unwrap();
+        assert_eq!(decoded.global_settings.unwrap()[0].protocol_if_type, None);
     }
 
     #[test]

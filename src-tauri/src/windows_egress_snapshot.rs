@@ -25,6 +25,23 @@ pub struct WindowsEgressSnapshot {
 
 #[cfg(windows)]
 impl WindowsEgressSnapshot {
+    /// Build the strict outbound configuration, derive its actual TCP/UDP
+    /// server transport set, resolve the endpoint through encrypted DoH, and
+    /// capture the corresponding physical routes. No profile-name guessing.
+    pub async fn capture_for_profile(
+        profile: &crate::profiles::ProfileSummary,
+        credentials: &std::collections::BTreeMap<String, String>,
+    ) -> Result<Self, String> {
+        let endpoint_plan = crate::engine::sing_box::build_engine_endpoint_plan(profile, credentials)?;
+        let resolver = crate::endpoint_bootstrap::EndpointBootstrapResolver::new()?;
+        let endpoints = resolver.resolve_vpn_endpoints_for_protocols(
+            &endpoint_plan.server,
+            endpoint_plan.port,
+            &endpoint_plan.protocols,
+        ).await?;
+        Self::capture(&endpoints)
+    }
+
     /// Resolve a proxy hostname through encrypted DoH, preserve the caller's
     /// exact transport tuple, then capture Windows physical routes.
     /// No system-DNS/plaintext fallback is available. The initial DoH exchange

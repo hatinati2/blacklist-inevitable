@@ -16,6 +16,12 @@ References:
 - Cloudflare DoH endpoint: https://developers.cloudflare.com/1.1.1.1/encryption/dns-over-https/
 - DoH wire format: https://www.rfc-editor.org/rfc/rfc8484
 
+## Route-snapshot composition
+
+The Windows-only `WindowsEgressSnapshot::capture_for_server` composes this resolver with read-only physical-interface discovery, route lookup, and route-bound policy compilation. It accepts an explicit TCP/UDP transport tuple from the engine adapter; it never guesses transport semantics from a profile name. Every resolved A/AAAA address receives the exact supplied port and protocol, and the downstream endpoint count remains bounded to 64. DNS must complete successfully before any route snapshot is returned.
+
+This remains a preparation primitive, not a live Connect transaction. The DoH bootstrap request happens before route-monitor capture and before tunnel startup. A successful snapshot does not install policy, mutate routes/DNS, or authorize Connected state.
+
 ## Not yet complete
 
 This primitive is not yet called by the Windows Agent's Connect transaction. Until integration is implemented, actual endpoint bootstrap during a VPN connection is not yet protected by this code. The provider is currently fixed to Cloudflare and should become an explicit supported setting before release. The Agent must retain the returned address set for the current preparation attempt, resolve routes for each address, and restart preparation on network-change invalidation. The initial query is outside the tunnel and visible to the selected resolver.

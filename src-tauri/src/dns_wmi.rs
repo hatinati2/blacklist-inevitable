@@ -710,12 +710,23 @@ mod tests {
 
         let mut success = None;
         let mut errors = Vec::new();
+        let mut attempted = 0usize;
         for row in rows {
             let index = row.InterfaceIndex;
             let luid = unsafe { row.InterfaceLuid.Value };
             if index == 0 || luid == 0 {
                 continue;
             }
+            // Avoid starting PowerShell for adapters with no currently effective
+            // DNS servers; the integration test has a strict candidate bound.
+            match crate::recovery_observer::observe_effective_dns_servers(luid) {
+                Ok(native) if !native.ipv4.is_empty() || !native.ipv6.is_empty() => {}
+                _ => continue,
+            }
+            if attempted >= 8 {
+                break;
+            }
+            attempted += 1;
             let guid = uuid::Uuid::from_u128(super::windows::guid_to_u128(&row.InterfaceGuid)).to_string();
             let record = DnsMutationRecord {
                 interface_index: index,
@@ -738,7 +749,7 @@ mod tests {
         }
         assert!(
             success.is_some(),
-            "No Windows interface produced a complete bounded WMI cross-check: {}",
+            "No DNS-bearing Windows interface produced a complete bounded WMI cross-check (attempted {attempted}): {}",
             errors.join(" | ")
         );
     }

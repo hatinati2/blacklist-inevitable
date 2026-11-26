@@ -835,41 +835,53 @@ pub fn observe_recorded_routes(
             continue;
         }
 
-        let next_hop_address = sockaddr_address(&row.NextHop)?;
-        if next_hop_address.is_ipv4() != prefix_address.is_ipv4() {
-            for key in journal_keys {
-                routes.insert(key.clone(), Observation::Unknown);
+        // Interface indexes are reusable. Preserve the kernel NET_LUID and
+        // parse the complete state from this exact MIB_IPFORWARD_ROW2 entry.
+        let state = match route_state_from_row(row, prefix_address) {
+            Ok(state) => state,
+            Err(_) => {
+                for key in journal_keys {
+                    routes.insert(key.clone(), Observation::Unknown);
+                }
+                continue;
             }
-            continue;
-        }
-        let next_hop = if next_hop_address.is_unspecified() {
-            None
-        } else {
-            Some(next_hop_address)
-        };
-
-        // Interface indexes are reusable. Preserve the kernel NET_LUID so the
-        // assessment planner can reject a route that now points at another NIC.
-        let interface_luid = unsafe { row.InterfaceLuid.Value };
-        if interface_luid == 0 {
-            for key in journal_keys {
-                routes.insert(key.clone(), Observation::Unknown);
-            }
-            continue;
-        }
-        let state = crate::recovery_journal::RouteState {
-            interface_index: row.InterfaceIndex,
-            interface_luid: Some(interface_luid),
-            next_hop,
-            metric: row.Metric,
-            protocol: Some(row.Protocol),
-            origin: Some(row.Origin),
         };
 
         append_observed_route_state(&mut routes, journal_keys, &state)?;
     }
 
     Ok(routes)
+}
+
+#[cfg(windows)]
+fn route_state_from_row(
+    row: &windows_sys::Win32::NetworkManagement::IpHelper::MIB_IPFORWARD_ROW2,
+    destination: std::net::IpAddr,
+) -> Result<crate::recovery_journal::RouteState, String> {
+    if row.InterfaceIndex == 0 {
+        return Err("Windows returned a route row with an invalid interface index.".into());
+    }
+    let interface_luid = unsafe { row.InterfaceLuid.Value };
+    if interface_luid == 0 {
+        return Err("Windows returned a route row without a stable interface LUID.".into());
+    }
+    let next_hop_address = sockaddr_address(&row.NextHop)?;
+    if next_hop_address.is_ipv4() != destination.is_ipv4() {
+        return Err("Windows returned a route next hop with a mismatched address family.".into());
+    }
+    let next_hop = if next_hop_address.is_unspecified() {
+        None
+    } else {
+        Some(next_hop_address)
+    };
+    Ok(crate::recovery_journal::RouteState {
+        interface_index: row.InterfaceIndex,
+        interface_luid: Some(interface_luid),
+        next_hop,
+        metric: row.Metric,
+        protocol: Some(row.Protocol),
+        origin: Some(row.Origin),
+    })
 }
 
 #[cfg(windows)]
@@ -1013,6 +1025,66 @@ mod tests {
         assert_eq!(
             routes.get(&key),
             Some(&super::Observation::Present(vec![row.clone(), row]))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn constructed_ip_forward_rows_preserve_route_identity_and_provenance() {
+        use super::{append_observed_route_state, route_state_from_row, Observation};
+        use std::collections::BTreeMap;
+        use std::net::Ipv4Addr;
+        use windows_sys::Win32::NetworkManagement::IpHelper::MIB_IPFORWARD_ROW2;
+        use windows_sys::Win32::Networking::WinSock::{
+            AF_INET, SOCKADDR_IN, SOCKADDR_INET,
+        };
+
+        fn address(value: [u8; 4]) -> SOCKADDR_INET {
+            let mut ipv4 = SOCKADDR_IN::default();
+            ipv4.sin_family = AF_INET;
+            unsafe {
+                ipv4.sin_addr.S_un.S_addr = u32::from_ne_bytes(value);
+            }
+            let mut inet = SOCKADDR_INET::default();
+            unsafe { inet.Ipv4 = ipv4; }
+            inet
+        }
+
+        fn row(index: u32, luid: u64, protocol: i32, origin: i32, metric: u32, next_hop: [u8; 4]) -> MIB_IPFORWARD_ROW2 {
+            let mut value: MIB_IPFORWARD_ROW2 = unsafe { std::mem::zeroed() };
+            value.InterfaceIndex = index;
+            unsafe { value.InterfaceLuid.Value = luid; }
+            value.DestinationPrefix.Prefix = address([192, 0, 2, 0]);
+            value.DestinationPrefix.PrefixLength = 24;
+            value.NextHop = address(next_hop);
+            value.Metric = metric;
+            value.Protocol = protocol;
+            value.Origin = origin;
+            value
+        }
+
+        let first_row = row(7, 700, 3, 0, 10, [192, 0, 2, 1]);
+        let second_row = row(8, 800, 19, 2, 20, [192, 0, 2, 2]);
+        let destination: std::net::IpAddr = Ipv4Addr::new(192, 0, 2, 0).into();
+        let first = route_state_from_row(&first_row, destination).unwrap();
+        let second = route_state_from_row(&second_row, destination).unwrap();
+
+        assert_eq!(first.interface_luid, Some(700));
+        assert_eq!(first.protocol, Some(3));
+        assert_eq!(first.origin, Some(0));
+        assert_eq!(second.interface_luid, Some(800));
+        assert_eq!(second.protocol, Some(19));
+        assert_eq!(second.origin, Some(2));
+
+        let mut inventory = BTreeMap::from([
+            ("192.0.2.0/24".to_string(), Observation::Absent),
+        ]);
+        let keys = vec!["192.0.2.0/24".to_string()];
+        append_observed_route_state(&mut inventory, &keys, &first).unwrap();
+        append_observed_route_state(&mut inventory, &keys, &second).unwrap();
+        assert_eq!(
+            inventory.get("192.0.2.0/24"),
+            Some(&Observation::Present(vec![first, second]))
         );
     }
 

@@ -16,6 +16,32 @@ The schema does not contain profile credentials, share links, engine JSON, comma
 
 `FirewallFilterRecord.filterKey` is optional only for compatibility with older version-1 records that predate stable filter-key recording. Newly created WFP filter records must always include a canonical filter GUID. `filterId` is optional so a complete stable-key intent can be persisted before adding a filter; after a successful BFE read-back, a later journal revision may attach the runtime ID for diagnostics. Recovery must never attempt to delete a legacy filter using only its runtime ID; it must enumerate and reconcile exact provider-owned filters or leave policy cleanup unconfirmed.
 
+## Monotonic transaction phases
+
+The durable phase is an enforced ordering contract, not a free-form status label.
+A new session must start at `Preparing`. Same-phase checkpoints may be appended,
+but operational transitions are limited to:
+
+`Preparing` → `EgressProtected` → `EngineStarted` → `TunnelCreated` → `NetworkConfigured`.
+
+A session may enter `Disconnecting` from any operational phase, and may enter
+`RecoveryRequired` whenever rollback or resource ownership cannot be confirmed.
+`Disconnecting` and `RecoveryRequired` cannot be advanced back into an operational
+phase. Further diagnostic checkpoints may remain in `RecoveryRequired`.
+
+Each phase also requires its minimum durable evidence: `EgressProtected` and
+later phases require stable WFP filter keys with committed runtime IDs;
+`EngineStarted` and later require the exact process ID plus creation time;
+`TunnelCreated` and later require the tunnel GUID/index/address record; and
+`NetworkConfigured` requires route and DNS mutation records. The store rejects
+out-of-order or incomplete checkpoints before writing a new revision.
+
+These journal checks do not prove that live Windows resources match the record.
+Every recovery or future executor must still perform fresh, read-only
+just-in-time observations and post-mutation verification. The dual-stack DNS
+observer remains incomplete, mixed-resource recovery remains disabled, and
+Connect/Disconnect/Recover remain unavailable.
+
 ## Storage and recovery semantics
 
 The privileged service installer must create the journal directory before the service starts. The directory must be owned by the service identity and have a restrictive DACL that prevents modification by ordinary users. The module deliberately does not create the root directory or set its ACL.

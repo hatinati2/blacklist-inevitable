@@ -224,6 +224,60 @@ impl RecoveryJournal {
                 }
             }
         }
+
+        self.validate_phase_requirements()?;
+        Ok(())
+    }
+
+    /// Enforce the minimum resource evidence associated with each durable phase.
+    /// These checks do not replace live Windows observation during recovery.
+    fn validate_phase_requirements(&self) -> Result<(), String> {
+        let needs_protected_egress = matches!(
+            self.phase,
+            JournalPhase::EgressProtected
+                | JournalPhase::EngineStarted
+                | JournalPhase::TunnelCreated
+                | JournalPhase::NetworkConfigured
+        );
+        if needs_protected_egress
+            && (self.firewall_filters.is_empty()
+                || self.firewall_filters.iter().any(|filter| {
+                    filter.filter_key.is_none() || filter.filter_id.is_none()
+                }))
+        {
+            return Err(
+                "The journal phase requires a complete, committed, stable-key WFP protection record."
+                    .to_string(),
+            );
+        }
+
+        if matches!(
+            self.phase,
+            JournalPhase::EngineStarted
+                | JournalPhase::TunnelCreated
+                | JournalPhase::NetworkConfigured
+        ) && self.engine.is_none()
+        {
+            return Err("The journal phase requires an exact engine process identity.".to_string());
+        }
+
+        if matches!(
+            self.phase,
+            JournalPhase::TunnelCreated | JournalPhase::NetworkConfigured
+        ) && self.tunnel.is_none()
+        {
+            return Err("The journal phase requires a verified tunnel interface identity.".to_string());
+        }
+
+        if self.phase == JournalPhase::NetworkConfigured
+            && (self.routes.is_empty() || self.dns.is_empty())
+        {
+            return Err(
+                "The network-configured journal phase requires recorded route and DNS mutations."
+                    .to_string(),
+            );
+        }
+
         Ok(())
     }
 }
@@ -277,6 +331,34 @@ fn validate_dns_configuration(configuration: &DnsConfiguration) -> Result<(), St
     Ok(())
 }
 
+/// Validate the only permitted durable phase transitions. Checkpoints within
+/// one phase are allowed; operational phases may not be skipped or reversed.
+/// RecoveryRequired is terminal except for additional RecoveryRequired
+/// checkpoints, and Disconnecting may only advance to RecoveryRequired.
+fn validate_phase_transition(previous: JournalPhase, next: JournalPhase) -> Result<(), String> {
+    if previous == next || next == JournalPhase::RecoveryRequired {
+        return Ok(());
+    }
+
+    let allowed = matches!(
+        (previous, next),
+        (JournalPhase::Preparing, JournalPhase::EgressProtected)
+            | (JournalPhase::EgressProtected, JournalPhase::EngineStarted)
+            | (JournalPhase::EngineStarted, JournalPhase::TunnelCreated)
+            | (JournalPhase::TunnelCreated, JournalPhase::NetworkConfigured)
+    ) || (next == JournalPhase::Disconnecting
+        && previous != JournalPhase::RecoveryRequired
+        && previous != JournalPhase::Disconnecting);
+
+    if allowed {
+        Ok(())
+    } else {
+        Err(format!(
+            "Invalid recovery journal phase transition from {previous:?} to {next:?}; refusing to persist an out-of-order checkpoint."
+        ))
+    }
+}
+
 pub struct RecoveryJournalStore {
     root: PathBuf,
     gate: Mutex<()>,
@@ -306,10 +388,20 @@ impl RecoveryJournalStore {
         validate_store_root(&self.root)?;
 
         let current = self.load_unresolved_unlocked()?;
-        if let Some(previous) = current.iter().find(|item| item.session_id == journal.session_id) {
-            if journal.revision <= previous.revision {
-                return Err("Recovery journal revisions must increase monotonically.".to_string());
+        match current.iter().find(|item| item.session_id == journal.session_id) {
+            Some(previous) => {
+                if journal.revision <= previous.revision {
+                    return Err("Recovery journal revisions must increase monotonically.".to_string());
+                }
+                validate_phase_transition(previous.phase, journal.phase)?;
             }
+            None if journal.phase != JournalPhase::Preparing => {
+                return Err(
+                    "A new recovery journal session must begin in the Preparing phase."
+                        .to_string(),
+                );
+            }
+            None => {}
         }
 
         let bytes = serde_json::to_vec(journal)
@@ -584,23 +676,110 @@ mod tests {
     #[test]
     fn persists_and_loads_the_latest_complete_checkpoint() {
         let (root, store) = store();
-        let mut first = RecoveryJournal::new(42);
+        let first = RecoveryJournal::new(42);
         store.persist(&first).unwrap();
 
-        first.revision = 2;
-        first.phase = JournalPhase::EngineStarted;
-        first.engine = Some(EngineProcessRecord {
-            process_id: 100,
-            creation_time_100ns: 133700000000000000,
-        });
-        store.persist(&first).unwrap();
+        let mut protected = example_journal(42, 2);
+        protected.phase = JournalPhase::EgressProtected;
+        store.persist(&protected).unwrap();
+
+        let mut engine_started = protected.clone();
+        engine_started.revision = 3;
+        engine_started.phase = JournalPhase::EngineStarted;
+        store.persist(&engine_started).unwrap();
 
         let loaded = store.load_unresolved().unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].session_id, 42);
-        assert_eq!(loaded[0].revision, 2);
+        assert_eq!(loaded[0].revision, 3);
         assert_eq!(loaded[0].phase, JournalPhase::EngineStarted);
 
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejects_skipped_or_reversed_operational_phase_transitions() {
+        let (root, store) = store();
+        store.persist(&RecoveryJournal::new(81)).unwrap();
+
+        let mut engine_started = example_journal(81, 2);
+        engine_started.phase = JournalPhase::EngineStarted;
+        assert!(store.persist(&engine_started).is_err());
+
+        let mut protected = example_journal(81, 2);
+        protected.phase = JournalPhase::EgressProtected;
+        store.persist(&protected).unwrap();
+
+        let mut regressed = protected.clone();
+        regressed.revision = 3;
+        regressed.phase = JournalPhase::Preparing;
+        assert!(store.persist(&regressed).is_err());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn requires_resource_evidence_for_each_operational_phase() {
+        let mut journal = example_journal(82, 1);
+        journal.phase = JournalPhase::EgressProtected;
+        journal.validate().unwrap();
+
+        let mut missing_wfp = journal.clone();
+        missing_wfp.firewall_filters.clear();
+        assert!(missing_wfp.validate().is_err());
+
+        let mut missing_engine = journal.clone();
+        missing_engine.phase = JournalPhase::EngineStarted;
+        missing_engine.engine = None;
+        assert!(missing_engine.validate().is_err());
+
+        let mut missing_tunnel = journal.clone();
+        missing_tunnel.phase = JournalPhase::TunnelCreated;
+        missing_tunnel.tunnel = None;
+        assert!(missing_tunnel.validate().is_err());
+
+        let mut missing_network_state = journal;
+        missing_network_state.phase = JournalPhase::NetworkConfigured;
+        missing_network_state.routes.clear();
+        assert!(missing_network_state.validate().is_err());
+        missing_network_state.routes = example_journal(82, 1).routes;
+        missing_network_state.dns.clear();
+        assert!(missing_network_state.validate().is_err());
+    }
+
+    #[test]
+    fn disconnecting_and_recovery_required_are_terminal_fail_closed_phases() {
+        let (root, store) = store();
+        store.persist(&RecoveryJournal::new(83)).unwrap();
+
+        let mut disconnecting = RecoveryJournal::new(83);
+        disconnecting.revision = 2;
+        disconnecting.phase = JournalPhase::Disconnecting;
+        store.persist(&disconnecting).unwrap();
+
+        let mut recovery = disconnecting.clone();
+        recovery.revision = 3;
+        recovery.phase = JournalPhase::RecoveryRequired;
+        store.persist(&recovery).unwrap();
+
+        let mut more_diagnostics = recovery.clone();
+        more_diagnostics.revision = 4;
+        store.persist(&more_diagnostics).unwrap();
+
+        let mut resurrected = more_diagnostics;
+        resurrected.revision = 5;
+        resurrected.phase = JournalPhase::EgressProtected;
+        assert!(store.persist(&resurrected).is_err());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_new_session_cannot_be_persisted_in_an_advanced_phase() {
+        let (root, store) = store();
+        let mut advanced = example_journal(84, 1);
+        advanced.phase = JournalPhase::EgressProtected;
+        assert!(store.persist(&advanced).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 

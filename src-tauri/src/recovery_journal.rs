@@ -1203,6 +1203,7 @@ mod tests {
         journal.validate().unwrap();
 
         let mut duplicate = journal.clone();
+        duplicate.routes[1].destination_prefix = "203.0.113.7/0".into();
         duplicate.routes[1].applied.interface_index = 100;
         assert!(duplicate.validate().unwrap_err().contains("duplicate applied route identity"));
     }

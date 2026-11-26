@@ -26,7 +26,10 @@ stable interface GUID and contain complete IPv4 and IPv6 snapshots for both
 its previous and applied settings. Legacy compact DNS records and route
 records with missing LUIDs remain readable, but cannot be used to create a
 NetworkConfigured checkpoint. The read-only route assessor independently
-requires LUID evidence and compares it with the live route observation.
+requires LUID evidence and compares route identity by NET_LUID, next hop, and
+metric. Interface indexes are diagnostic only and may change across adapter
+enumeration; they cannot override a matching stable LUID or establish identity
+when the LUID is missing.
 
 ## Storage and recovery semantics
 

@@ -284,6 +284,9 @@ impl RecoveryJournal {
         for route in &self.routes {
             let (network, prefix) = parse_prefix(&route.destination_prefix)?;
             let canonical_network = canonical_network_address(network, prefix);
+            if canonical_network != network {
+                return Err("The recovery journal route destination must use a canonical network prefix.".to_string());
+            }
             validate_route_state(&route.applied, network)?;
             if let Some(previous) = &route.previous {
                 validate_route_state(previous, network)?;
@@ -1203,9 +1206,12 @@ mod tests {
         journal.validate().unwrap();
 
         let mut duplicate = journal.clone();
-        duplicate.routes[1].destination_prefix = "203.0.113.7/0".into();
         duplicate.routes[1].applied.interface_index = 100;
         assert!(duplicate.validate().unwrap_err().contains("duplicate applied route identity"));
+
+        let mut noncanonical = journal.clone();
+        noncanonical.routes[1].destination_prefix = "203.0.113.7/0".into();
+        assert!(noncanonical.validate().unwrap_err().contains("canonical network prefix"));
     }
 
     #[test]

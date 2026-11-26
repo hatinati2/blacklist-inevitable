@@ -55,6 +55,18 @@ The `can_remove_journal` result is true only when every recorded resource is pos
 
 These probes do not stop processes, create/delete filters, alter WFP policy, change routes or DNS, or remove journal files. They are not wired into the Agent startup gate; that gate remains fail-closed. The DNS observer described above is a partial diagnostic snapshot, not a recovery implementation: the unobserved family remains absent and the assessor must keep the whole DNS resource `Unknown`. Microsoft documents `Get-DnsClientServerAddress` with an `-AddressFamily` selector for IPv4 or IPv6 and describes it as returning DNS server IP addresses configured on an interface ([DnsClient reference](https://learn.microsoft.com/powershell/module/dnsclient/get-dnsclientserveraddress)). It is a candidate independent cross-check for family-specific server lists, but its documented output does not cover the full adapter/profile settings, suffix flags, and per-server DoH properties in this journal; it cannot by itself authorize restoration. Likewise, the documented `Tcpip`/`Tcpip6` `NameServer` registry paths describe a miniport-driver DNS-update contract and are not yet validated as a universal authoritative read path ([Microsoft driver documentation](https://learn.microsoft.com/windows-hardware/drivers/network/mb-dns-updates)). Do not infer missing stack state from either source. `DNS_INTERFACE_SETTINGS3` requires Windows 10 Build 19645 or later for DoH properties, so older systems cannot claim a complete DoH-capable snapshot from this API. A route with duplicate destination prefixes also remains unverified until the journal identity is extended to include the interface.
 
+## Global DoH inventory acceptance probe
+
+`scripts/windows-doh-inventory-acceptance.ps1` is a manual, read-only acceptance probe for supported Windows 10 and Windows 11 client machines. Run it from an ordinary PowerShell session:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows-doh-inventory-acceptance.ps1 -OutputPath .\doh-inventory-acceptance.json
+```
+
+The script records the Windows client build, PowerShell and DnsClient module versions, the actual CIM property names and types returned for every DoH row, and the four required values. It checks IPv4/IPv6 addresses, duplicate addresses, HTTPS URI templates, required Boolean values, and consistent row schemas. It invokes only `Get-DnsClientDohServerAddress`; it does not add, set, or remove a DoH server and does not write DNS, route, WFP, registry, or firewall settings.
+
+Exit code 0 with status `Accepted` is the positive schema-validation result. An empty but successful known-server inventory is reported as `SuccessfulEmptyInventorySchemaUnobserved`: it is not treated as schema acceptance because there are no rows from which to observe property types. A missing cmdlet or unsupported OS returns a capability/platform status and exit code 3 (Unknown). Query, schema, bounds, or value validation errors return exit code 2 (Unknown/failure). Preserve the JSON output with the OS build when completing the Windows 10/11 acceptance matrix; redact machine-specific information before sharing it outside the project.
+
 ## Security boundary and remaining work
 
 The journal is not an authentication or integrity mechanism. Its trust depends on the service-owned directory ACL and the service's validation of every record. The service must not open a user-writable directory as its journal root. Reparse-point entries are rejected, and files are never selected using a caller-supplied path.

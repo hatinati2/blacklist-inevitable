@@ -800,7 +800,7 @@ fn same_route_state(left: &RouteState, right: &RouteState) -> bool {
 
 fn assess_route(
     record: &RouteMutationRecord,
-    observed: Option<&Observation<RouteState>>,
+    observed: Option<&Observation<Vec<RouteState>>>,
 ) -> ResourceDisposition {
     let Some(observed) = observed else {
         return ResourceDisposition::Unknown;
@@ -815,32 +815,63 @@ fn assess_route(
         return ResourceDisposition::Unknown;
     }
 
-    match observed {
-        Observation::Unknown => ResourceDisposition::Unknown,
+    let rows = match observed {
+        Observation::Unknown => return ResourceDisposition::Unknown,
         Observation::Absent => {
-            if record.previous.is_none() {
+            return if record.previous.is_none() {
                 ResourceDisposition::VerifiedClean
             } else {
-                // A route that existed before the session must be restored,
-                // even when the session's route is now absent.
                 ResourceDisposition::NeedsRestore
-            }
+            };
         }
-        Observation::Present(actual) => {
-            if !has_complete_route_state_evidence(actual) {
-                ResourceDisposition::Unknown
-            } else if record.previous.as_ref().is_some_and(|previous| same_route_state(previous, actual)) {
+        Observation::Present(rows) if rows.is_empty() => {
+            return if record.previous.is_none() {
                 ResourceDisposition::VerifiedClean
-            } else if same_route_state(actual, &record.applied) {
-                if record.previous.is_some() {
-                    ResourceDisposition::NeedsRestore
-                } else {
-                    ResourceDisposition::NeedsCleanup
-                }
             } else {
-                ResourceDisposition::Conflict
-            }
+                ResourceDisposition::NeedsRestore
+            };
         }
+        Observation::Present(rows) => rows,
+    };
+
+    // A bad row means this prefix inventory is not complete enough to reason
+    // about ownership. Other same-prefix routes are allowed, but every row
+    // must carry the stable identity/provenance fields before we ignore it.
+    if rows.iter().any(|row| !has_complete_route_state_evidence(row)) {
+        return ResourceDisposition::Unknown;
+    }
+
+    let applied_matches = rows
+        .iter()
+        .filter(|actual| same_route_state(actual, &record.applied))
+        .count();
+    let previous_matches = record.previous.as_ref().map_or(0, |previous| {
+        rows.iter()
+            .filter(|actual| same_route_state(actual, previous))
+            .count()
+    });
+
+    if applied_matches > 1 || previous_matches > 1 {
+        return ResourceDisposition::Unknown;
+    }
+    if applied_matches == 1 && previous_matches == 1 {
+        // Both exact states at once can mean concurrent route ownership or an
+        // incomplete transaction. Do not guess which row may be removed.
+        return ResourceDisposition::Conflict;
+    }
+    if applied_matches == 1 {
+        return if record.previous.is_some() {
+            ResourceDisposition::NeedsRestore
+        } else {
+            ResourceDisposition::NeedsCleanup
+        };
+    }
+    if previous_matches == 1 || record.previous.is_none() {
+        ResourceDisposition::VerifiedClean
+    } else {
+        // Neither exact row exists; a prior route must be recreated by a
+        // future reviewed executor, even if unrelated same-prefix routes remain.
+        ResourceDisposition::NeedsRestore
     }
 }
 

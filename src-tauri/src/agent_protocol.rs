@@ -118,6 +118,11 @@ pub struct AgentConnectPayload {
 pub enum AgentOperation {
     GetStatus,
     GetDiagnostics,
+    /// Validate a profile and retain a read-only route-bound endpoint snapshot in the Agent.
+    /// This never installs WFP policy, mutates Windows networking, or starts the engine.
+    PrepareConnect {
+        payload: AgentConnectPayload,
+    },
     Connect {
         payload: AgentConnectPayload,
     },
@@ -345,7 +350,9 @@ pub fn validate_agent_request(request: &AgentRequest) -> Result<(), String> {
     }
     validate_request_id(&request.request_id)?;
 
-    if let AgentOperation::Connect { payload } = &request.operation {
+    if let AgentOperation::PrepareConnect { payload }
+    | AgentOperation::Connect { payload } = &request.operation
+    {
         validate_profile(&payload.profile)?;
         validate_credentials(&payload.profile.protocol, &payload.credentials)?;
     }
@@ -538,6 +545,21 @@ mod tests {
 
         let public_profile = serde_json::to_string(&ProfileSummary::from(payload.profile.clone())).unwrap();
         assert!(!public_profile.contains("one-shot-secret"));
+    }
+
+    #[test]
+    fn validates_prepare_connect_payload_with_the_same_limits_as_connect() {
+        let request = connect_request();
+        let AgentRequest { version, request_id, operation } = request;
+        let AgentOperation::Connect { payload } = operation else {
+            panic!("expected Connect fixture");
+        };
+        let prepared = AgentRequest {
+            version,
+            request_id,
+            operation: AgentOperation::PrepareConnect { payload },
+        };
+        assert!(validate_agent_request(&prepared).is_ok());
     }
 
     #[test]

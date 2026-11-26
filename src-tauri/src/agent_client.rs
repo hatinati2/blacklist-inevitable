@@ -18,7 +18,7 @@ use crate::agent_protocol::{
 };
 
 const PIPE_NAME: &str = r"\\.\pipe\BlacklistInevitable.Agent.v1";
-const CLIENT_TIMEOUT: Duration = Duration::from_secs(5);
+const CLIENT_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -63,6 +63,29 @@ pub fn connect_profile(
         version: AGENT_PROTOCOL_VERSION,
         request_id: uuid::Uuid::new_v4().simple().to_string(),
         operation: AgentOperation::Connect {
+            payload: AgentConnectPayload {
+                profile,
+                credentials,
+            },
+        },
+    };
+    send_request(request)
+}
+
+/// Ask the privileged Agent to build and retain a read-only endpoint-egress snapshot.
+/// This operation does not start sing-box, install WFP, or alter Windows networking.
+pub fn prepare_connect_profile(
+    profile: AgentProfile,
+    credentials: BTreeMap<String, String>,
+) -> impl std::future::Future<Output = Result<AgentResponse, String>> {
+    let credentials = credentials
+        .into_iter()
+        .map(|(name, value)| (name, AgentSecret::new(value)))
+        .collect();
+    let request = AgentRequest {
+        version: AGENT_PROTOCOL_VERSION,
+        request_id: uuid::Uuid::new_v4().simple().to_string(),
+        operation: AgentOperation::PrepareConnect {
             payload: AgentConnectPayload {
                 profile,
                 credentials,

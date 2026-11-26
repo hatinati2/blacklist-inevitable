@@ -4,9 +4,10 @@
 //! the active physical-console user's token/session, rejects remote pipe clients,
 //! uses a protected DACL, and never forwards network-mutating operations.
 
+use std::collections::BTreeMap;
 use std::slice;
 use std::time::{Duration, Instant};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, LocalFree, ERROR_IO_PENDING, ERROR_OPERATION_ABORTED,
@@ -42,7 +43,7 @@ use windows_sys::Win32::Foundation::HANDLE;
 use crate::agent_protocol::{
     AgentOperation, AgentRequestReplayGuard, AgentResponse, MAX_AGENT_REQUEST_BYTES,
 };
-use crate::connection_state::ConnectionCoordinator;
+use crate::connection_state::{ConnectionCoordinator, ConnectionPhase};
 
 const PIPE_NAME: &str = r"\\.\pipe\BlacklistInevitable.Agent.v1";
 
@@ -118,6 +119,14 @@ pub fn serve(
         return Err("The Agent named pipe or stop event handle is invalid.".into());
     }
 
+    // This runtime is owned by the service listener thread. Preparation is
+    // synchronous at the IPC boundary and all network work has explicit timeouts.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| "The Agent could not initialize its bounded preparation runtime.".to_string())?;
+    let mut prepared_snapshot: Option<PreparedConnectSnapshot> = None;
+
     loop {
         if stop_requested(stop_event) {
             return Ok(());
@@ -130,7 +139,14 @@ pub fn serve(
         let request_result = if stop_requested(stop_event) {
             Ok(())
         } else {
-            handle_authenticated_connection(pipe, stop_event, startup_detail, connection)
+            handle_authenticated_connection(
+                pipe,
+                stop_event,
+                startup_detail,
+                connection,
+                &runtime,
+                &mut prepared_snapshot,
+            )
         };
 
         // Continuing on a thread that failed to revert impersonation would risk
@@ -160,11 +176,149 @@ fn stop_requested(stop_event: HANDLE) -> bool {
     unsafe { WaitForSingleObject(stop_event, 0) == WAIT_OBJECT_0 }
 }
 
+struct PreparedConnectSnapshot {
+    profile_id: String,
+    snapshot: crate::windows_egress_snapshot::WindowsEgressSnapshot,
+}
+
+/// Temporary credential copies are erased even if endpoint preparation returns early.
+struct WipingCredentials(BTreeMap<String, String>);
+
+impl Drop for WipingCredentials {
+    fn drop(&mut self) {
+        for secret in self.0.values_mut() {
+            secret.zeroize();
+        }
+    }
+}
+
+fn discard_stale_preparation(
+    prepared: &mut Option<PreparedConnectSnapshot>,
+) -> Option<String> {
+    let stale = prepared
+        .as_ref()
+        .is_some_and(|item| item.snapshot.ensure_current().is_err());
+    if !stale {
+        return None;
+    }
+
+    let previous = prepared.take()?;
+    let profile_id = previous.profile_id;
+    Some(match previous.snapshot.shutdown() {
+        Ok(()) => format!(
+            "The prepared endpoint snapshot for profile '{profile_id}' was invalidated by a route/interface change and discarded."
+        ),
+        Err(error) => format!(
+            "The prepared endpoint snapshot for profile '{profile_id}' was invalidated and discarded; notification cleanup reported: {error}"
+        ),
+    })
+}
+
+fn prepare_connect_snapshot(
+    request_id: String,
+    payload: crate::agent_protocol::AgentConnectPayload,
+    connection: &ConnectionCoordinator,
+    runtime: &tokio::runtime::Runtime,
+    prepared: &mut Option<PreparedConnectSnapshot>,
+) -> AgentResponse {
+    let current = connection.snapshot();
+    if current.phase != ConnectionPhase::Disconnected || !current.cleanup_healthy {
+        return AgentResponse::rejected_with_connection(
+            request_id,
+            Some(current),
+            "Endpoint preparation is allowed only while the Agent is cleanly Disconnected.",
+        );
+    }
+
+    if let Some(previous) = prepared.take() {
+        if let Err(error) = previous.snapshot.shutdown() {
+            return AgentResponse::rejected_with_connection(
+                request_id,
+                Some(current),
+                format!("The previous endpoint snapshot could not be retired safely: {error}"),
+            );
+        }
+    }
+
+    let crate::agent_protocol::AgentConnectPayload {
+        profile,
+        credentials: agent_credentials,
+    } = payload;
+    let profile_id = profile.id.clone();
+    let profile = crate::profiles::ProfileSummary::from(profile);
+    let credentials = WipingCredentials(
+        agent_credentials
+            .iter()
+            .map(|(name, value)| (name.clone(), value.expose_secret().to_string()))
+            .collect(),
+    );
+
+    let capture = runtime.block_on(
+        crate::windows_egress_snapshot::WindowsEgressSnapshot::capture_for_profile(
+            &profile,
+            &credentials.0,
+        ),
+    );
+    drop(credentials);
+
+    match capture {
+        Ok(snapshot) => {
+            let endpoint_count = match snapshot.resolved_endpoints() {
+                Ok(endpoints) => endpoints.len(),
+                Err(error) => {
+                    let _ = snapshot.shutdown();
+                    return AgentResponse::failed_redacted(
+                        request_id,
+                        Some(connection.snapshot()),
+                        error,
+                        &agent_credentials,
+                    );
+                }
+            };
+            if let Err(error) = snapshot.ensure_current() {
+                let _ = snapshot.shutdown();
+                return AgentResponse::failed_redacted(
+                    request_id,
+                    Some(connection.snapshot()),
+                    error,
+                    &agent_credentials,
+                );
+            }
+
+            let latest = connection.snapshot();
+            if latest.phase != ConnectionPhase::Disconnected || !latest.cleanup_healthy {
+                let _ = snapshot.shutdown();
+                return AgentResponse::rejected_with_connection(
+                    request_id,
+                    Some(latest),
+                    "Agent state changed during endpoint preparation; the snapshot was discarded.",
+                );
+            }
+
+            let generation = snapshot.network_generation();
+            *prepared = Some(PreparedConnectSnapshot { profile_id: profile_id.clone(), snapshot });
+            let mut response = AgentResponse::ok(request_id, Some(latest));
+            response.detail = Some(format!(
+                "Endpoint preparation succeeded for profile '{profile_id}': {endpoint_count} route-bound endpoint binding(s), network generation {generation}. The snapshot is retained by the Agent. This did not connect, install WFP policy, or modify routes/DNS."
+            ));
+            response
+        }
+        Err(error) => AgentResponse::failed_redacted(
+            request_id,
+            Some(connection.snapshot()),
+            error,
+            &agent_credentials,
+        ),
+    }
+}
+
 fn handle_authenticated_connection(
     pipe: HANDLE,
     stop_event: HANDLE,
     startup_detail: &str,
     connection: &ConnectionCoordinator,
+    runtime: &tokio::runtime::Runtime,
+    prepared: &mut Option<PreparedConnectSnapshot>,
 ) -> Result<(), String> {
     authenticate_active_console_client(pipe)?;
 
@@ -172,19 +326,26 @@ fn handle_authenticated_connection(
     let request = read_one_request(pipe, stop_event)?;
     replay_guard.accept(&request)?;
 
+    let invalidation_detail = discard_stale_preparation(prepared);
     let response = match request.operation {
         AgentOperation::GetStatus | AgentOperation::GetDiagnostics => {
             let mut response =
                 AgentResponse::ok(request.request_id, Some(connection.snapshot()));
-            response.detail = Some(startup_detail.to_string());
+            response.detail = Some(match invalidation_detail {
+                Some(detail) => format!("{startup_detail} {detail}"),
+                None => startup_detail.to_string(),
+            });
             response
+        }
+        AgentOperation::PrepareConnect { payload } => {
+            prepare_connect_snapshot(request.request_id, payload, connection, runtime, prepared)
         }
         AgentOperation::Connect { .. }
         | AgentOperation::Disconnect { .. }
         | AgentOperation::Recover => AgentResponse::rejected_with_connection(
             request.request_id,
             Some(connection.snapshot()),
-            "VPN network operations are disabled until the Agent runtime and recovery path are implemented.",
+            "Connect, Disconnect, and Recover remain disabled until the Agent-owned WFP, route, DNS, engine, and recovery transaction is implemented.",
         ),
     };
 

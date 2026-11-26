@@ -26,7 +26,7 @@ const MAX_CREDENTIAL_KEY_BYTES: usize = 32;
 const MAX_CREDENTIAL_VALUE_BYTES: usize = 8192;
 
 /// A credential string that erases its owned bytes when dropped. Deserializing
-/// each value into this type also protects partially decoded Connect requests.
+/// each value into this type also protects partially decoded PrepareConnect/Connect requests.
 pub struct AgentSecret(String);
 
 impl AgentSecret {
@@ -103,7 +103,7 @@ impl From<ProfileSummary> for AgentProfile {
     }
 }
 
-/// The credential map is only accepted on a single Connect request. The
+/// The credential map is accepted only on one authenticated PrepareConnect or Connect request. The
 /// service must use it in memory to build its per-session engine config and
 /// must never log, persist, or echo this object.
 #[derive(Serialize, Deserialize)]
@@ -118,6 +118,13 @@ pub struct AgentConnectPayload {
 pub enum AgentOperation {
     GetStatus,
     GetDiagnostics,
+    /// Validate a profile and retain a read-only route-bound endpoint snapshot in the Agent.
+    /// This never installs WFP policy, mutates Windows networking, or starts the engine.
+    PrepareConnect {
+        payload: AgentConnectPayload,
+    },
+    /// Release any retained read-only preparation snapshot and unregister its notifications.
+    CancelPreparation,
     Connect {
         payload: AgentConnectPayload,
     },
@@ -345,7 +352,9 @@ pub fn validate_agent_request(request: &AgentRequest) -> Result<(), String> {
     }
     validate_request_id(&request.request_id)?;
 
-    if let AgentOperation::Connect { payload } = &request.operation {
+    if let AgentOperation::PrepareConnect { payload }
+    | AgentOperation::Connect { payload } = &request.operation
+    {
         validate_profile(&payload.profile)?;
         validate_credentials(&payload.profile.protocol, &payload.credentials)?;
     }
@@ -538,6 +547,31 @@ mod tests {
 
         let public_profile = serde_json::to_string(&ProfileSummary::from(payload.profile.clone())).unwrap();
         assert!(!public_profile.contains("one-shot-secret"));
+    }
+
+    #[test]
+    fn validates_prepare_connect_payload_with_the_same_limits_as_connect() {
+        let request = connect_request();
+        let AgentRequest { version, request_id, operation } = request;
+        let AgentOperation::Connect { payload } = operation else {
+            panic!("expected Connect fixture");
+        };
+        let prepared = AgentRequest {
+            version,
+            request_id,
+            operation: AgentOperation::PrepareConnect { payload },
+        };
+        assert!(validate_agent_request(&prepared).is_ok());
+    }
+
+    #[test]
+    fn accepts_cancel_preparation_without_profile_or_credentials() {
+        let request = AgentRequest {
+            version: AGENT_PROTOCOL_VERSION,
+            request_id: "cancel-preparation-01".to_string(),
+            operation: AgentOperation::CancelPreparation,
+        };
+        assert!(validate_agent_request(&request).is_ok());
     }
 
     #[test]

@@ -126,6 +126,31 @@ pub async fn submit_agent_connect_request(
     .await
 }
 
+/// Prepare and retain the selected profile's route-bound endpoint snapshot in the Agent.
+/// The operation is read-only with respect to Windows networking and does not connect.
+#[tauri::command]
+pub async fn prepare_agent_connect_request(
+    app: AppHandle,
+    profile_id: String,
+) -> Result<crate::agent_protocol::AgentResponse, String> {
+    let profile = profile_store::list_profiles(&app)?
+        .into_iter()
+        .find(|profile| profile.id == profile_id)
+        .ok_or_else(|| "Profile not found.".to_string())?;
+    let credentials = profile_store::get_credentials(&profile.id)?.into_map();
+    crate::agent_client::prepare_connect_profile(
+        crate::agent_protocol::AgentProfile::from(profile),
+        credentials,
+    )
+    .await
+}
+
+/// Release the Agent's retained endpoint snapshot without starting or stopping a VPN.
+#[tauri::command]
+pub async fn cancel_agent_connect_preparation() -> Result<crate::agent_protocol::AgentResponse, String> {
+    crate::agent_client::cancel_connect_preparation().await
+}
+
 #[tauri::command]
 pub async fn get_app_status(app: AppHandle) -> AppStatus {
     let supervisor = app.state::<ProcessSupervisor>().inner().clone();

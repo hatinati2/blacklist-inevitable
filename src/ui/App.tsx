@@ -7,6 +7,12 @@ type EngineTarget = {
   integrationStage: string;
 };
 
+type AgentResponse = {
+  status: "ok" | "rejected" | "failed";
+  connection: DesktopAgentStatus["connection"];
+  detail: string | null;
+};
+
 type DesktopAgentStatus = {
   available: boolean;
   connection: {
@@ -304,6 +310,44 @@ export default function App() {
     }
   };
 
+  const prepareAgentEndpoint = async (profileId: string) => {
+    setBusy(true);
+    try {
+      const result = await invoke<AgentResponse>("prepare_agent_connect_request", { profileId });
+      setMessage(
+        result.detail ??
+          (result.status === "ok"
+            ? "Endpoint preparation completed. The VPN is not connected."
+            : "The Agent did not prepare this endpoint."),
+      );
+      await refreshAgentStatus();
+    } catch (error) {
+      setMessage(typeof error === "string" ? error : "Endpoint preparation could not be completed.");
+    } finally {
+      await refreshAgentStatus();
+      setBusy(false);
+    }
+  };
+
+  const cancelAgentPreparation = async () => {
+    setBusy(true);
+    try {
+      const result = await invoke<AgentResponse>("cancel_agent_connect_preparation");
+      setMessage(
+        result.detail ??
+          (result.status === "ok"
+            ? "Endpoint preparation was cancelled."
+            : "The Agent could not confirm endpoint snapshot cleanup."),
+      );
+      await refreshAgentStatus();
+    } catch (error) {
+      setMessage(typeof error === "string" ? error : "Endpoint preparation could not be cancelled safely.");
+    } finally {
+      await refreshAgentStatus();
+      setBusy(false);
+    }
+  };
+
   const stopLocalProxy = async () => {
     setBusy(true);
     try {
@@ -403,8 +447,21 @@ export default function App() {
           </div>
         ) : (
           <p className="hint-text">
-            This channel currently reads service status only. Connect, Disconnect, recovery, and network changes remain disabled.
+            The authenticated Agent status is unavailable in this desktop session.
           </p>
+        )}
+        <p className="hint-text">
+          Endpoint preparation only resolves the selected proxy endpoint and captures its current physical route.
+          It does not start the VPN, install WFP policy, or change Windows routes or DNS.
+        </p>
+        {agentStatus?.connection?.phase === "endpointPrepared" && (
+          <button
+            className="secondary-button"
+            onClick={() => void cancelAgentPreparation()}
+            disabled={busy || previewMode || !agentStatus.available}
+          >
+            {busy ? "Working…" : "Cancel endpoint preparation"}
+          </button>
         )}
       </section>
 
@@ -630,6 +687,20 @@ export default function App() {
                   {!result && !delayResult && (
                     <span className="result-pill neutral">Not tested</span>
                   )}
+                  <button
+                    className="remove-button"
+                    onClick={() => void prepareAgentEndpoint(profile.id)}
+                    disabled={
+                      busy ||
+                      previewMode ||
+                      !agentStatus?.available ||
+                      !agentStatus.connection?.cleanupHealthy ||
+                      agentStatus.connection.phase !== "disconnected"
+                    }
+                    title="Read-only Agent preparation. Resolves the endpoint and records its current physical route; does not connect the VPN."
+                  >
+                    Prepare endpoint
+                  </button>
                   <button
                     className="remove-button"
                     onClick={() => void startLocalProxy(profile.id)}

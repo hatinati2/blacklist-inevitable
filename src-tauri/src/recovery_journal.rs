@@ -183,6 +183,44 @@ pub struct DnsMutationRecord {
     pub previous: DnsConfiguration,
 }
 
+impl DnsMutationRecord {
+    /// Build a new complete DNS mutation record with the adapter identity
+    /// captured before any network mutation. Legacy deserialized records may
+    /// omit NET_LUID, but new records must use this constructor (or satisfy
+    /// the same invariants) and may never infer a historical LUID later.
+    pub fn new(
+        interface_index: u32,
+        interface_guid: String,
+        interface_luid: u64,
+        applied: DnsConfiguration,
+        previous: DnsConfiguration,
+    ) -> Result<Self, String> {
+        if interface_index == 0 || interface_luid == 0 {
+            return Err("A new DNS journal record requires a nonzero interface index and NET_LUID.".into());
+        }
+        validate_guid(&interface_guid)?;
+        for configuration in [&applied, &previous] {
+            validate_dns_configuration(configuration)?;
+            let DnsConfiguration::Interface(snapshot) = configuration else {
+                return Err("A new DNS journal record requires complete dual-stack interface snapshots.".into());
+            };
+            if snapshot.interface_guid != interface_guid
+                || snapshot.interface_luid != Some(interface_luid)
+            {
+                return Err("A DNS snapshot does not match the mutation-time GUID and NET_LUID.".into());
+            }
+        }
+
+        Ok(Self {
+            interface_index,
+            interface_guid: Some(interface_guid),
+            interface_luid: Some(interface_luid),
+            applied,
+            previous,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FirewallFilterRecord {
@@ -1110,6 +1148,50 @@ mod tests {
         let mut journal = example_journal(1, 1);
         journal.firewall_filters[0].filter_id = 0;
         assert!(journal.validate().is_err());
+    }
+
+    #[test]
+    fn new_dns_mutation_record_requires_complete_historical_interface_identity() {
+        let applied = complete_dns_configuration();
+        let previous = complete_dns_configuration();
+        let record = DnsMutationRecord::new(
+            12,
+            "4d36e972-e325-11ce-bfc1-08002be10318".into(),
+            0x0001_0000_0000_000C,
+            applied.clone(),
+            previous.clone(),
+        )
+        .unwrap();
+        assert_eq!(record.interface_luid, Some(0x0001_0000_0000_000C));
+
+        assert!(DnsMutationRecord::new(
+            12,
+            "4d36e972-e325-11ce-bfc1-08002be10318".into(),
+            0,
+            applied.clone(),
+            previous.clone(),
+        ).is_err());
+
+        assert!(DnsMutationRecord::new(
+            12,
+            "4d36e972-e325-11ce-bfc1-08002be10318".into(),
+            0x0001_0000_0000_000C,
+            DnsConfiguration::Dhcp,
+            previous,
+        ).is_err());
+
+        let mut wrong_luid = match applied {
+            DnsConfiguration::Interface(config) => config,
+            _ => unreachable!(),
+        };
+        wrong_luid.interface_luid = Some(0x0001_0000_0000_000D);
+        assert!(DnsMutationRecord::new(
+            12,
+            "4d36e972-e325-11ce-bfc1-08002be10318".into(),
+            0x0001_0000_0000_000C,
+            DnsConfiguration::Interface(wrong_luid),
+            complete_dns_configuration(),
+        ).is_err());
     }
 
     #[test]

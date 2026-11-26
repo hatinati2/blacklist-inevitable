@@ -2,9 +2,9 @@ name: Windows build
 
 on:
   push:
-    branches: [main]
+    branches: [main, feat/agent-network-configured-route-luid-gate]
   pull_request:
-    branches: [main]
+    branches: [main, feat/windows-agent-recovery-intent-planner]
   workflow_dispatch:
 
 permissions:

@@ -284,7 +284,9 @@ impl RecoveryJournal {
         for route in &self.routes {
             let (network, prefix) = parse_prefix(&route.destination_prefix)?;
             let canonical_network = canonical_network_address(network, prefix);
-            if canonical_network != network {
+            if canonical_network != network
+                || route.destination_prefix != format!("{canonical_network}/{prefix}")
+            {
                 return Err("The recovery journal route destination must use a canonical network prefix.".to_string());
             }
             validate_route_state(&route.applied, network)?;

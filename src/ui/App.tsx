@@ -320,7 +320,6 @@ export default function App() {
             ? "Endpoint preparation completed. The VPN is not connected."
             : "The Agent did not prepare this endpoint."),
       );
-      await refreshAgentStatus();
     } catch (error) {
       setMessage(typeof error === "string" ? error : "Endpoint preparation could not be completed.");
     } finally {
@@ -339,7 +338,6 @@ export default function App() {
             ? "Endpoint preparation was cancelled."
             : "The Agent could not confirm endpoint snapshot cleanup."),
       );
-      await refreshAgentStatus();
     } catch (error) {
       setMessage(typeof error === "string" ? error : "Endpoint preparation could not be cancelled safely.");
     } finally {
@@ -694,8 +692,8 @@ export default function App() {
                       busy ||
                       previewMode ||
                       !agentStatus?.available ||
-                      !agentStatus.connection?.cleanupHealthy ||
-                      agentStatus.connection.phase !== "disconnected"
+                      !agentStatus?.connection?.cleanupHealthy ||
+                      agentStatus?.connection?.phase !== "disconnected"
                     }
                     title="Read-only Agent preparation. Resolves the endpoint and records its current physical route; does not connect the VPN."
                   >

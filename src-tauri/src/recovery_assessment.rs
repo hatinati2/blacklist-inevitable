@@ -864,6 +864,19 @@ fn assess_route(
             .filter(|actual| same_route_state(actual, previous))
             .count()
     });
+    let expected_luids = std::iter::once(record.applied.interface_luid)
+        .chain(record.previous.as_ref().map(|previous| previous.interface_luid))
+        .collect::<BTreeSet<_>>();
+    if rows.iter().any(|actual| {
+        expected_luids.contains(&actual.interface_luid)
+            && !same_route_state(actual, &record.applied)
+            && !record.previous.as_ref().is_some_and(|previous| same_route_state(actual, previous))
+    }) {
+        // A row on an expected interface but with different forwarding or
+        // provenance fields may be a modified journaled route, not an
+        // unrelated same-prefix route on another adapter.
+        return ResourceDisposition::Conflict;
+    }
 
     if applied_matches > 1 || previous_matches > 1 {
         return ResourceDisposition::Unknown;
@@ -1918,7 +1931,7 @@ mod tests {
     }
 
     #[test]
-    fn reused_interface_index_with_a_different_luid_is_a_route_conflict() {
+    fn reused_interface_index_with_a_different_luid_is_not_mistaken_for_the_previous_route() {
         let mut journal = RecoveryJournal::new(92);
         let record = route_record();
         let previous = record.previous.clone().unwrap();
@@ -1934,7 +1947,7 @@ mod tests {
         );
 
         let result = assess_recovery(&journal, &snapshot);
-        assert_eq!(result.routes[0].disposition, ResourceDisposition::Conflict);
+        assert_eq!(result.routes[0].disposition, ResourceDisposition::NeedsRestore);
         assert!(!result.can_remove_journal);
     }
 

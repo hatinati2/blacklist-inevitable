@@ -403,7 +403,7 @@ pub fn build_recovery_intent_plan(
             }
             ResourceDisposition::NeedsRestore => {
                 let expected_current = match snapshot.routes.get(&record.destination_prefix) {
-                    Some(Observation::Present(actual)) if actual == &record.applied => {
+                    Some(Observation::Present(actual)) if same_route_state(actual, &record.applied) => {
                         Some(actual.clone())
                     }
                     Some(Observation::Absent) => None,
@@ -784,6 +784,15 @@ fn assess_tunnel(
     }
 }
 
+/// Compare route identity using the stable NET_LUID. Interface indexes are
+/// transient and may legitimately change when Windows enumerates adapters again.
+fn same_route_state(left: &RouteState, right: &RouteState) -> bool {
+    left.interface_luid.is_some()
+        && left.interface_luid == right.interface_luid
+        && left.next_hop == right.next_hop
+        && left.metric == right.metric
+}
+
 fn assess_route(
     record: &RouteMutationRecord,
     observed: Option<&Observation<RouteState>>,
@@ -813,9 +822,9 @@ fn assess_route(
             }
         }
         Observation::Present(actual) => {
-            if record.previous.as_ref() == Some(actual) {
+            if record.previous.as_ref().is_some_and(|previous| same_route_state(previous, actual)) {
                 ResourceDisposition::VerifiedClean
-            } else if actual == &record.applied {
+            } else if same_route_state(actual, &record.applied) {
                 if record.previous.is_some() {
                     ResourceDisposition::NeedsRestore
                 } else {
@@ -1749,6 +1758,38 @@ mod tests {
         let result = assess_recovery(&journal, &snapshot);
         assert_eq!(result.routes[0].disposition, ResourceDisposition::Conflict);
         assert!(!result.can_remove_journal);
+    }
+
+    #[test]
+    fn route_reconciliation_uses_luid_when_interface_index_changes() {
+        let mut journal = RecoveryJournal::new(104);
+        let record = route_record();
+        let applied = record.applied.clone();
+        let previous = record.previous.clone().unwrap();
+        journal.routes.push(record.clone());
+
+        let mut snapshot = empty_snapshot();
+        let mut observed_previous = previous;
+        observed_previous.interface_index = observed_previous.interface_index.wrapping_add(7);
+        snapshot.routes.insert(
+            record.destination_prefix.clone(),
+            Observation::Present(observed_previous),
+        );
+        assert_eq!(
+            assess_recovery(&journal, &snapshot).routes[0].disposition,
+            ResourceDisposition::VerifiedClean
+        );
+
+        let mut observed_applied = applied;
+        observed_applied.interface_index = observed_applied.interface_index.wrapping_add(11);
+        snapshot.routes.insert(
+            record.destination_prefix,
+            Observation::Present(observed_applied),
+        );
+        assert_eq!(
+            assess_recovery(&journal, &snapshot).routes[0].disposition,
+            ResourceDisposition::NeedsRestore
+        );
     }
 
     #[test]

@@ -741,14 +741,13 @@ fn observe_tunnel_unicast_addresses(
     Ok(addresses)
 }
 
-/// Read every IPv4 and IPv6 route row in one IP Helper snapshot, then return
-/// observations only for destinations present in the supplied journal. A
-/// destination with multiple routes is Unknown because the current journal
-/// schema cannot distinguish same-prefix routes on different interfaces.
+/// Read every IPv4 and IPv6 route row in one IP Helper snapshot. Preserve
+/// every row for each journaled destination prefix; the pure assessor matches
+/// journal mutations against stable route identities within that complete set.
 #[cfg(windows)]
 pub fn observe_recorded_routes(
     journal: &crate::recovery_journal::RecoveryJournal,
-) -> Result<std::collections::BTreeMap<String, Observation<crate::recovery_journal::RouteState>>, String> {
+) -> Result<std::collections::BTreeMap<String, Observation<Vec<crate::recovery_journal::RouteState>>>, String> {
     use std::collections::BTreeMap;
     use windows_sys::Win32::NetworkManagement::IpHelper::{
         FreeMibTable, GetIpForwardTable2, MIB_IPFORWARD_ROW2, MIB_IPFORWARD_TABLE2,
@@ -764,11 +763,11 @@ pub fn observe_recorded_routes(
 
     for record in &journal.routes {
         let canonical = canonicalize_prefix(&record.destination_prefix)?;
-        routes.insert(record.destination_prefix.clone(), Observation::Absent);
-        expected_by_canonical
-            .entry(canonical)
-            .or_default()
-            .push(record.destination_prefix.clone());
+        routes.entry(record.destination_prefix.clone()).or_insert(Observation::Absent);
+        let keys = expected_by_canonical.entry(canonical).or_default();
+        if !keys.contains(&record.destination_prefix) {
+            keys.push(record.destination_prefix.clone());
+        }
     }
 
     let mut table: *mut MIB_IPFORWARD_TABLE2 = std::ptr::null_mut();
@@ -805,21 +804,18 @@ pub fn observe_recorded_routes(
         let Some(journal_keys) = expected_by_canonical.get(&canonical) else {
             continue;
         };
-        if journal_keys.len() != 1 {
+        if row.InterfaceIndex == 0 {
             for key in journal_keys {
                 routes.insert(key.clone(), Observation::Unknown);
             }
             continue;
         }
 
-        if row.InterfaceIndex == 0 {
-            routes.insert(journal_keys[0].clone(), Observation::Unknown);
-            continue;
-        }
-
         let next_hop_address = sockaddr_address(&row.NextHop)?;
         if next_hop_address.is_ipv4() != prefix_address.is_ipv4() {
-            routes.insert(journal_keys[0].clone(), Observation::Unknown);
+            for key in journal_keys {
+                routes.insert(key.clone(), Observation::Unknown);
+            }
             continue;
         }
         let next_hop = if next_hop_address.is_unspecified() {
@@ -832,7 +828,9 @@ pub fn observe_recorded_routes(
         // assessment planner can reject a route that now points at another NIC.
         let interface_luid = unsafe { row.InterfaceLuid.Value };
         if interface_luid == 0 {
-            routes.insert(journal_keys[0].clone(), Observation::Unknown);
+            for key in journal_keys {
+                routes.insert(key.clone(), Observation::Unknown);
+            }
             continue;
         }
         let state = crate::recovery_journal::RouteState {
@@ -844,16 +842,18 @@ pub fn observe_recorded_routes(
             origin: Some(row.Origin),
         };
 
-        let key = &journal_keys[0];
-        match routes.get(key) {
-            Some(Observation::Absent) => {
-                routes.insert(key.clone(), Observation::Present(state));
-            }
-            Some(Observation::Present(_)) | Some(Observation::Unknown) => {
-                routes.insert(key.clone(), Observation::Unknown);
-            }
-            None => {
-                return Err("The route observation snapshot lost a requested journal key.".into());
+        for key in journal_keys {
+            match routes.get_mut(key) {
+                Some(observation @ Observation::Absent) => {
+                    *observation = Observation::Present(vec![state.clone()]);
+                }
+                Some(Observation::Present(rows)) => {
+                    rows.push(state.clone());
+                }
+                Some(Observation::Unknown) => {}
+                None => {
+                    return Err("The route observation snapshot lost a requested journal key.".into());
+                }
             }
         }
     }
@@ -1183,7 +1183,7 @@ mod tests {
             .expect("the live route inventory must be readable");
         assert_eq!(
             observed.get(&destination_prefix),
-            Some(&super::Observation::Present(expected_state))
+            Some(&super::Observation::Present(vec![expected_state]))
         );
     }
 

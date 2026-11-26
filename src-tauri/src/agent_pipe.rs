@@ -409,6 +409,28 @@ fn prepare_connect_snapshot(
                 );
             }
 
+            // Re-check after the coordinator transition as well. A route notification
+            // that raced the transition must not be reported as a current preparation.
+            if let Err(error) = snapshot.ensure_current() {
+                let cleanup = snapshot.shutdown();
+                let state_error = connection
+                    .finish_preparation_cancellation(
+                        session_id,
+                        cleanup.is_ok(),
+                        cleanup.as_ref().err().map(|detail| detail.clone()),
+                    )
+                    .err();
+                let detail = state_error
+                    .map(|state| format!("{error}; preparation-state update failed: {state}"))
+                    .unwrap_or(error);
+                return AgentResponse::failed_redacted(
+                    request_id,
+                    Some(connection.snapshot()),
+                    detail,
+                    &agent_credentials,
+                );
+            }
+
             let generation = snapshot.network_generation();
             *prepared = Some(PreparedConnectSnapshot {
                 session_id,

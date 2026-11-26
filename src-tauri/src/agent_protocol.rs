@@ -565,6 +565,16 @@ mod tests {
     }
 
     #[test]
+    fn accepts_cancel_preparation_without_profile_or_credentials() {
+        let request = AgentRequest {
+            version: AGENT_PROTOCOL_VERSION,
+            request_id: "cancel-preparation-01".to_string(),
+            operation: AgentOperation::CancelPreparation,
+        };
+        assert!(validate_agent_request(&request).is_ok());
+    }
+
+    #[test]
     fn validates_ipv4_ipv6_and_dns_server_hostnames() {
         assert!(is_valid_server_host("203.0.113.10"));
         assert!(is_valid_server_host("2001:db8::1"));

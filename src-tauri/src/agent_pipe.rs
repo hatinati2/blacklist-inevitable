@@ -43,7 +43,7 @@ use windows_sys::Win32::Foundation::HANDLE;
 use crate::agent_protocol::{
     AgentOperation, AgentRequestReplayGuard, AgentResponse, MAX_AGENT_REQUEST_BYTES,
 };
-use crate::connection_state::{ConnectionCoordinator, ConnectionPhase};
+use crate::connection_state::ConnectionCoordinator;
 
 const PIPE_NAME: &str = r"\\.\pipe\BlacklistInevitable.Agent.v1";
 
@@ -129,14 +129,14 @@ pub fn serve(
 
     loop {
         if stop_requested(stop_event) {
-            retire_preparation(&mut prepared_snapshot)?;
+            retire_preparation(&mut prepared_snapshot, connection)?;
             return Ok(());
         }
 
         let connected = match connect_client_overlapped(pipe, stop_event) {
             Ok(connected) => connected,
             Err(error) => {
-                let cleanup = retire_preparation(&mut prepared_snapshot);
+                let cleanup = retire_preparation(&mut prepared_snapshot, connection);
                 return match cleanup {
                     Ok(_) => Err(error),
                     Err(cleanup_error) => Err(format!(
@@ -146,7 +146,7 @@ pub fn serve(
             }
         };
         if !connected {
-            retire_preparation(&mut prepared_snapshot)?;
+            retire_preparation(&mut prepared_snapshot, connection)?;
             return Ok(());
         }
 
@@ -175,7 +175,7 @@ pub fn serve(
         unsafe { DisconnectNamedPipe(pipe) };
 
         if stop_requested(stop_event) {
-            retire_preparation(&mut prepared_snapshot)?;
+            retire_preparation(&mut prepared_snapshot, connection)?;
             return Ok(());
         }
 
@@ -192,19 +192,35 @@ fn stop_requested(stop_event: HANDLE) -> bool {
 }
 
 struct PreparedConnectSnapshot {
+    session_id: u64,
     snapshot: crate::windows_egress_snapshot::WindowsEgressSnapshot,
 }
 
-/// Explicitly unregister route/interface notifications and release the retained snapshot.
+/// Explicitly unregister route/interface notifications and release the exact prepared session.
 fn retire_preparation(
     prepared: &mut Option<PreparedConnectSnapshot>,
+    connection: &ConnectionCoordinator,
 ) -> Result<bool, String> {
-    match prepared.take() {
-        Some(item) => {
-            item.snapshot.shutdown()?;
-            Ok(true)
-        }
-        None => Ok(false),
+    let Some(item) = prepared.take() else {
+        return Ok(false);
+    };
+
+    let cleanup = item.snapshot.shutdown();
+    let cleanup_detail = cleanup
+        .as_ref()
+        .err()
+        .map(|error| format!("Endpoint snapshot notification cleanup failed: {error}"));
+    connection.finish_preparation_cancellation(
+        item.session_id,
+        cleanup.is_ok(),
+        cleanup_detail,
+    )?;
+
+    match cleanup {
+        Ok(()) => Ok(true),
+        Err(error) => Err(format!(
+            "The retained endpoint snapshot could not be fully retired: {error}"
+        )),
     }
 }
 
@@ -221,21 +237,35 @@ impl Drop for WipingCredentials {
 
 fn discard_stale_preparation(
     prepared: &mut Option<PreparedConnectSnapshot>,
-) -> Option<String> {
+    connection: &ConnectionCoordinator,
+) -> Result<Option<String>, String> {
     let stale = prepared
         .as_ref()
         .is_some_and(|item| item.snapshot.ensure_current().is_err());
     if !stale {
-        return None;
+        return Ok(None);
     }
 
-    let previous = prepared.take()?;
-    Some(match previous.snapshot.shutdown() {
+    let previous = prepared.take().ok_or_else(|| {
+        "The stale endpoint snapshot disappeared while it was being retired.".to_string()
+    })?;
+    let cleanup = previous.snapshot.shutdown();
+    let cleanup_detail = cleanup
+        .as_ref()
+        .err()
+        .map(|error| format!("Endpoint snapshot notification cleanup failed: {error}"));
+    connection.finish_preparation_cancellation(
+        previous.session_id,
+        cleanup.is_ok(),
+        cleanup_detail,
+    )?;
+
+    Ok(Some(match cleanup {
         Ok(()) => "The retained endpoint snapshot was invalidated by a route/interface change and discarded.".to_string(),
         Err(error) => format!(
             "The retained endpoint snapshot was invalidated and discarded; notification cleanup reported: {error}"
         ),
-    })
+    }))
 }
 
 fn prepare_connect_snapshot(
@@ -245,29 +275,35 @@ fn prepare_connect_snapshot(
     runtime: &tokio::runtime::Runtime,
     prepared: &mut Option<PreparedConnectSnapshot>,
 ) -> AgentResponse {
-    let current = connection.snapshot();
-    if current.phase != ConnectionPhase::Disconnected || !current.cleanup_healthy {
-        return AgentResponse::rejected_with_connection(
-            request_id,
-            Some(current),
-            "Endpoint preparation is allowed only while the Agent is cleanly Disconnected.",
-        );
-    }
-
-    if let Some(previous) = prepared.take() {
-        if let Err(error) = previous.snapshot.shutdown() {
-            return AgentResponse::rejected_with_connection(
-                request_id,
-                Some(current),
-                format!("The previous endpoint snapshot could not be retired safely: {error}"),
-            );
-        }
-    }
-
     let crate::agent_protocol::AgentConnectPayload {
         profile,
         credentials: agent_credentials,
     } = payload;
+
+    // A new preparation replaces the previous one only after its notification
+    // registrations have been explicitly retired and its session reset.
+    if prepared.is_some() {
+        if let Err(error) = retire_preparation(prepared, connection) {
+            return AgentResponse::failed_redacted(
+                request_id,
+                Some(connection.snapshot()),
+                error,
+                &agent_credentials,
+            );
+        }
+    }
+
+    let profile_id = profile.id.clone();
+    let session_id = match connection.begin_connect(&profile_id) {
+        Ok(session_id) => session_id,
+        Err(error) => {
+            return AgentResponse::rejected_with_connection(
+                request_id,
+                Some(connection.snapshot()),
+                error,
+            );
+        }
+    };
     let profile = crate::profiles::ProfileSummary::from(profile);
     let credentials = WipingCredentials(
         agent_credentials
@@ -285,10 +321,16 @@ fn prepare_connect_snapshot(
         Ok(plan) => plan,
         Err(error) => {
             drop(credentials);
+            let state_error = connection
+                .abort_preparation(session_id, true, None)
+                .err();
+            let detail = state_error
+                .map(|state| format!("{error}; the preparation session could not be released: {state}"))
+                .unwrap_or(error);
             return AgentResponse::failed_redacted(
                 request_id,
                 Some(connection.snapshot()),
-                error,
+                detail,
                 &agent_credentials,
             );
         }
@@ -299,7 +341,7 @@ fn prepare_connect_snapshot(
     drop(agent_credentials);
 
     let capture = runtime.block_on(
-        crate::windows_egress_snapshot::WindowsEgressSnapshot::capture_for_endpoint_plan(
+        crate::windows_egress_snapshot::WindowsEgressSnapshot::capture_for_endpoint_plan_detailed(
             &endpoint_plan,
         ),
     );
@@ -309,49 +351,118 @@ fn prepare_connect_snapshot(
             let endpoint_count = match snapshot.resolved_endpoints() {
                 Ok(endpoints) => endpoints.len(),
                 Err(error) => {
-                    let _ = snapshot.shutdown();
+                    let cleanup = snapshot.shutdown();
+                    let state_error = connection
+                        .abort_preparation(
+                            session_id,
+                            cleanup.is_ok(),
+                            cleanup.as_ref().err().map(|detail| detail.clone()),
+                        )
+                        .err();
+                    let detail = state_error
+                        .map(|state| format!("{error}; preparation-state update failed: {state}"))
+                        .unwrap_or(error);
                     return AgentResponse::failed_redacted(
                         request_id,
                         Some(connection.snapshot()),
-                        error,
+                        detail,
                         &BTreeMap::new(),
                     );
                 }
             };
+
             if let Err(error) = snapshot.ensure_current() {
-                let _ = snapshot.shutdown();
+                let cleanup = snapshot.shutdown();
+                let state_error = connection
+                    .abort_preparation(
+                        session_id,
+                        cleanup.is_ok(),
+                        cleanup.as_ref().err().map(|detail| detail.clone()),
+                    )
+                    .err();
+                let detail = state_error
+                    .map(|state| format!("{error}; preparation-state update failed: {state}"))
+                    .unwrap_or(error);
                 return AgentResponse::failed_redacted(
                     request_id,
                     Some(connection.snapshot()),
-                    error,
+                    detail,
                     &BTreeMap::new(),
                 );
             }
 
-            let latest = connection.snapshot();
-            if latest.phase != ConnectionPhase::Disconnected || !latest.cleanup_healthy {
-                let _ = snapshot.shutdown();
-                return AgentResponse::rejected_with_connection(
+            if let Err(error) = connection.endpoint_prepared(session_id) {
+                let cleanup = snapshot.shutdown();
+                let _ = connection.abort_preparation(
+                    session_id,
+                    cleanup.is_ok(),
+                    cleanup.as_ref().err().map(|detail| detail.clone()),
+                );
+                let detail = match cleanup {
+                    Ok(()) => error,
+                    Err(cleanup_error) => {
+                        format!("{error}; endpoint snapshot cleanup failed: {cleanup_error}")
+                    }
+                };
+                return AgentResponse::failed_redacted(
                     request_id,
-                    Some(latest),
-                    "Agent state changed during endpoint preparation; the snapshot was discarded.",
+                    Some(connection.snapshot()),
+                    detail,
+                    &BTreeMap::new(),
+                );
+            }
+
+            // Re-check after the coordinator transition as well. A route notification
+            // that raced the transition must not be reported as a current preparation.
+            if let Err(error) = snapshot.ensure_current() {
+                let cleanup = snapshot.shutdown();
+                let state_error = connection
+                    .finish_preparation_cancellation(
+                        session_id,
+                        cleanup.is_ok(),
+                        cleanup.as_ref().err().map(|detail| detail.clone()),
+                    )
+                    .err();
+                let detail = state_error
+                    .map(|state| format!("{error}; preparation-state update failed: {state}"))
+                    .unwrap_or(error);
+                return AgentResponse::failed_redacted(
+                    request_id,
+                    Some(connection.snapshot()),
+                    detail,
+                    &BTreeMap::new(),
                 );
             }
 
             let generation = snapshot.network_generation();
-            *prepared = Some(PreparedConnectSnapshot { snapshot });
-            let mut response = AgentResponse::ok(request_id, Some(latest));
+            *prepared = Some(PreparedConnectSnapshot {
+                session_id,
+                snapshot,
+            });
+            let mut response = AgentResponse::ok(request_id, Some(connection.snapshot()));
             response.detail = Some(format!(
-                "Endpoint preparation succeeded: {endpoint_count} route-bound endpoint binding(s), network generation {generation}. The snapshot is retained by the Agent. This did not connect, install WFP policy, or modify routes/DNS."
+                "Endpoint preparation succeeded for session {session_id}: {endpoint_count} route-bound endpoint binding(s), network generation {generation}. The snapshot is retained by the Agent. This did not connect, install WFP policy, or modify routes/DNS."
             ));
             response
         }
-        Err(error) => AgentResponse::failed_redacted(
-            request_id,
-            Some(connection.snapshot()),
-            error,
-            &BTreeMap::new(),
-        ),
+        Err(error) => {
+            let state_error = connection
+                .abort_preparation(
+                    session_id,
+                    error.cleanup_confirmed,
+                    Some(error.detail.clone()),
+                )
+                .err();
+            let detail = state_error
+                .map(|state| format!("{}; the preparation session could not be released: {state}", error.detail))
+                .unwrap_or(error.detail);
+            AgentResponse::failed_redacted(
+                request_id,
+                Some(connection.snapshot()),
+                detail,
+                &BTreeMap::new(),
+            )
+        }
     }
 }
 
@@ -369,7 +480,7 @@ fn handle_authenticated_connection(
     let request = read_one_request(pipe, stop_event)?;
     replay_guard.accept(&request)?;
 
-    let invalidation_detail = discard_stale_preparation(prepared);
+    let invalidation_detail = discard_stale_preparation(prepared, connection)?;
     let response = match request.operation {
         AgentOperation::GetStatus | AgentOperation::GetDiagnostics => {
             let mut response =
@@ -384,7 +495,7 @@ fn handle_authenticated_connection(
             prepare_connect_snapshot(request.request_id, payload, connection, runtime, prepared)
         }
         AgentOperation::CancelPreparation => {
-            match retire_preparation(prepared) {
+            match retire_preparation(prepared, connection) {
                 Ok(true) => {
                     let mut response =
                         AgentResponse::ok(request.request_id, Some(connection.snapshot()));

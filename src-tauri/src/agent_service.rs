@@ -222,7 +222,7 @@ mod windows_service {
             .map(|detail| format!(" WFP recovery is incomplete: {detail}."))
             .unwrap_or_default();
         format!(
-            "The privileged Agent is running in status and read-only endpoint-preparation mode. Startup journal result: {recovery_state}; {journal_state}. Sessions containing engine, TUN, route, or DNS state are not auto-cleaned. Connect, Disconnect, and Recover remain disabled.{failure_state}"
+            "The privileged Agent is running in status-only mode. Startup journal result: {recovery_state}; {journal_state}. Sessions containing engine, TUN, route, or DNS state are not auto-cleaned. Connect, Disconnect, and Recover remain disabled.{failure_state}"
         )
     }
 

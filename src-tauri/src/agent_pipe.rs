@@ -146,7 +146,7 @@ pub fn serve(
             }
         };
         if !connected {
-            retire_preparation(&mut prepared_snapshot)?;
+            retire_preparation(&mut prepared_snapshot, connection)?;
             return Ok(());
         }
 
@@ -175,7 +175,7 @@ pub fn serve(
         unsafe { DisconnectNamedPipe(pipe) };
 
         if stop_requested(stop_event) {
-            retire_preparation(&mut prepared_snapshot)?;
+            retire_preparation(&mut prepared_snapshot, connection)?;
             return Ok(());
         }
 

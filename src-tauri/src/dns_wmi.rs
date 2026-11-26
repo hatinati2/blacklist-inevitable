@@ -129,9 +129,25 @@ fn decode_wmi_snapshot(bytes: &[u8], process_succeeded: bool) -> Result<RawWmiSn
     let object = value
         .as_object()
         .ok_or_else(|| "The DNS WMI provider returned a non-object response.".to_string())?;
-    for key in ["ok", "serverAddresses", "clients", "globalSettings"] {
+    for key in ["ok", "error", "serverAddresses", "clients", "globalSettings"] {
         if !object.contains_key(key) {
             return Err(format!("The DNS WMI response omitted the required {key} field."));
+        }
+    }
+
+    for (collection, fields) in [
+        ("serverAddresses", &["InterfaceIndex", "InterfaceAlias", "AddressFamily", "ServerAddresses"][..]),
+        ("clients", &["InterfaceIndex", "InterfaceAlias", "ProtocolIFType", "ConnectionSpecificSuffix", "ConnectionSpecificSuffixSearchList", "RegisterThisConnectionsAddress", "UseSuffixWhenRegistering", "DHCPOptionsToUse"][..]),
+        ("globalSettings", &["ProtocolIFType", "AppendPrimarySuffixes", "AppendParentSuffixes", "DNSSuffixesToAppend", "UseSuffixSearchList", "SuffixSearchList", "UseDevolution", "DevolutionLevel"][..]),
+    ] {
+        let rows = object.get(collection).and_then(serde_json::Value::as_array)
+            .ok_or_else(|| format!("The DNS WMI {collection} inventory is not an array."))?;
+        for row in rows {
+            let row = row.as_object()
+                .ok_or_else(|| format!("The DNS WMI {collection} inventory contains a non-object row."))?;
+            if fields.iter().any(|field| !row.contains_key(*field)) {
+                return Err(format!("A DNS WMI {collection} row omitted a documented property."));
+            }
         }
     }
 
@@ -197,7 +213,7 @@ fn validate_snapshot(
     let mut server_addresses = Vec::with_capacity(server_rows.len());
     for row in server_rows {
         if row.interface_index != Some(identity.index)
-            || row.interface_alias.as_deref() != Some(identity.alias.as_str())
+            || !row.interface_alias.as_deref().is_some_and(|alias| alias.eq_ignore_ascii_case(&identity.alias))
         {
             return Err("The DNS WMI server-address row does not match the contemporaneous interface index and alias.".into());
         }

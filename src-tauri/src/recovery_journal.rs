@@ -1288,6 +1288,7 @@ mod tests {
         journal.dns.push(DnsMutationRecord {
             interface_index: 12,
             interface_guid: Some(configuration.interface_guid.clone()),
+            interface_luid: Some(0x0001_0000_0000_000C),
             applied: DnsConfiguration::Interface(configuration.clone()),
             previous: DnsConfiguration::Interface(configuration),
         });

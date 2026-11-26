@@ -10,7 +10,7 @@ use crate::windows_network_change::{NetworkChangeMonitor, NetworkEpoch};
 #[cfg(windows)]
 use crate::windows_route::ResolvedVpnEndpointEgress;
 #[cfg(windows)]
-use crate::wfp_policy::{EgressPolicySpec, VpnEndpoint, WfpPolicyPlan};
+use crate::wfp_policy::{EgressPolicySpec, TransportProtocol, VpnEndpoint, WfpPolicyPlan};
 
 /// A point-in-time egress plan whose endpoint permits are pinned to the exact
 /// interface selected by Windows for each numeric VPN endpoint.
@@ -25,6 +25,23 @@ pub struct WindowsEgressSnapshot {
 
 #[cfg(windows)]
 impl WindowsEgressSnapshot {
+    /// Resolve a proxy hostname through encrypted DoH, preserve the caller's
+    /// exact transport tuple, then capture Windows physical routes.
+    /// No system-DNS/plaintext fallback is available. The initial DoH exchange
+    /// occurs before this route snapshot and before tunnel startup.
+    ///
+    /// The caller must supply the protocol selected by the engine adapter; this
+    /// method deliberately does not infer TCP/UDP from a profile name.
+    pub async fn capture_for_server(
+        server: &str,
+        port: u16,
+        protocol: TransportProtocol,
+    ) -> Result<Self, String> {
+        let resolver = crate::endpoint_bootstrap::EndpointBootstrapResolver::new()?;
+        let endpoints = resolver.resolve_vpn_endpoints(server, port, protocol).await?;
+        Self::capture(&endpoints)
+    }
+
     /// Capture physical candidates, resolve every endpoint, and compile a
     /// route-bound plan. Any observed change during capture rejects the result.
     pub fn capture(endpoints: &[VpnEndpoint]) -> Result<Self, String> {

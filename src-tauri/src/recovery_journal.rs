@@ -1353,10 +1353,22 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("interfaceLuid");
-        for route in [&mut legacy["routes"][0]["applied"], &mut legacy["routes"][0]["previous"]] {
-            route.as_object_mut().unwrap().remove("protocol");
-            route.as_object_mut().unwrap().remove("origin");
-        }
+        legacy["routes"][0]["applied"]
+            .as_object_mut()
+            .unwrap()
+            .remove("protocol");
+        legacy["routes"][0]["applied"]
+            .as_object_mut()
+            .unwrap()
+            .remove("origin");
+        legacy["routes"][0]["previous"]
+            .as_object_mut()
+            .unwrap()
+            .remove("protocol");
+        legacy["routes"][0]["previous"]
+            .as_object_mut()
+            .unwrap()
+            .remove("origin");
 
         let decoded: RecoveryJournal = serde_json::from_value(legacy).unwrap();
         assert_eq!(decoded.routes[0].applied.interface_luid, None);

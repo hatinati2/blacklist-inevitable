@@ -177,7 +177,6 @@ fn stop_requested(stop_event: HANDLE) -> bool {
 }
 
 struct PreparedConnectSnapshot {
-    profile_id: String,
     snapshot: crate::windows_egress_snapshot::WindowsEgressSnapshot,
 }
 
@@ -203,13 +202,10 @@ fn discard_stale_preparation(
     }
 
     let previous = prepared.take()?;
-    let profile_id = previous.profile_id;
     Some(match previous.snapshot.shutdown() {
-        Ok(()) => format!(
-            "The prepared endpoint snapshot for profile '{profile_id}' was invalidated by a route/interface change and discarded."
-        ),
+        Ok(()) => "The retained endpoint snapshot was invalidated by a route/interface change and discarded.".to_string(),
         Err(error) => format!(
-            "The prepared endpoint snapshot for profile '{profile_id}' was invalidated and discarded; notification cleanup reported: {error}"
+            "The retained endpoint snapshot was invalidated and discarded; notification cleanup reported: {error}"
         ),
     })
 }
@@ -244,7 +240,6 @@ fn prepare_connect_snapshot(
         profile,
         credentials: agent_credentials,
     } = payload;
-    let profile_id = profile.id.clone();
     let profile = crate::profiles::ProfileSummary::from(profile);
     let credentials = WipingCredentials(
         agent_credentials
@@ -296,10 +291,10 @@ fn prepare_connect_snapshot(
             }
 
             let generation = snapshot.network_generation();
-            *prepared = Some(PreparedConnectSnapshot { profile_id: profile_id.clone(), snapshot });
+            *prepared = Some(PreparedConnectSnapshot { snapshot });
             let mut response = AgentResponse::ok(request_id, Some(latest));
             response.detail = Some(format!(
-                "Endpoint preparation succeeded for profile '{profile_id}': {endpoint_count} route-bound endpoint binding(s), network generation {generation}. The snapshot is retained by the Agent. This did not connect, install WFP policy, or modify routes/DNS."
+                "Endpoint preparation succeeded: {endpoint_count} route-bound endpoint binding(s), network generation {generation}. The snapshot is retained by the Agent. This did not connect, install WFP policy, or modify routes/DNS."
             ));
             response
         }

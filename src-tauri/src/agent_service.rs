@@ -314,11 +314,13 @@ mod windows_service {
                 destination_prefix: "0.0.0.0/0".to_string(),
                 applied: RouteState {
                     interface_index: 7,
+                    interface_luid: Some(700),
                     next_hop: None,
                     metric: 10,
                 },
                 previous: Some(RouteState {
                     interface_index: 3,
+                    interface_luid: Some(300),
                     next_hop: Some("192.0.2.1".parse().expect("valid test gateway")),
                     metric: 25,
                 }),

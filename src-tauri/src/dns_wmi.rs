@@ -262,6 +262,13 @@ fn validate_snapshot(
 
     let native_v4: BTreeSet<_> = native_ipv4.iter().copied().collect();
     let native_v6: BTreeSet<_> = native_ipv6.iter().copied().collect();
+    // A successful query must not hide a family that the native effective
+    // resolver inventory positively observed.
+    if (!native_v4.is_empty() && !seen_families.contains(&2))
+        || (!native_v6.is_empty() && !seen_families.contains(&23))
+    {
+        return Err("The DNS WMI server-address inventory omitted an IP family present in the native effective resolver inventory.".into());
+    }
     for row in &server_addresses {
         let observed: BTreeSet<_> = row.addresses.iter().copied().collect();
         let native = if row.address_family == 2 { &native_v4 } else { &native_v6 };
@@ -299,6 +306,16 @@ fn validate_snapshot(
             use_suffix_when_registering: row.use_suffix_when_registering,
             dhcp_options_to_use: row.dhcp_options_to_use,
         });
+    }
+    for family in &seen_families {
+        let client_family_present = match *family {
+            2 => seen_client_protocols.contains(&4096) || seen_client_protocols.contains(&4098),
+            23 => seen_client_protocols.contains(&4097) || seen_client_protocols.contains(&4098),
+            _ => false,
+        };
+        if !client_family_present {
+            return Err("The DNS WMI server-address family is not represented by the DNS client protocol inventory.".into());
+        }
     }
 
     let mut seen_global_protocols = BTreeSet::new();
@@ -659,6 +676,24 @@ mod tests {
         snapshot.global_settings.as_mut().unwrap()[0].protocol_if_type = Some(4098);
         let v4: IpAddr = "192.0.2.53".parse().unwrap();
         let v6: IpAddr = "2001:db8::53".parse().unwrap();
+        assert!(validate_snapshot(snapshot, &identity(), &[v4], &[v6]).is_err());
+    }
+
+    #[test]
+    fn rejects_missing_effective_family_and_client_protocol_mismatch() {
+        let mut snapshot = raw_snapshot();
+        snapshot.server_addresses = Some(vec![RawServerAddress {
+            interface_index: Some(7),
+            interface_alias: Some("Ethernet".into()),
+            address_family: Some(23),
+            server_addresses: Some(vec!["2001:db8::53".into()]),
+        }]);
+        let v4: IpAddr = "192.0.2.53".parse().unwrap();
+        let v6: IpAddr = "2001:db8::53".parse().unwrap();
+        assert!(validate_snapshot(snapshot, &identity(), &[v4], &[v6]).is_err());
+
+        let mut snapshot = raw_snapshot();
+        snapshot.clients.as_mut().unwrap()[0].protocol_if_type = Some(4096);
         assert!(validate_snapshot(snapshot, &identity(), &[v4], &[v6]).is_err());
     }
 

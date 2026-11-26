@@ -8,13 +8,24 @@ A journal records only the resource identities and exact previous settings neede
 
 - Engine PID plus its Windows process-creation timestamp, so recovery can distinguish PID reuse.
 - TUN adapter GUID, interface index, alias, MTU, and assigned addresses.
-- Each route state applied by the session and the previous route state, if one existed.
+- Each route state applied by the session and the previous route state, if one existed, including the stable Windows NET_LUID; interface indexes remain consistency diagnostics and are never the durable route identity.
 - DNS mode and server list applied to each interface, plus the previous DHCP/static configuration.
 - WFP provider/layer GUIDs, stable filter GUIDs, and optional BFE runtime filter IDs owned by the session. The stable filter GUID is the only supported deletion/read-back key. The runtime ID is diagnostic only and may be absent in a pre-mutation intent checkpoint.
 
 The schema does not contain profile credentials, share links, engine JSON, command lines, executable paths, or arbitrary filesystem paths. All collections and the serialized file size have explicit upper bounds. Unknown fields and unsupported schema versions are rejected.
 
 `FirewallFilterRecord.filterKey` is optional only for compatibility with older version-1 records that predate stable filter-key recording. Newly created WFP filter records must always include a canonical filter GUID. `filterId` is optional so a complete stable-key intent can be persisted before adding a filter; after a successful BFE read-back, a later journal revision may attach the runtime ID for diagnostics. Recovery must never attempt to delete a legacy filter using only its runtime ID; it must enumerate and reconcile exact provider-owned filters or leave policy cleanup unconfirmed.
+
+## Stable route identity gate
+
+Every route state records the Windows NET_LUID together with its current
+interface index. The index can be reused after an adapter is removed or
+recreated, so it is only a live consistency value. A NetworkConfigured
+checkpoint is rejected unless each applied route and each existing previous
+route carries a nonzero stable LUID. Legacy route records still deserialize
+with a missing LUID, but cannot authorize this phase. This journal rule does
+not claim that a live route observer or rollback executor is wired to the
+schema yet.
 
 ## Dual-stack DNS evidence gate
 
@@ -52,7 +63,7 @@ Each phase also requires its minimum durable evidence: `EgressProtected` and
 later phases require stable WFP filter keys with committed runtime IDs;
 `EngineStarted` and later require the exact process ID plus creation time;
 `TunnelCreated` and later require the tunnel GUID/index/address record; and
-`NetworkConfigured` requires route records and complete dual-stack DNS snapshots
+`NetworkConfigured` requires route records with stable LUIDs and complete dual-stack DNS snapshots
 for both previous and applied settings. The store rejects
 out-of-order or incomplete checkpoints before writing a new revision.
 

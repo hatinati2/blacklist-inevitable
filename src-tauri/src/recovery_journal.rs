@@ -65,7 +65,12 @@ pub struct TunnelInterfaceRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RouteState {
+    /// The current interface index is diagnostic and may be reused after adapter changes.
     pub interface_index: u32,
+    /// Stable NET_LUID returned by the Windows IP Helper route/interface APIs.
+    /// Missing only in legacy records; such routes cannot authorize NetworkConfigured.
+    #[serde(default)]
+    pub interface_luid: Option<u64>,
     pub next_hop: Option<IpAddr>,
     pub metric: u32,
 }
@@ -338,6 +343,15 @@ impl RecoveryJournal {
                         .to_string(),
                 );
             }
+            if self.routes.iter().any(|route| {
+                route.applied.interface_luid.is_none()
+                    || route.previous.as_ref().is_some_and(|previous| previous.interface_luid.is_none())
+            }) {
+                return Err(
+                    "NetworkConfigured requires a stable NET_LUID for every applied and previous route state."
+                        .to_string(),
+                );
+            }
             if self.dns.iter().any(|change| {
                 change.interface_guid.is_none()
                     || !is_complete_dual_stack(&change.previous)
@@ -383,6 +397,7 @@ fn parse_prefix(value: &str) -> Result<(IpAddr, u8), String> {
 
 fn validate_route_state(state: &RouteState, destination: IpAddr) -> Result<(), String> {
     if state.interface_index == 0
+        || state.interface_luid == Some(0)
         || state.next_hop.is_some_and(|gateway| gateway.is_ipv4() != destination.is_ipv4())
     {
         return Err("The recovery journal contains an invalid route state.".to_string());
@@ -875,11 +890,13 @@ mod tests {
             destination_prefix: "0.0.0.0/0".to_string(),
             applied: RouteState {
                 interface_index: 17,
+                interface_luid: Some(170),
                 next_hop: None,
                 metric: 5,
             },
             previous: Some(RouteState {
                 interface_index: 12,
+                interface_luid: Some(120),
                 next_hop: Some("192.0.2.1".parse().unwrap()),
                 metric: 25,
             }),
@@ -1165,11 +1182,52 @@ mod tests {
     }
 
     #[test]
+    fn network_configured_requires_stable_route_luid_for_every_route_state() {
+        let mut missing_applied = example_journal(90, 1);
+        missing_applied.phase = JournalPhase::NetworkConfigured;
+        make_network_configured_dns_complete(&mut missing_applied);
+        missing_applied.routes[0].applied.interface_luid = None;
+        assert!(missing_applied.validate().is_err());
+
+        let mut missing_previous = example_journal(91, 1);
+        missing_previous.phase = JournalPhase::NetworkConfigured;
+        make_network_configured_dns_complete(&mut missing_previous);
+        missing_previous.routes[0].previous.as_mut().unwrap().interface_luid = None;
+        assert!(missing_previous.validate().is_err());
+
+        let mut complete = example_journal(92, 1);
+        complete.phase = JournalPhase::NetworkConfigured;
+        make_network_configured_dns_complete(&mut complete);
+        complete.validate().unwrap();
+    }
+
+    #[test]
+    fn legacy_route_state_deserializes_without_luid_but_cannot_authorize_network_configured() {
+        let json = r#"{
+            "interfaceIndex": 12,
+            "nextHop": "192.0.2.1",
+            "metric": 25
+        }"#;
+        let legacy: RouteState = serde_json::from_str(json).unwrap();
+        assert_eq!(legacy.interface_luid, None);
+
+        let mut journal = example_journal(93, 1);
+        journal.phase = JournalPhase::NetworkConfigured;
+        make_network_configured_dns_complete(&mut journal);
+        journal.routes[0].applied = legacy;
+        assert!(journal.validate().is_err());
+    }
+
+    #[test]
     fn validates_route_dns_tunnel_and_filter_resource_identities() {
         let mut journal = example_journal(1, 1);
         journal.validate().unwrap();
 
         journal.routes[0].destination_prefix = "0.0.0.0/33".to_string();
+        assert!(journal.validate().is_err());
+
+        let mut journal = example_journal(1, 1);
+        journal.routes[0].applied.interface_luid = Some(0);
         assert!(journal.validate().is_err());
 
         let mut journal = example_journal(1, 1);

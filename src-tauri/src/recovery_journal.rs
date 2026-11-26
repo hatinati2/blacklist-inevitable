@@ -1124,7 +1124,7 @@ mod tests {
 
         let mut missing_dns_guid = network_configured_journal(98);
         missing_dns_guid.dns[0].interface_guid = None;
-        assert!(missing_dns_guid.validate().unwrap_err().contains("complete IPv4 and IPv6"));
+        assert!(missing_dns_guid.validate().unwrap_err().contains("snapshot GUID"));
 
         let mut no_routes = network_configured_journal(99);
         no_routes.routes.clear();

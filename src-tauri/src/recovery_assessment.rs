@@ -841,6 +841,19 @@ fn assess_route(
     if rows.iter().any(|row| !has_complete_route_state_evidence(row)) {
         return ResourceDisposition::Unknown;
     }
+    let mut observed_identities = BTreeSet::new();
+    for row in rows {
+        let identity = (
+            row.interface_luid,
+            row.next_hop,
+            row.metric,
+            row.protocol,
+            row.origin,
+        );
+        if !observed_identities.insert(identity) {
+            return ResourceDisposition::Unknown;
+        }
+    }
 
     let applied_matches = rows
         .iter()

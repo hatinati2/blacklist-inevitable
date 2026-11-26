@@ -59,6 +59,8 @@ pub struct DnsDohEffectiveAddressMatch {
 struct RawDohSnapshot {
     ok: bool,
     error: Option<String>,
+    #[serde(rename = "errorKind")]
+    error_kind: Option<String>,
     source: Option<String>,
     rows: Option<Vec<RawDohRow>>,
 }
@@ -97,7 +99,7 @@ fn decode_snapshot(bytes: &[u8], process_succeeded: bool) -> Result<RawDohSnapsh
     let object = value
         .as_object()
         .ok_or_else(|| "The Windows DoH inventory response is not an object.".to_string())?;
-    for key in ["ok", "error", "source", "rows"] {
+    for key in ["ok", "error", "errorKind", "source", "rows"] {
         if !object.contains_key(key) {
             return Err(format!("The Windows DoH inventory omitted the required {key} field."));
         }
@@ -109,6 +111,12 @@ fn decode_snapshot(bytes: &[u8], process_succeeded: bool) -> Result<RawDohSnapsh
     let snapshot: RawDohSnapshot = serde_json::from_value(value)
         .map_err(|_| "The Windows DoH inventory did not match its bounded response schema.".to_string())?;
     if !process_succeeded || !snapshot.ok {
+        if snapshot.error_kind.as_deref() == Some("CmdletUnavailable") {
+            return Err(
+                "CAPABILITY_UNAVAILABLE: Get-DnsClientDohServerAddress is not available on this Windows image."
+                    .into(),
+            );
+        }
         let detail = snapshot.error.unwrap_or_else(|| "provider query failed".into());
         return Err(format!(
             "The read-only Windows DoH inventory query failed: {}",
@@ -312,8 +320,18 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 try {
-    $command = Get-Command -Name 'Get-DnsClientDohServerAddress' -CommandType Cmdlet -ErrorAction Stop
-    if ($null -eq $command) { throw 'The Get-DnsClientDohServerAddress cmdlet is unavailable.' }
+    $command = Get-Command -Name 'Get-DnsClientDohServerAddress' -CommandType Cmdlet -ErrorAction SilentlyContinue
+    if ($null -eq $command) {
+        $result = [ordered]@{
+            ok = $false
+            error = 'The Get-DnsClientDohServerAddress cmdlet is unavailable on this Windows image.'
+            errorKind = 'CmdletUnavailable'
+            source = 'Get-DnsClientDohServerAddress'
+            rows = @()
+        }
+        [Console]::Out.WriteLine((ConvertTo-Json -InputObject $result -Depth 8 -Compress))
+        exit 0
+    }
     $items = @(Get-DnsClientDohServerAddress -ErrorAction Stop | Select-Object -First 65)
     $rows = @()
     foreach ($item in $items) {
@@ -349,14 +367,17 @@ try {
     $result = [ordered]@{
         ok = $true
         error = $null
+        errorKind = $null
         source = 'Get-DnsClientDohServerAddress'
         rows = $rows
     }
     [Console]::Out.WriteLine((ConvertTo-Json -InputObject $result -Depth 8 -Compress))
 } catch {
+    $errorKind = if ($_.FullyQualifiedErrorId -match 'CommandNotFoundException') { 'CmdletUnavailable' } else { 'QueryFailed' }
     $result = [ordered]@{
         ok = $false
         error = $_.Exception.Message
+        errorKind = $errorKind
         source = 'Get-DnsClientDohServerAddress'
         rows = @()
     }
@@ -433,6 +454,7 @@ mod tests {
         RawDohSnapshot {
             ok: true,
             error: None,
+            error_kind: None,
             source: Some(DNS_DOH_INVENTORY_SOURCE.into()),
             rows: Some(vec![
                 RawDohRow {
@@ -493,8 +515,12 @@ mod tests {
 
         let mut snapshot = fixture();
         snapshot.ok = false;
-        snapshot.error = Some("cmdlet unavailable".into());
+        snapshot.error = Some("query denied".into());
         assert!(validate_snapshot(snapshot, false).is_err());
+
+        let unavailable = br#"{"ok":false,"error":"cmdlet unavailable","errorKind":"CmdletUnavailable","source":"Get-DnsClientDohServerAddress","rows":[]}"#;
+        let error = decode_snapshot(unavailable, true).unwrap_err();
+        assert!(error.starts_with("CAPABILITY_UNAVAILABLE:"));
     }
 
     #[test]
@@ -572,8 +598,18 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn live_read_only_global_doh_inventory_reports_observed_property_schema() {
-        let inventory = observe_global_doh_server_inventory()
-            .expect("the local Get-DnsClientDohServerAddress read must return a complete bounded result");
+        let inventory = match observe_global_doh_server_inventory() {
+            Ok(inventory) => inventory,
+            Err(error) if error.starts_with("CAPABILITY_UNAVAILABLE:") => {
+                // Some GitHub-hosted Windows images do not ship the Windows
+                // DoH client cmdlet. This is Unknown on that image, not an empty
+                // inventory and not a product failure. Real Win10/11 acceptance
+                // must run this integration check on supported client builds.
+                eprintln!("SKIP: {error}");
+                return;
+            }
+            Err(error) => panic!("the local Windows DoH query failed: {error}"),
+        };
         assert_eq!(inventory.source, DNS_DOH_INVENTORY_SOURCE);
         assert!(inventory.servers.len() <= MAX_SERVER_ROWS);
         // A legitimately empty system list is valid. When rows exist, validation

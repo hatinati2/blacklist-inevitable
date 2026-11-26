@@ -10,6 +10,7 @@ pub mod destination_routing;
 pub mod recovery_journal;
 pub mod recovery_assessment;
 pub mod recovery_observer;
+pub mod dns_wmi;
 pub mod wfp_policy;
 #[cfg(windows)]
 pub mod wfp_engine;

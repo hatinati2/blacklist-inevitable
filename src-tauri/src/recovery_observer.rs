@@ -262,13 +262,13 @@ impl Drop for OwnedInterfaceDnsSettings {
 }
 
 #[cfg(windows)]
-struct EffectiveDnsServers {
-    ipv4: Vec<std::net::IpAddr>,
-    ipv6: Vec<std::net::IpAddr>,
+pub(crate) struct EffectiveDnsServers {
+    pub(crate) ipv4: Vec<std::net::IpAddr>,
+    pub(crate) ipv6: Vec<std::net::IpAddr>,
 }
 
 #[cfg(windows)]
-fn observe_effective_dns_servers(
+pub(crate) fn observe_effective_dns_servers(
     expected_interface_luid: u64,
 ) -> Result<EffectiveDnsServers, String> {
     use std::collections::BTreeSet;

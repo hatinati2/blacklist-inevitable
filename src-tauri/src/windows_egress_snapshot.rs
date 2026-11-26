@@ -14,6 +14,32 @@ use crate::wfp_policy::{EgressPolicySpec, TransportProtocol, VpnEndpoint, WfpPol
 
 /// A point-in-time egress plan whose endpoint permits are pinned to the exact
 /// interface selected by Windows for each numeric VPN endpoint.
+/// Failure while building a route snapshot, including whether all
+/// registered network-change notifications were confirmed released.
+#[cfg(windows)]
+#[derive(Debug, Clone)]
+pub struct EgressSnapshotCaptureError {
+    pub detail: String,
+    pub cleanup_confirmed: bool,
+}
+
+#[cfg(windows)]
+fn finish_capture_error(
+    monitor: NetworkChangeMonitor,
+    detail: String,
+) -> EgressSnapshotCaptureError {
+    match monitor.shutdown() {
+        Ok(()) => EgressSnapshotCaptureError {
+            detail,
+            cleanup_confirmed: true,
+        },
+        Err(cleanup_error) => EgressSnapshotCaptureError {
+            detail: format!("{detail} Network-change notification cleanup failed: {cleanup_error}"),
+            cleanup_confirmed: false,
+        },
+    }
+}
+
 #[cfg(windows)]
 pub struct WindowsEgressSnapshot {
     monitor: NetworkChangeMonitor,
@@ -41,13 +67,33 @@ impl WindowsEgressSnapshot {
     pub async fn capture_for_endpoint_plan(
         endpoint_plan: &crate::engine::sing_box::EngineEndpointPlan,
     ) -> Result<Self, String> {
-        let resolver = crate::endpoint_bootstrap::EndpointBootstrapResolver::new()?;
-        let endpoints = resolver.resolve_vpn_endpoints_for_protocols(
-            &endpoint_plan.server,
-            endpoint_plan.port,
-            &endpoint_plan.protocols,
-        ).await?;
-        Self::capture(&endpoints)
+        Self::capture_for_endpoint_plan_detailed(endpoint_plan)
+            .await
+            .map_err(|error| error.detail)
+    }
+
+    /// Detailed variant for the Agent, which must know whether a failed capture
+    /// left any route/interface notification registration behind.
+    pub async fn capture_for_endpoint_plan_detailed(
+        endpoint_plan: &crate::engine::sing_box::EngineEndpointPlan,
+    ) -> Result<Self, EgressSnapshotCaptureError> {
+        let resolver = crate::endpoint_bootstrap::EndpointBootstrapResolver::new()
+            .map_err(|detail| EgressSnapshotCaptureError {
+                detail,
+                cleanup_confirmed: true,
+            })?;
+        let endpoints = resolver
+            .resolve_vpn_endpoints_for_protocols(
+                &endpoint_plan.server,
+                endpoint_plan.port,
+                &endpoint_plan.protocols,
+            )
+            .await
+            .map_err(|detail| EgressSnapshotCaptureError {
+                detail,
+                cleanup_confirmed: true,
+            })?;
+        Self::capture_detailed(&endpoints)
     }
 
     /// Resolve a proxy hostname through encrypted DoH, preserve the caller's
@@ -70,25 +116,50 @@ impl WindowsEgressSnapshot {
     /// Capture physical candidates, resolve every endpoint, and compile a
     /// route-bound plan. Any observed change during capture rejects the result.
     pub fn capture(endpoints: &[VpnEndpoint]) -> Result<Self, String> {
-        let monitor = NetworkChangeMonitor::start()?;
-        let epoch = monitor.snapshot()?;
+        Self::capture_detailed(endpoints).map_err(|error| error.detail)
+    }
 
-        let physical_interfaces =
-            crate::windows_interfaces::discover_hardware_egress_interfaces()?;
-        let resolved_endpoints =
-            crate::windows_route::resolve_vpn_endpoint_egress(endpoints, &physical_interfaces)?;
-
-        let spec = EgressPolicySpec {
-            physical_interfaces,
-            vpn_endpoints: endpoints.to_vec(),
+    fn capture_detailed(
+        endpoints: &[VpnEndpoint],
+    ) -> Result<Self, EgressSnapshotCaptureError> {
+        let monitor = NetworkChangeMonitor::start().map_err(|detail| {
+            EgressSnapshotCaptureError {
+                detail,
+                // start() can fail after the first of the two Windows subscriptions
+                // has been registered. Its Drop path retries, but cannot confirm removal.
+                cleanup_confirmed: false,
+            }
+        })?;
+        let epoch = match monitor.snapshot() {
+            Ok(epoch) => epoch,
+            Err(error) => return Err(finish_capture_error(monitor, error)),
         };
-        let plan = spec.compile_plan_with_resolved_egress(&resolved_endpoints)?;
 
-        if !monitor.is_current(epoch) {
-            return Err("The Windows route or IP-interface table changed during egress snapshot capture; discard and retry.".into());
+        let capture = (|| {
+            let physical_interfaces =
+                crate::windows_interfaces::discover_hardware_egress_interfaces()?;
+            let resolved_endpoints =
+                crate::windows_route::resolve_vpn_endpoint_egress(endpoints, &physical_interfaces)?;
+
+            let spec = EgressPolicySpec {
+                physical_interfaces,
+                vpn_endpoints: endpoints.to_vec(),
+            };
+            let plan = spec.compile_plan_with_resolved_egress(&resolved_endpoints)?;
+
+            if !monitor.is_current(epoch) {
+                return Err("The Windows route or IP-interface table changed during egress snapshot capture; discard and retry.".to_string());
+            }
+
+            Ok((spec, resolved_endpoints, plan))
+        })();
+
+        match capture {
+            Ok((spec, resolved_endpoints, plan)) => {
+                Ok(Self { monitor, epoch, spec, resolved_endpoints, plan })
+            }
+            Err(error) => Err(finish_capture_error(monitor, error)),
         }
-
-        Ok(Self { monitor, epoch, spec, resolved_endpoints, plan })
     }
 
     /// Fail closed if any route/interface notification invalidated the snapshot.

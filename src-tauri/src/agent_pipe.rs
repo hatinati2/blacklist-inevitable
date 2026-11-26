@@ -136,7 +136,7 @@ pub fn serve(
         let connected = match connect_client_overlapped(pipe, stop_event) {
             Ok(connected) => connected,
             Err(error) => {
-                let cleanup = retire_preparation(&mut prepared_snapshot);
+                let cleanup = retire_preparation(&mut prepared_snapshot, connection);
                 return match cleanup {
                     Ok(()) => Err(error),
                     Err(cleanup_error) => Err(format!(
@@ -338,7 +338,7 @@ fn prepare_connect_snapshot(
     drop(credentials);
 
     let capture = runtime.block_on(
-        crate::windows_egress_snapshot::WindowsEgressSnapshot::capture_for_endpoint_plan(
+        crate::windows_egress_snapshot::WindowsEgressSnapshot::capture_for_endpoint_plan_detailed(
             &endpoint_plan,
         ),
     );
@@ -422,11 +422,15 @@ fn prepare_connect_snapshot(
         }
         Err(error) => {
             let state_error = connection
-                .abort_preparation(session_id, true, None)
+                .abort_preparation(
+                    session_id,
+                    error.cleanup_confirmed,
+                    Some(error.detail.clone()),
+                )
                 .err();
             let detail = state_error
-                .map(|state| format!("{error}; the preparation session could not be released: {state}"))
-                .unwrap_or(error);
+                .map(|state| format!("{}; the preparation session could not be released: {state}", error.detail))
+                .unwrap_or(error.detail);
             AgentResponse::failed_redacted(
                 request_id,
                 Some(connection.snapshot()),

@@ -78,8 +78,8 @@ impl ConnectionCoordinator {
         self.lock().snapshot.clone()
     }
 
-    /// Reserve one session. A UI request cannot start a second session while
-    /// any previous connect/disconnect/recovery operation is still in progress.
+    /// Reserve one session across endpoint preparation and any later connect
+    /// transaction. A UI request cannot start a second session until it is retired.
     pub fn begin_connect(&self, profile_id: &str) -> Result<u64, String> {
         let profile_id = profile_id.trim();
         if profile_id.is_empty() || profile_id.len() > 128 {
@@ -183,7 +183,7 @@ impl ConnectionCoordinator {
     pub fn begin_engine(&self, session_id: u64) -> Result<(), String> {
         self.transition(
             session_id,
-            ConnectionPhase::Preparing,
+            ConnectionPhase::EndpointPrepared,
             ConnectionPhase::StartingEngine,
         )
     }
@@ -397,8 +397,10 @@ mod tests {
         let session = coordinator.begin_connect("profile-1").unwrap();
 
         assert_eq!(coordinator.snapshot().phase, ConnectionPhase::Preparing);
+        assert!(coordinator.begin_engine(session).is_err());
         assert!(coordinator.network_verified(session).is_err());
 
+        coordinator.endpoint_prepared(session).unwrap();
         coordinator.begin_engine(session).unwrap();
         assert_eq!(
             coordinator.snapshot().phase,

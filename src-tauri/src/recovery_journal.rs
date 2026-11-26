@@ -33,6 +33,8 @@ const MAX_INTERFACE_ALIAS_BYTES: usize = 128;
 #[serde(rename_all = "camelCase")]
 pub enum JournalPhase {
     Preparing,
+    /// The complete Agent-owned egress policy is committed and read-back verified.
+    EgressProtected,
     EngineStarted,
     TunnelCreated,
     NetworkConfigured,

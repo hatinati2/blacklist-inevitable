@@ -8,6 +8,8 @@ pub enum ConnectionPhase {
     Disconnected,
     Preparing,
     EndpointPrepared,
+    InstallingEgressProtection,
+    EgressProtected,
     StartingEngine,
     ConfiguringNetwork,
     Connected,
@@ -180,10 +182,31 @@ impl ConnectionCoordinator {
         Ok(())
     }
 
-    pub fn begin_engine(&self, session_id: u64) -> Result<(), String> {
+    /// Enter the WFP installation phase only after endpoint resolution and
+    /// route-bound snapshot capture have completed for this exact session.
+    pub fn begin_egress_protection(&self, session_id: u64) -> Result<(), String> {
         self.transition(
             session_id,
             ConnectionPhase::EndpointPrepared,
+            ConnectionPhase::InstallingEgressProtection,
+        )
+    }
+
+    /// Advance only after the Agent has committed, journaled, and read-back
+    /// verified the complete session-owned physical-egress WFP policy.
+    pub fn egress_protection_ready(&self, session_id: u64) -> Result<(), String> {
+        self.transition(
+            session_id,
+            ConnectionPhase::InstallingEgressProtection,
+            ConnectionPhase::EgressProtected,
+        )
+    }
+
+    /// Starting the engine before the WFP protection barrier is forbidden.
+    pub fn begin_engine(&self, session_id: u64) -> Result<(), String> {
+        self.transition(
+            session_id,
+            ConnectionPhase::EgressProtected,
             ConnectionPhase::StartingEngine,
         )
     }
@@ -244,6 +267,8 @@ impl ConnectionCoordinator {
             ConnectionPhase::Disconnecting => Ok(()),
             ConnectionPhase::Preparing
             | ConnectionPhase::EndpointPrepared
+            | ConnectionPhase::InstallingEgressProtection
+            | ConnectionPhase::EgressProtected
             | ConnectionPhase::StartingEngine
             | ConnectionPhase::ConfiguringNetwork
             | ConnectionPhase::Connected
@@ -401,6 +426,18 @@ mod tests {
         assert!(coordinator.network_verified(session).is_err());
 
         coordinator.endpoint_prepared(session).unwrap();
+        assert!(coordinator.begin_engine(session).is_err());
+        coordinator.begin_egress_protection(session).unwrap();
+        assert_eq!(
+            coordinator.snapshot().phase,
+            ConnectionPhase::InstallingEgressProtection
+        );
+        assert!(coordinator.begin_engine(session).is_err());
+        coordinator.egress_protection_ready(session).unwrap();
+        assert_eq!(
+            coordinator.snapshot().phase,
+            ConnectionPhase::EgressProtected
+        );
         coordinator.begin_engine(session).unwrap();
         assert_eq!(
             coordinator.snapshot().phase,
@@ -415,6 +452,38 @@ mod tests {
 
         coordinator.network_verified(session).unwrap();
         assert_eq!(coordinator.snapshot().phase, ConnectionPhase::Connected);
+    }
+
+    #[test]
+    fn uncertain_egress_protection_failure_blocks_engine_and_reconnect() {
+        let coordinator = ConnectionCoordinator::new();
+        let session = coordinator.begin_connect("profile-1").unwrap();
+        coordinator.endpoint_prepared(session).unwrap();
+        coordinator.begin_egress_protection(session).unwrap();
+
+        coordinator
+            .fail_session(session, "WFP commit or read-back could not be confirmed", false)
+            .unwrap();
+
+        assert_eq!(coordinator.snapshot().phase, ConnectionPhase::Failed);
+        assert!(!coordinator.snapshot().cleanup_healthy);
+        assert!(coordinator.begin_engine(session).is_err());
+        assert!(coordinator.begin_connect("profile-2").is_err());
+    }
+
+    #[test]
+    fn stale_session_cannot_cross_the_egress_protection_barrier() {
+        let coordinator = ConnectionCoordinator::new();
+        let old = coordinator.begin_connect("profile-1").unwrap();
+        coordinator.endpoint_prepared(old).unwrap();
+        coordinator.begin_egress_protection(old).unwrap();
+        coordinator.fail_session(old, "test cleanup confirmed", true).unwrap();
+        coordinator.clear_confirmed_failure().unwrap();
+
+        let current = coordinator.begin_connect("profile-2").unwrap();
+        assert!(coordinator.egress_protection_ready(old).is_err());
+        assert_eq!(coordinator.snapshot().session_id, Some(current));
+        assert_eq!(coordinator.snapshot().phase, ConnectionPhase::Preparing);
     }
 
     #[test]

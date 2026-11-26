@@ -590,10 +590,8 @@ mod windows_service {
                         // token. Do not run any further cleanup/status code under it.
                         std::process::exit(ERROR_GEN_FAILURE as i32);
                     }
-                    if !STOP_REQUESTED.load(Ordering::Acquire) {
-                        eprintln!("Agent named-pipe listener stopped unexpectedly: {error}");
-                        exit_code = ERROR_GEN_FAILURE;
-                    }
+                    eprintln!("Agent named-pipe listener or preparation cleanup failed: {error}");
+                    exit_code = ERROR_GEN_FAILURE;
                 }
             }
         }

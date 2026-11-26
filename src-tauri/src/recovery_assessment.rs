@@ -389,7 +389,7 @@ pub fn build_recovery_intent_plan(
         match disposition {
             ResourceDisposition::VerifiedClean => {}
             ResourceDisposition::NeedsCleanup => {
-                if record.previous.is_none() && record.applied.interface_luid.is_some() {
+                if record.previous.is_none() && has_complete_route_state_evidence(&record.applied) {
                     intents.push(RecoveryIntent::RemoveAppliedRoute {
                         destination_prefix: record.destination_prefix.clone(),
                         applied: record.applied.clone(),
@@ -418,8 +418,8 @@ pub fn build_recovery_intent_plan(
                 };
                 match record.previous.clone() {
                     Some(previous)
-                        if record.applied.interface_luid.is_some()
-                            && previous.interface_luid.is_some() =>
+                        if has_complete_route_state_evidence(&record.applied)
+                            && has_complete_route_state_evidence(&previous) =>
                     {
                         intents.push(RecoveryIntent::RestorePreviousRoute {
                             destination_prefix: record.destination_prefix.clone(),
@@ -784,13 +784,22 @@ fn assess_tunnel(
     }
 }
 
-/// Compare route identity using the stable NET_LUID. Interface indexes are
-/// transient and may legitimately change when Windows enumerates adapters again.
+/// Route evidence is complete only when both stable interface identity and the
+/// raw Windows protocol/origin provenance were observed.
+fn has_complete_route_state_evidence(state: &RouteState) -> bool {
+    state.interface_luid.is_some() && state.protocol.is_some() && state.origin.is_some()
+}
+
+/// Compare route identity using stable NET_LUID and exact Windows route provenance.
+/// Interface indexes are transient and may legitimately change after enumeration.
 fn same_route_state(left: &RouteState, right: &RouteState) -> bool {
-    left.interface_luid.is_some()
+    has_complete_route_state_evidence(left)
+        && has_complete_route_state_evidence(right)
         && left.interface_luid == right.interface_luid
         && left.next_hop == right.next_hop
         && left.metric == right.metric
+        && left.protocol == right.protocol
+        && left.origin == right.origin
 }
 
 fn assess_route(
@@ -804,8 +813,8 @@ fn assess_route(
     // A route's interface index can be reused after adapter removal or reboot.
     // Both the applied route and any previous route must carry a stable NET_LUID
     // before a match can authorize cleanup or journal removal.
-    if record.applied.interface_luid.is_none()
-        || record.previous.as_ref().is_some_and(|previous| previous.interface_luid.is_none())
+    if !has_complete_route_state_evidence(&record.applied)
+        || record.previous.as_ref().is_some_and(|previous| !has_complete_route_state_evidence(previous))
     {
         return ResourceDisposition::Unknown;
     }
@@ -822,7 +831,9 @@ fn assess_route(
             }
         }
         Observation::Present(actual) => {
-            if record.previous.as_ref().is_some_and(|previous| same_route_state(previous, actual)) {
+            if !has_complete_route_state_evidence(actual) {
+                ResourceDisposition::Unknown
+            } else if record.previous.as_ref().is_some_and(|previous| same_route_state(previous, actual)) {
                 ResourceDisposition::VerifiedClean
             } else if same_route_state(actual, &record.applied) {
                 if record.previous.is_some() {
@@ -1017,12 +1028,16 @@ mod tests {
                 interface_luid: Some(0x0001_0000_0000_0011),
                 next_hop: None,
                 metric: 5,
+                protocol: Some(3),
+                origin: Some(0),
             },
             previous: Some(RouteState {
                 interface_index: 12,
                 interface_luid: Some(0x0001_0000_0000_000C),
                 next_hop: Some("192.0.2.1".parse().unwrap()),
                 metric: 25,
+                protocol: Some(19),
+                origin: Some(2),
             }),
         }
     }
@@ -1808,6 +1823,84 @@ mod tests {
         let result = assess_recovery(&journal, &snapshot);
         assert_eq!(result.routes[0].disposition, ResourceDisposition::Unknown);
         assert!(!result.can_remove_journal);
+    }
+
+    #[test]
+    fn route_reconciliation_requires_matching_protocol_and_origin() {
+        let record = route_record();
+        let previous = record.previous.clone().unwrap();
+        let mut journal = RecoveryJournal::new(105);
+        journal.routes.push(record.clone());
+
+        let mut snapshot = empty_snapshot();
+        let mut changed_protocol = previous.clone();
+        changed_protocol.protocol = Some(10_001);
+        snapshot.routes.insert(
+            record.destination_prefix.clone(),
+            Observation::Present(changed_protocol),
+        );
+        assert_eq!(
+            assess_recovery(&journal, &snapshot).routes[0].disposition,
+            ResourceDisposition::Conflict
+        );
+
+        let mut changed_origin = previous;
+        changed_origin.origin = Some(10_002);
+        snapshot.routes.insert(
+            record.destination_prefix.clone(),
+            Observation::Present(changed_origin),
+        );
+        assert_eq!(
+            assess_recovery(&journal, &snapshot).routes[0].disposition,
+            ResourceDisposition::Conflict
+        );
+    }
+
+    #[test]
+    fn missing_route_protocol_or_origin_evidence_is_unknown_and_blocks_planning() {
+        for missing_field in ["protocol", "origin"] {
+            let mut journal = RecoveryJournal::new(106);
+            let mut record = route_record();
+            record.previous = None;
+            if missing_field == "protocol" {
+                record.applied.protocol = None;
+            } else {
+                record.applied.origin = None;
+            }
+            journal.routes.push(record.clone());
+
+            let mut snapshot = empty_snapshot();
+            snapshot.routes.insert(
+                record.destination_prefix.clone(),
+                Observation::Present(record.applied.clone()),
+            );
+
+            let assessment = assess_recovery(&journal, &snapshot);
+            assert_eq!(assessment.routes[0].disposition, ResourceDisposition::Unknown);
+            let plan = build_recovery_intent_plan(
+                &journal,
+                std::slice::from_ref(&journal),
+                &snapshot,
+                &assessment,
+            ).unwrap();
+            assert_eq!(plan.state, RecoveryPlanState::Blocked);
+            assert!(plan.intents.is_empty());
+            assert!(!plan.journal_removal_authorized);
+        }
+
+        let mut journal = RecoveryJournal::new(107);
+        journal.routes.push(route_record());
+        let mut snapshot = empty_snapshot();
+        let mut incomplete_observation = journal.routes[0].previous.clone().unwrap();
+        incomplete_observation.origin = None;
+        snapshot.routes.insert(
+            journal.routes[0].destination_prefix.clone(),
+            Observation::Present(incomplete_observation),
+        );
+        assert_eq!(
+            assess_recovery(&journal, &snapshot).routes[0].disposition,
+            ResourceDisposition::Unknown
+        );
     }
 
     #[test]

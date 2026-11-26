@@ -8,13 +8,25 @@ A journal records only the resource identities and exact previous settings neede
 
 - Engine PID plus its Windows process-creation timestamp, so recovery can distinguish PID reuse.
 - TUN adapter GUID, interface index, alias, MTU, and assigned addresses.
-- Each route state applied by the session and the previous route state, if one existed. Route states now also retain the stable interface NET_LUID; interface indexes are diagnostic only because Windows can reuse them.
+- Each route state applied by the session and the previous route state, if one existed. Route states now also retain the stable interface NET_LUID; interface indexes are diagnostic only because Windows can reuse them. A NetworkConfigured checkpoint is rejected unless every applied and previous route state has a nonzero LUID.
 - DNS configuration per interface and IP family: adapter name servers, profile-specific name servers, effective resolver addresses, connection domain, search and supplemental search lists, dynamic-registration/LLMNR/query flags, and per-server DoH templates/options. IPv4 and IPv6 snapshots are separate; a journaled DNS mutation is valid only when both are present. The prior compact DHCP/static representation remains readable for older records.
 - WFP provider/layer GUIDs, stable filter GUIDs when available, and BFE runtime filter IDs owned by the session. The stable filter GUID is the deletion/read-back key; the runtime ID is diagnostic only.
 
 The schema does not contain profile credentials, share links, engine JSON, command lines, executable paths, or arbitrary filesystem paths. All collections and the serialized file size have explicit upper bounds. Unknown fields and unsupported schema versions are rejected.
 
 `FirewallFilterRecord.filterKey` is optional only for compatibility with older version-1 records that predate stable filter-key recording. Newly created WFP filter records must always include a canonical filter GUID. Recovery must never attempt to delete a legacy filter using only its runtime ID; it must enumerate and reconcile exact provider-owned filters or leave policy cleanup unconfirmed.
+
+## NetworkConfigured journal acceptance gate
+
+A NetworkConfigured checkpoint is accepted only when it contains at least
+one route mutation and one DNS mutation. Every applied route state and every
+recorded previous route state must carry a stable, nonzero Windows NET_LUID;
+an interface index alone is not enough. Every DNS mutation must bind to a
+stable interface GUID and contain complete IPv4 and IPv6 snapshots for both
+its previous and applied settings. Legacy compact DNS records and route
+records with missing LUIDs remain readable, but cannot be used to create a
+NetworkConfigured checkpoint. The read-only route assessor independently
+requires LUID evidence and compares it with the live route observation.
 
 ## Storage and recovery semantics
 

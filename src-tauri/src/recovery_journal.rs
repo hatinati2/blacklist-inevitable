@@ -323,8 +323,44 @@ impl RecoveryJournal {
                 return Err("The recovery journal contains an invalid or duplicate firewall filter ID.".to_string());
             }
         }
+
+        if self.phase == JournalPhase::NetworkConfigured {
+            if self.routes.is_empty() || self.dns.is_empty() {
+                return Err(
+                    "The network-configured journal phase requires recorded route and DNS mutations."
+                        .to_string(),
+                );
+            }
+            if self.routes.iter().any(|route| {
+                route.applied.interface_luid.is_none()
+                    || route.previous.as_ref().is_some_and(|previous| previous.interface_luid.is_none())
+            }) {
+                return Err(
+                    "NetworkConfigured requires a stable NET_LUID for every applied and previous route state."
+                        .to_string(),
+                );
+            }
+            if self.dns.iter().any(|change| {
+                change.interface_guid.is_none()
+                    || !is_complete_dual_stack_dns(&change.applied)
+                    || !is_complete_dual_stack_dns(&change.previous)
+            }) {
+                return Err(
+                    "NetworkConfigured requires stable-GUID DNS snapshots with complete IPv4 and IPv6 state for both previous and applied settings."
+                        .to_string(),
+                );
+            }
+        }
         Ok(())
     }
+}
+
+fn is_complete_dual_stack_dns(configuration: &DnsConfiguration) -> bool {
+    matches!(
+        configuration,
+        DnsConfiguration::Interface(snapshot)
+            if snapshot.ipv4.is_some() && snapshot.ipv6.is_some()
+    )
 }
 
 fn validate_guid(value: &str) -> Result<(), String> {
@@ -1055,6 +1091,44 @@ mod tests {
             ipv4: Some(dns_stack(false, "192.0.2.53")),
             ipv6: Some(dns_stack(true, "2001:db8::53")),
         })
+    }
+
+    fn network_configured_journal(session_id: u64) -> RecoveryJournal {
+        let mut journal = example_journal(session_id, 1);
+        journal.phase = JournalPhase::NetworkConfigured;
+        journal.dns[0].interface_guid =
+            Some("4d36e972-e325-11ce-bfc1-08002be10318".into());
+        journal.dns[0].applied = complete_dns_configuration();
+        journal.dns[0].previous = complete_dns_configuration();
+        journal
+    }
+
+    #[test]
+    fn network_configured_requires_stable_route_luid_and_full_dual_stack_dns() {
+        let valid = network_configured_journal(94);
+        valid.validate().unwrap();
+
+        let mut missing_applied_luid = network_configured_journal(95);
+        missing_applied_luid.routes[0].applied.interface_luid = None;
+        assert!(missing_applied_luid.validate().unwrap_err().contains("NET_LUID"));
+
+        let mut missing_previous_luid = network_configured_journal(96);
+        missing_previous_luid.routes[0].previous.as_mut().unwrap().interface_luid = None;
+        assert!(missing_previous_luid.validate().unwrap_err().contains("NET_LUID"));
+
+        let mut legacy_dns = network_configured_journal(97);
+        legacy_dns.dns[0].applied = DnsConfiguration::Static(vec![
+            "198.18.0.1".parse().unwrap(),
+        ]);
+        assert!(legacy_dns.validate().unwrap_err().contains("complete IPv4 and IPv6"));
+
+        let mut missing_dns_guid = network_configured_journal(98);
+        missing_dns_guid.dns[0].interface_guid = None;
+        assert!(missing_dns_guid.validate().unwrap_err().contains("snapshot GUID"));
+
+        let mut no_routes = network_configured_journal(99);
+        no_routes.routes.clear();
+        assert!(no_routes.validate().unwrap_err().contains("route and DNS mutations"));
     }
 
     #[test]

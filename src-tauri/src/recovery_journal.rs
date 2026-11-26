@@ -396,6 +396,7 @@ const MAX_DNS_SEARCH_NAMES: usize = 32;
 const MAX_DNS_TEXT_BYTES: usize = 4096;
 const DNS_INTERFACE_SETTINGS_VERSION3: u32 = 3;
 const DNS_SERVER_PROPERTY_VERSION1: u32 = 1;
+const DNS_SERVER_PROPERTY_TYPE_DOH: u32 = 1;
 
 fn validate_dns_configuration(configuration: &DnsConfiguration) -> Result<(), String> {
     match configuration {
@@ -461,7 +462,6 @@ fn validate_dns_stack(stack: &DnsStackConfiguration, ipv4: bool) -> Result<(), S
         stack.register_adapter_name,
         stack.enable_llmnr,
         stack.query_adapter_name,
-        stack.disable_unconstrained_queries,
     ] {
         if flag > 1 {
             return Err("The DNS snapshot contains a non-boolean setting flag.".into());
@@ -542,6 +542,7 @@ fn validate_dns_doh_properties(
             return Err("A DNS-over-HTTPS property has no corresponding server list.".into());
         };
         if property.version != DNS_SERVER_PROPERTY_VERSION1
+            || property.property_type != DNS_SERVER_PROPERTY_TYPE_DOH
             || property.server_index as usize >= servers.len()
             || !indexes.insert(property.server_index)
         {

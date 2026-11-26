@@ -248,13 +248,30 @@ fn prepare_connect_snapshot(
             .collect(),
     );
 
+    // Build the exact transport plan while secrets are available, then erase
+    // every temporary credential copy before performing DoH or route discovery.
+    let endpoint_plan = match crate::engine::sing_box::build_engine_endpoint_plan(
+        &profile,
+        &credentials.0,
+    ) {
+        Ok(plan) => plan,
+        Err(error) => {
+            drop(credentials);
+            return AgentResponse::failed_redacted(
+                request_id,
+                Some(connection.snapshot()),
+                error,
+                &agent_credentials,
+            );
+        }
+    };
+    drop(credentials);
+
     let capture = runtime.block_on(
-        crate::windows_egress_snapshot::WindowsEgressSnapshot::capture_for_profile(
-            &profile,
-            &credentials.0,
+        crate::windows_egress_snapshot::WindowsEgressSnapshot::capture_for_endpoint_plan(
+            &endpoint_plan,
         ),
     );
-    drop(credentials);
 
     match capture {
         Ok(snapshot) => {

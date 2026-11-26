@@ -33,6 +33,14 @@ impl WindowsEgressSnapshot {
         credentials: &std::collections::BTreeMap<String, String>,
     ) -> Result<Self, String> {
         let endpoint_plan = crate::engine::sing_box::build_engine_endpoint_plan(profile, credentials)?;
+        Self::capture_for_endpoint_plan(&endpoint_plan).await
+    }
+
+    /// Continue preparation using an already validated, credential-free endpoint plan.
+    /// The caller can erase all credential copies before any DNS or route work begins.
+    pub async fn capture_for_endpoint_plan(
+        endpoint_plan: &crate::engine::sing_box::EngineEndpointPlan,
+    ) -> Result<Self, String> {
         let resolver = crate::endpoint_bootstrap::EndpointBootstrapResolver::new()?;
         let endpoints = resolver.resolve_vpn_endpoints_for_protocols(
             &endpoint_plan.server,

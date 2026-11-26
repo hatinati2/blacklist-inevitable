@@ -85,6 +85,14 @@ pub struct RouteState {
     pub interface_luid: Option<u64>,
     pub next_hop: Option<IpAddr>,
     pub metric: u32,
+    /// Raw NL_ROUTE_PROTOCOL value returned by Windows. Unknown values are retained.
+    /// Legacy journals omit this and must remain Unknown during reconciliation.
+    #[serde(default)]
+    pub protocol: Option<i32>,
+    /// Raw NL_ROUTE_ORIGIN value returned by Windows. Unknown values are retained.
+    /// Legacy journals omit this and must remain Unknown during reconciliation.
+    #[serde(default)]
+    pub origin: Option<i32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -333,10 +341,16 @@ impl RecoveryJournal {
             }
             if self.routes.iter().any(|route| {
                 route.applied.interface_luid.is_none()
-                    || route.previous.as_ref().is_some_and(|previous| previous.interface_luid.is_none())
+                    || route.applied.protocol.is_none()
+                    || route.applied.origin.is_none()
+                    || route.previous.as_ref().is_some_and(|previous| {
+                        previous.interface_luid.is_none()
+                            || previous.protocol.is_none()
+                            || previous.origin.is_none()
+                    })
             }) {
                 return Err(
-                    "NetworkConfigured requires a stable NET_LUID for every applied and previous route state."
+                    "NetworkConfigured requires stable NET_LUID and route protocol/origin evidence for every applied and previous route state."
                         .to_string(),
                 );
             }
@@ -934,12 +948,16 @@ mod tests {
                 interface_luid: Some(0x0001_0000_0000_0011),
                 next_hop: None,
                 metric: 5,
+                protocol: Some(3),
+                origin: Some(0),
             },
             previous: Some(RouteState {
                 interface_index: 12,
                 interface_luid: Some(0x0001_0000_0000_000C),
                 next_hop: Some("192.0.2.1".parse().unwrap()),
                 metric: 25,
+                protocol: Some(19),
+                origin: Some(2),
             }),
         });
         journal.dns.push(DnsMutationRecord {
@@ -1115,6 +1133,22 @@ mod tests {
         let mut missing_previous_luid = network_configured_journal(96);
         missing_previous_luid.routes[0].previous.as_mut().unwrap().interface_luid = None;
         assert!(missing_previous_luid.validate().unwrap_err().contains("NET_LUID"));
+
+        let mut missing_applied_protocol = network_configured_journal(100);
+        missing_applied_protocol.routes[0].applied.protocol = None;
+        assert!(missing_applied_protocol.validate().unwrap_err().contains("protocol/origin"));
+
+        let mut missing_applied_origin = network_configured_journal(101);
+        missing_applied_origin.routes[0].applied.origin = None;
+        assert!(missing_applied_origin.validate().unwrap_err().contains("protocol/origin"));
+
+        let mut missing_previous_protocol = network_configured_journal(102);
+        missing_previous_protocol.routes[0].previous.as_mut().unwrap().protocol = None;
+        assert!(missing_previous_protocol.validate().unwrap_err().contains("protocol/origin"));
+
+        let mut missing_previous_origin = network_configured_journal(103);
+        missing_previous_origin.routes[0].previous.as_mut().unwrap().origin = None;
+        assert!(missing_previous_origin.validate().unwrap_err().contains("protocol/origin"));
 
         let mut legacy_dns = network_configured_journal(97);
         legacy_dns.dns[0].applied = DnsConfiguration::Static(vec![
@@ -1319,11 +1353,35 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("interfaceLuid");
+        for route in [&mut legacy["routes"][0]["applied"], &mut legacy["routes"][0]["previous"]] {
+            route.as_object_mut().unwrap().remove("protocol");
+            route.as_object_mut().unwrap().remove("origin");
+        }
 
         let decoded: RecoveryJournal = serde_json::from_value(legacy).unwrap();
         assert_eq!(decoded.routes[0].applied.interface_luid, None);
         assert_eq!(decoded.routes[0].previous.as_ref().unwrap().interface_luid, None);
+        assert_eq!(decoded.routes[0].applied.protocol, None);
+        assert_eq!(decoded.routes[0].applied.origin, None);
+        assert_eq!(decoded.routes[0].previous.as_ref().unwrap().protocol, None);
+        assert_eq!(decoded.routes[0].previous.as_ref().unwrap().origin, None);
         decoded.validate().unwrap();
+    }
+
+    #[test]
+    fn route_protocol_and_origin_preserve_unknown_raw_values() {
+        let mut journal = example_journal(74, 1);
+        journal.routes[0].applied.protocol = Some(i32::MIN);
+        journal.routes[0].applied.origin = Some(i32::MAX);
+        journal.routes[0].previous.as_mut().unwrap().protocol = Some(-123_456_789);
+        journal.routes[0].previous.as_mut().unwrap().origin = Some(123_456_789);
+
+        let encoded = serde_json::to_vec(&journal).unwrap();
+        let decoded: RecoveryJournal = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded.routes[0].applied.protocol, Some(i32::MIN));
+        assert_eq!(decoded.routes[0].applied.origin, Some(i32::MAX));
+        assert_eq!(decoded.routes[0].previous.as_ref().unwrap().protocol, Some(-123_456_789));
+        assert_eq!(decoded.routes[0].previous.as_ref().unwrap().origin, Some(123_456_789));
     }
 
     #[test]

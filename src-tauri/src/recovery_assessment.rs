@@ -47,9 +47,10 @@ pub struct RecoverySnapshot {
     pub engine: Observation<EngineProcessRecord>,
     /// Full journaled tunnel identity and assigned unicast address inventory.
     pub tunnel: Observation<TunnelInterfaceRecord>,
-    /// Entries are keyed by the exact destination prefix stored in the journal.
-    /// An omitted key is Unknown, never implicitly Absent.
-    pub routes: BTreeMap<String, Observation<RouteState>>,
+    /// Each key contains the complete set of live route rows for that destination.
+    /// An omitted key is Unknown, never implicitly Absent. Rows are not selected
+    /// by enumeration order; the assessor matches stable route identities.
+    pub routes: BTreeMap<String, Observation<Vec<RouteState>>>,
     /// Entries are keyed by Windows interface index. An omitted key is Unknown.
     pub dns: BTreeMap<u32, Observation<DnsConfiguration>>,
     /// This must be a complete provider-scoped WFP enumeration. Runtime filter
@@ -59,6 +60,8 @@ pub struct RecoverySnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteAssessment {
+    /// Position in the validated journal; allows multiple route records per prefix.
+    pub route_index: usize,
     pub destination_prefix: String,
     pub disposition: ResourceDisposition,
 }
@@ -359,33 +362,17 @@ pub fn build_recovery_intent_plan(
         disposition => push_recovery_plan_blocker(&mut blockers,RecoveryPlanResource::Tunnel, disposition),
     }
 
-    let mut route_assessments = BTreeMap::new();
-    let mut duplicate_route_assessments = BTreeSet::new();
-    for item in &assessment.routes {
-        if route_assessments
-            .insert(item.destination_prefix.clone(), item.disposition)
-            .is_some()
+    if assessment.routes.len() != journal.routes.len() {
+        return Err("The recovery assessment route inventory does not match the journal.".to_string());
+    }
+    for (route_index, record) in journal.routes.iter().enumerate() {
+        let route_assessment = &assessment.routes[route_index];
+        if route_assessment.route_index != route_index
+            || route_assessment.destination_prefix != record.destination_prefix
         {
-            duplicate_route_assessments.insert(item.destination_prefix.clone());
+            return Err("The recovery assessment route ordering does not match the journal.".to_string());
         }
-    }
-    for destination_prefix in duplicate_route_assessments {
-        push_recovery_plan_blocker(&mut blockers,
-            RecoveryPlanResource::Route(destination_prefix),
-            ResourceDisposition::Conflict,
-        );
-    }
-
-    let journal_route_keys = journal
-        .routes
-        .iter()
-        .map(|record| record.destination_prefix.clone())
-        .collect::<BTreeSet<_>>();
-    for record in &journal.routes {
-        let disposition = route_assessments
-            .get(&record.destination_prefix)
-            .copied()
-            .unwrap_or(ResourceDisposition::Unknown);
+        let disposition = route_assessment.disposition;
         match disposition {
             ResourceDisposition::VerifiedClean => {}
             ResourceDisposition::NeedsCleanup => {
@@ -403,8 +390,23 @@ pub fn build_recovery_intent_plan(
             }
             ResourceDisposition::NeedsRestore => {
                 let expected_current = match snapshot.routes.get(&record.destination_prefix) {
-                    Some(Observation::Present(actual)) if same_route_state(actual, &record.applied) => {
-                        Some(actual.clone())
+                    Some(Observation::Present(actual_routes)) => {
+                        let matching = actual_routes
+                            .iter()
+                            .filter(|actual| same_route_state(actual, &record.applied))
+                            .collect::<Vec<_>>();
+                        match matching.as_slice() {
+                            [actual] => Some((*actual).clone()),
+                            [] => None,
+                            _ => {
+                                push_recovery_plan_blocker(
+                                    &mut blockers,
+                                    RecoveryPlanResource::Route(record.destination_prefix.clone()),
+                                    ResourceDisposition::Unknown,
+                                );
+                                continue;
+                            }
+                        }
                     }
                     Some(Observation::Absent) => None,
                     _ => {
@@ -438,14 +440,6 @@ pub fn build_recovery_intent_plan(
                 RecoveryPlanResource::Route(record.destination_prefix.clone()),
                 other,
             ),
-        }
-    }
-    for extra in route_assessments.keys() {
-        if !journal_route_keys.contains(extra) {
-            push_recovery_plan_blocker(&mut blockers,
-                RecoveryPlanResource::Route(extra.clone()),
-                ResourceDisposition::Conflict,
-            );
         }
     }
 
@@ -673,7 +667,9 @@ pub fn assess_recovery(
     let routes: Vec<_> = journal
         .routes
         .iter()
-        .map(|record| RouteAssessment {
+        .enumerate()
+        .map(|(route_index, record)| RouteAssessment {
+            route_index,
             destination_prefix: record.destination_prefix.clone(),
             disposition: assess_route(
                 record,

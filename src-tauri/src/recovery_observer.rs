@@ -840,6 +840,8 @@ pub fn observe_recorded_routes(
             interface_luid: Some(interface_luid),
             next_hop,
             metric: row.Metric,
+            protocol: Some(row.Protocol),
+            origin: Some(row.Origin),
         };
 
         let key = &journal_keys[0];
@@ -1159,6 +1161,8 @@ mod tests {
                 interface_luid: Some(unsafe { row.InterfaceLuid.Value }),
                 next_hop,
                 metric: row.Metric,
+                protocol: Some(row.Protocol),
+                origin: Some(row.Origin),
             };
             *prefix_counts.entry(prefix.clone()).or_default() += 1;
             candidates.push((prefix, state));

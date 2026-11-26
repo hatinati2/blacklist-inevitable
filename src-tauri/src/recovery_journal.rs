@@ -148,6 +148,10 @@ pub struct DnsStackConfiguration {
 pub struct DnsInterfaceConfiguration {
     /// Stable adapter GUID. Interface indexes are diagnostic only.
     pub interface_guid: String,
+    /// NET_LUID observed when the mutation was journaled. Missing only in
+    /// legacy version-1 records; such snapshots cannot authorize recovery.
+    #[serde(default)]
+    pub interface_luid: Option<u64>,
     /// None means the observer could not establish a complete stack snapshot.
     pub ipv4: Option<DnsStackConfiguration>,
     pub ipv6: Option<DnsStackConfiguration>,
@@ -171,6 +175,10 @@ pub struct DnsMutationRecord {
     /// Stable adapter identity. Missing only in legacy version-1 journals.
     #[serde(default)]
     pub interface_guid: Option<String>,
+    /// Historical NET_LUID captured at mutation time. Legacy records without
+    /// this field remain readable but cannot produce positive DNS assessments.
+    #[serde(default)]
+    pub interface_luid: Option<u64>,
     pub applied: DnsConfiguration,
     pub previous: DnsConfiguration,
 }
@@ -287,12 +295,18 @@ impl RecoveryJournal {
             return Err("The recovery journal contains too many DNS interface mutations.".to_string());
         }
         let mut dns_interfaces = BTreeSet::new();
+        let mut dns_luids = BTreeSet::new();
         for change in &self.dns {
             if change.interface_index == 0 || !dns_interfaces.insert(change.interface_index) {
                 return Err("The recovery journal contains an invalid or duplicate DNS interface.".to_string());
             }
             if let Some(interface_guid) = &change.interface_guid {
                 validate_guid(interface_guid)?;
+            }
+            if let Some(interface_luid) = change.interface_luid {
+                if interface_luid == 0 || !dns_luids.insert(interface_luid) {
+                    return Err("The recovery journal contains an invalid or duplicate DNS interface NET_LUID.".to_string());
+                }
             }
             validate_dns_configuration(&change.applied)?;
             validate_dns_configuration(&change.previous)?;
@@ -301,6 +315,9 @@ impl RecoveryJournal {
                     validate_guid(&snapshot.interface_guid)?;
                     if change.interface_guid.as_deref() != Some(snapshot.interface_guid.as_str()) {
                         return Err("The DNS snapshot GUID does not match its journaled interface identity.".to_string());
+                    }
+                    if snapshot.interface_luid == Some(0) || snapshot.interface_luid != change.interface_luid {
+                        return Err("The DNS snapshot NET_LUID does not match its journaled interface identity.".to_string());
                     }
                 }
             }
@@ -372,6 +389,9 @@ fn validate_dns_configuration(configuration: &DnsConfiguration) -> Result<(), St
         }
         DnsConfiguration::Interface(snapshot) => {
             validate_guid(&snapshot.interface_guid)?;
+            if snapshot.interface_luid == Some(0) {
+                return Err("The DNS interface snapshot contains an invalid NET_LUID.".to_string());
+            }
             let ipv4 = snapshot.ipv4.as_ref().ok_or_else(|| {
                 "The recovery journal is missing the IPv4 DNS snapshot.".to_string()
             })?;
@@ -1052,6 +1072,7 @@ mod tests {
     fn complete_dns_configuration() -> DnsConfiguration {
         DnsConfiguration::Interface(DnsInterfaceConfiguration {
             interface_guid: "4d36e972-e325-11ce-bfc1-08002be10318".into(),
+            interface_luid: Some(0x0001_0000_0000_000C),
             ipv4: Some(dns_stack(false, "192.0.2.53")),
             ipv6: Some(dns_stack(true, "2001:db8::53")),
         })

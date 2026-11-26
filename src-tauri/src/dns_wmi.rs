@@ -484,6 +484,7 @@ mod windows {
         let script = format!(r#"
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 try {{
     $namespace = 'root/StandardCimv2'
     $serverAddresses = @(Get-CimInstance -Namespace $namespace -ClassName 'MSFT_DNSClientServerAddress' -Filter 'InterfaceIndex = {interface_index}' -ErrorAction Stop | Select-Object -First 65 -Property InterfaceIndex,InterfaceAlias,AddressFamily,ServerAddresses)

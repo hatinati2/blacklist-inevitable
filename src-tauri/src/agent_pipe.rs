@@ -396,10 +396,11 @@ fn handle_authenticated_connection(
                     response.detail = Some("There was no retained endpoint snapshot to cancel.".to_string());
                     response
                 }
-                Err(error) => AgentResponse::rejected_with_connection(
+                Err(error) => AgentResponse::failed_redacted(
                     request.request_id,
                     Some(connection.snapshot()),
                     format!("The retained endpoint snapshot could not be fully retired: {error}"),
+                    &BTreeMap::new(),
                 ),
             }
         }

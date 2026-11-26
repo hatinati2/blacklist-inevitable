@@ -138,7 +138,7 @@ pub fn serve(
             Err(error) => {
                 let cleanup = retire_preparation(&mut prepared_snapshot);
                 return match cleanup {
-                    Ok(()) => Err(error),
+                    Ok(_) => Err(error),
                     Err(cleanup_error) => Err(format!(
                         "{error}; retained endpoint snapshot shutdown also failed: {cleanup_error}"
                     )),

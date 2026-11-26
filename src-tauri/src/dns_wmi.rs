@@ -83,7 +83,7 @@ struct RawWmiSnapshot {
     global_settings: Option<Vec<RawGlobalSetting>>,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct RawServerAddress {
     interface_index: Option<u32>,

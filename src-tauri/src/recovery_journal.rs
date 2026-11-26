@@ -1209,6 +1209,11 @@ mod tests {
 
         let mut duplicate = journal.clone();
         duplicate.routes[1].applied.interface_index = 100;
+        duplicate.routes[1].applied.interface_luid = duplicate.routes[0].applied.interface_luid;
+        duplicate.routes[1].applied.next_hop = duplicate.routes[0].applied.next_hop;
+        duplicate.routes[1].applied.metric = duplicate.routes[0].applied.metric;
+        duplicate.routes[1].applied.protocol = duplicate.routes[0].applied.protocol;
+        duplicate.routes[1].applied.origin = duplicate.routes[0].applied.origin;
         assert!(duplicate.validate().unwrap_err().contains("duplicate applied route identity"));
 
         let mut noncanonical = journal.clone();

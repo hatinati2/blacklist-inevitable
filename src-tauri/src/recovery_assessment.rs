@@ -811,8 +811,8 @@ fn assess_route(
     };
 
     // A route's interface index can be reused after adapter removal or reboot.
-    // Both the applied route and any previous route must carry a stable NET_LUID
-    // before a match can authorize cleanup or journal removal.
+    // Applied and previous states need stable NET_LUID plus raw protocol/origin
+    // provenance before a match can authorize cleanup or journal removal.
     if !has_complete_route_state_evidence(&record.applied)
         || record.previous.as_ref().is_some_and(|previous| !has_complete_route_state_evidence(previous))
     {
@@ -1888,19 +1888,33 @@ mod tests {
             assert!(!plan.journal_removal_authorized);
         }
 
-        let mut journal = RecoveryJournal::new(107);
-        journal.routes.push(route_record());
-        let mut snapshot = empty_snapshot();
-        let mut incomplete_observation = journal.routes[0].previous.clone().unwrap();
-        incomplete_observation.origin = None;
-        snapshot.routes.insert(
-            journal.routes[0].destination_prefix.clone(),
-            Observation::Present(incomplete_observation),
-        );
-        assert_eq!(
-            assess_recovery(&journal, &snapshot).routes[0].disposition,
-            ResourceDisposition::Unknown
-        );
+        for missing_field in ["protocol", "origin"] {
+            let mut journal = RecoveryJournal::new(107);
+            journal.routes.push(route_record());
+            let mut snapshot = empty_snapshot();
+            let mut incomplete_observation = journal.routes[0].previous.clone().unwrap();
+            if missing_field == "protocol" {
+                incomplete_observation.protocol = None;
+            } else {
+                incomplete_observation.origin = None;
+            }
+            snapshot.routes.insert(
+                journal.routes[0].destination_prefix.clone(),
+                Observation::Present(incomplete_observation),
+            );
+            let assessment = assess_recovery(&journal, &snapshot);
+            assert_eq!(assessment.routes[0].disposition, ResourceDisposition::Unknown);
+            let plan = build_recovery_intent_plan(
+                &journal,
+                std::slice::from_ref(&journal),
+                &snapshot,
+                &assessment,
+            )
+            .unwrap();
+            assert_eq!(plan.state, RecoveryPlanState::Blocked);
+            assert!(plan.intents.is_empty());
+            assert!(!plan.journal_removal_authorized);
+        }
     }
 
     #[test]

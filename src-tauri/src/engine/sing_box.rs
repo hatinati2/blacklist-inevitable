@@ -2600,6 +2600,9 @@ mod runtime_guard_tests {
     const FORCED_OWNER_ROOT_ENV: &str = "BLACKLIST_INEVITABLE_FORCED_OWNER_ROOT";
     #[cfg(windows)]
     const FORCED_OWNER_STATUS_ENV: &str = "BLACKLIST_INEVITABLE_FORCED_OWNER_STATUS";
+    #[cfg(windows)]
+    const FORCED_OWNER_INSTANCE_LEASE_ENV: &str =
+        "BLACKLIST_INEVITABLE_FORCED_OWNER_INSTANCE_LEASE";
 
     // Runs in a separate process to model an app instance that owns its Job
     // Object. Killing this process must close the final job handle and terminate
@@ -2621,9 +2624,12 @@ mod runtime_guard_tests {
         )
         .expect("write simulated credential-bearing config");
 
+        let lease_name = std::env::var(FORCED_OWNER_INSTANCE_LEASE_ENV)
+            .expect("forced owner instance lease name");
         let supervisor = ProcessSupervisor::default();
         supervisor
-            .attach_current_process_to_job()
+            .acquire_test_instance_lease(&lease_name)
+            .and_then(|()| supervisor.attach_current_process_to_job())
             .expect("attach forced-termination helper to its Job Object");
 
         let ready_path = probe_dir.join("listener.port");
@@ -2673,6 +2679,13 @@ mod runtime_guard_tests {
             ])
             .env(FORCED_OWNER_ROOT_ENV, &root)
             .env(FORCED_OWNER_STATUS_ENV, &status_path)
+            .env(
+                FORCED_OWNER_INSTANCE_LEASE_ENV,
+                format!(
+                    "Local\\BlacklistInevitable.ForcedOwnerTest.{}",
+                    Uuid::new_v4()
+                ),
+            )
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());

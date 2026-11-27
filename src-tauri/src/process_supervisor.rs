@@ -13,6 +13,11 @@ struct Inner {
     idle: Notify,
     #[cfg(windows)]
     job: Option<WindowsJobObject>,
+    // The named kernel object is an OS-released process lease. Keeping its
+    // handle open prevents a second desktop process from running startup
+    // cleanup against the first process's active preflight files.
+    #[cfg(windows)]
+    instance_mutex: Mutex<Option<Result<WindowsInstanceMutex, String>>>,
 }
 
 fn lock_state(inner: &Inner) -> MutexGuard<'_, State> {
@@ -35,6 +40,59 @@ struct State {
     active: HashMap<u64, watch::Sender<bool>>,
 }
 
+
+#[cfg(windows)]
+struct WindowsInstanceMutex {
+    handle: windows_sys::Win32::Foundation::HANDLE,
+}
+
+// The handle is owned once by ProcessSupervisor and closed once in Drop.
+#[cfg(windows)]
+unsafe impl Send for WindowsInstanceMutex {}
+#[cfg(windows)]
+unsafe impl Sync for WindowsInstanceMutex {}
+
+#[cfg(windows)]
+impl WindowsInstanceMutex {
+    fn acquire(name: &str) -> Result<Self, String> {
+        use windows_sys::Win32::Foundation::{CloseHandle, GetLastError};
+        use windows_sys::Win32::System::Threading::CreateMutexW;
+
+        let name_wide = name
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let handle = unsafe { CreateMutexW(std::ptr::null(), 0, name_wide.as_ptr()) };
+        if handle.is_null() {
+            return Err(format!(
+                "CreateMutexW for the desktop instance lease failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+
+        // ERROR_ALREADY_EXISTS means another process already holds the named
+        // object. Do not retain our additional handle or run startup recovery.
+        if unsafe { GetLastError() } == 183 {
+            unsafe { CloseHandle(handle) };
+            return Err(
+                "Another Blacklist Inevitable desktop instance is already running; preflight cleanup is disabled in this instance."
+                    .to_string(),
+            );
+        }
+
+        Ok(Self { handle })
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WindowsInstanceMutex {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        // The kernel object disappears when the last process handle closes,
+        // including after forced process termination.
+        unsafe { CloseHandle(self.handle) };
+    }
+}
 
 #[cfg(windows)]
 struct WindowsJobObject {
@@ -390,6 +448,8 @@ impl Default for ProcessSupervisor {
                 idle: Notify::new(),
                 #[cfg(windows)]
                 job,
+                #[cfg(windows)]
+                instance_mutex: Mutex::new(None),
             }),
         }
     }
@@ -401,8 +461,34 @@ impl ProcessSupervisor {
     /// its kill-on-close Job Object.
     pub fn for_app() -> Self {
         let supervisor = Self::default();
+        #[cfg(windows)]
+        {
+            let lease = WindowsInstanceMutex::acquire(
+                "Local\\BlacklistInevitable.DesktopInstance",
+            );
+            let mut slot = supervisor
+                .inner
+                .instance_mutex
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *slot = Some(lease);
+        }
         supervisor.mark_cleanup_unhealthy();
         supervisor
+    }
+
+    /// Acquire a uniquely named process lease for isolated Windows integration tests.
+    /// Production uses the single application-wide name in `for_app`.
+    #[cfg(all(test, windows))]
+    pub(crate) fn acquire_test_instance_lease(&self, name: &str) -> Result<(), String> {
+        let lease = WindowsInstanceMutex::acquire(name)?;
+        let mut slot = self
+            .inner
+            .instance_mutex
+            .lock()
+            .map_err(|_| "The Windows test instance lease state is unavailable.".to_string())?;
+        *slot = Some(Ok(lease));
+        Ok(())
     }
 
     /// Attach the application process to its kill-on-close Job Object during
@@ -412,6 +498,23 @@ impl ProcessSupervisor {
     pub fn attach_current_process_to_job(&self) -> Result<(), String> {
         #[cfg(windows)]
         {
+            let lease = self
+                .inner
+                .instance_mutex
+                .lock()
+                .map_err(|_| {
+                    "The Windows desktop instance lease state is unavailable.".to_string()
+                })?;
+            match lease.as_ref() {
+                Some(Ok(_)) => {}
+                Some(Err(error)) => return Err(error.clone()),
+                None => {
+                    return Err(
+                        "The Windows desktop instance lease was not acquired.".to_string(),
+                    )
+                }
+            }
+
             let job = self.inner.job.as_ref().ok_or_else(|| {
                 "The Windows process-containment Job Object is unavailable.".to_string()
             })?;
@@ -720,6 +823,7 @@ mod tests {
                 }),
                 idle: Notify::new(),
                 job: None,
+                instance_mutex: Mutex::new(None),
             }),
         }
     }
@@ -804,6 +908,9 @@ mod tests {
     const JOB_HELPER_MARKER_ENV: &str = "BLACKLIST_INEVITABLE_TEST_JOB_HELPER_MARKER";
     #[cfg(windows)]
     const JOB_HELPER_RELEASE_ENV: &str = "BLACKLIST_INEVITABLE_TEST_JOB_HELPER_RELEASE";
+    #[cfg(windows)]
+    const JOB_HELPER_INSTANCE_LEASE_ENV: &str =
+        "BLACKLIST_INEVITABLE_TEST_JOB_HELPER_INSTANCE_LEASE";
 
     // Launched as an isolated test-binary process. Joining the Job Object makes
     // this helper and its suspended child members; the parent test releases it
@@ -826,8 +933,13 @@ mod tests {
             .map(std::path::PathBuf::from)
             .expect("helper release path");
 
+        let lease_name = std::env::var(JOB_HELPER_INSTANCE_LEASE_ENV)
+            .expect("unique helper process lease name");
         let supervisor = ProcessSupervisor::default();
-        if let Err(error) = supervisor.attach_current_process_to_job() {
+        if let Err(error) = supervisor
+            .acquire_test_instance_lease(&lease_name)
+            .and_then(|()| supervisor.attach_current_process_to_job())
+        {
             std::fs::write(&status_path, format!("application-could-not-join-job:{error}"))
                 .expect("write failed job status");
             return;
@@ -960,6 +1072,13 @@ mod tests {
                 .env(JOB_HELPER_STATUS_ENV, &status_path)
                 .env(JOB_HELPER_MARKER_ENV, &marker_path)
                 .env(JOB_HELPER_RELEASE_ENV, &release_path)
+                .env(
+                    JOB_HELPER_INSTANCE_LEASE_ENV,
+                    format!(
+                        "Local\\BlacklistInevitable.JobTest.{}",
+                        uuid::Uuid::new_v4()
+                    ),
+                )
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
@@ -1153,5 +1272,63 @@ mod tests {
             .await
             .expect("supervisor drain timeout"));
         worker.await.expect("worker task");
+    }
+}
+
+
+#[cfg(all(test, windows))]
+mod windows_instance_lease_tests {
+    use super::*;
+    use std::process::Command;
+
+    const INSTANCE_LEASE_TEST_NAME_ENV: &str =
+        "BLACKLIST_INEVITABLE_TEST_INSTANCE_LEASE_NAME";
+
+    // Spawned by the parent test below. A separate process must observe the
+    // named kernel object and refuse to proceed with startup recovery.
+    #[test]
+    fn child_process_cannot_acquire_a_live_instance_lease() {
+        let Ok(name) = std::env::var(INSTANCE_LEASE_TEST_NAME_ENV) else {
+            return;
+        };
+
+        let error = WindowsInstanceMutex::acquire(&name)
+            .err()
+            .expect("a second process must be rejected while the first lease is held");
+        assert!(
+            error.contains("already running"),
+            "duplicate process should be rejected with a clear diagnostic"
+        );
+    }
+
+    #[test]
+    fn named_instance_lease_rejects_another_process_and_releases_after_owner_exits() {
+        let name = format!(
+            "Local\\BlacklistInevitable.Test.{}",
+            uuid::Uuid::new_v4()
+        );
+        let first = WindowsInstanceMutex::acquire(&name)
+            .expect("first app-like process must acquire the instance lease");
+
+        let executable = std::env::current_exe().expect("resolve current test executable");
+        let status = Command::new(executable)
+            .args([
+                "--exact",
+                "process_supervisor::windows_instance_lease_tests::child_process_cannot_acquire_a_live_instance_lease",
+                "--nocapture",
+            ])
+            .env(INSTANCE_LEASE_TEST_NAME_ENV, &name)
+            .status()
+            .expect("spawn second app-like process");
+
+        assert!(
+            status.success(),
+            "a second process must be rejected before it can run startup cleanup"
+        );
+
+        drop(first);
+        let replacement = WindowsInstanceMutex::acquire(&name)
+            .expect("the OS must release the lease after its owner process exits");
+        drop(replacement);
     }
 }

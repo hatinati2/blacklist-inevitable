@@ -29,7 +29,9 @@ pub fn run() {
             let instance_ready = match supervisor.attach_current_process_to_job() {
                 Ok(()) => true,
                 Err(error) => {
-                    eprintln!("Windows process containment or desktop instance lease is unavailable: {error}");
+                    eprintln!(
+                        "Windows process containment or desktop instance lease is unavailable: {error}"
+                    );
                     supervisor.mark_cleanup_unhealthy();
                     false
                 }
@@ -39,9 +41,14 @@ pub fn run() {
             // delete another live instance's credential-bearing probe files.
             if instance_ready {
                 if let Err(error) =
-                    crate::engine::sing_box::recover_stale_preflight_data(app.handle(), &supervisor)
+                    crate::engine::sing_box::recover_stale_preflight_data(
+                        app.handle(),
+                        &supervisor,
+                    )
                 {
-                    eprintln!("Stale preflight recovery failed; engine startup remains blocked: {error}");
+                    eprintln!(
+                        "Stale preflight recovery failed; engine startup remains blocked: {error}"
+                    );
                 }
             }
             Ok(())

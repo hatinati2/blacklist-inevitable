@@ -20,7 +20,7 @@ $securePassword = ConvertTo-SecureString $passwordText -AsPlainText -Force
 $createdUser = $false
 
 try {
-    Import-Module Microsoft.PowerShell.LocalAccounts -ErrorAction Stop
+    Import-Module Microsoft.PowerShell.LocalAccounts -UseWindowsPowerShell -ErrorAction Stop
 
     Write-Host "Creating an ACL fixture with the production Rust primitive."
     & cargo run --locked --manifest-path $manifest --target x86_64-pc-windows-msvc --bin preflight-acl-fixture -- $root
@@ -35,7 +35,7 @@ try {
 
     $user = New-LocalUser -Name $userName -Password $securePassword -AccountNeverExpires -PasswordNeverExpires -UserMayNotChangePassword
     $createdUser = $true
-    Add-LocalGroupMember -SID ([System.Security.Principal.SecurityIdentifier]::new("S-1-5-32-545")) -Member $user
+    Add-LocalGroupMember -SID ([System.Security.Principal.SecurityIdentifier]::new("S-1-5-32-545")) -Member "$env:COMPUTERNAME\$userName"
 
     $credential = [System.Management.Automation.PSCredential]::new(
         "$env:COMPUTERNAME\$userName",

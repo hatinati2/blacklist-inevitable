@@ -2,7 +2,16 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $manifest = Join-Path $repoRoot "src-tauri/Cargo.toml"
-$root = Join-Path $env:RUNNER_TEMP ("preflight-acl-" + [Guid]::NewGuid().ToString("N"))
+$tempBase = if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) { $env:TEMP } else { $env:RUNNER_TEMP }
+if ([string]::IsNullOrWhiteSpace($tempBase)) {
+    throw "A writable temporary directory could not be resolved."
+}
+$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+$principal = [System.Security.Principal.WindowsPrincipal]::new($identity)
+if (-not $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    throw "Run this acceptance script from an elevated PowerShell session so it can create a temporary standard user."
+}
+$root = Join-Path $tempBase ("preflight-acl-" + [Guid]::NewGuid().ToString("N"))
 $runDir = Join-Path $root "run"
 $config = Join-Path $runDir "config.json"
 $userName = "aclprobe" + [Guid]::NewGuid().ToString("N").Substring(0, 10)

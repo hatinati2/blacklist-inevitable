@@ -15,7 +15,7 @@ fn main() -> Result<(), String> {
     preflight_acl::create_private_directory(&run_dir)?;
     preflight_acl::create_private_file(&config, b"ACL-ACCEPTANCE-SENTINEL")?;
 
-    println!("PRELIGHT_ACL_ROOT={}", root.display());
+    println!("PREFLIGHT_ACL_ROOT={}", root.display());
     println!("PREFLIGHT_ACL_CONFIG={}", config.display());
     Ok(())
 }

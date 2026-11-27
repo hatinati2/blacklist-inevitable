@@ -112,6 +112,8 @@ jobs:
           if ($dnsClientDumpInvalid.parseState -ne "incomplete") { throw "Unsupported DNS Client dump source values must remain incomplete." }
           $dnsClientDumpUnsupported = ConvertFrom-NetshDnsClientDump -Lines @('delete global global=doh')
           if ($dnsClientDumpUnsupported.parseState -ne "incomplete" -or $dnsClientDumpUnsupported.unsupportedCommandCount -ne 1) { throw "Unimplemented DNS Client dump statements must remain incomplete." }
+          $dnsClientDumpUnknownSection = ConvertFrom-NetshDnsClientDump -Lines @('set futurefeature enabled=yes')
+          if ($dnsClientDumpUnknownSection.parseState -ne "incomplete" -or $dnsClientDumpUnknownSection.unsupportedCommandCount -ne 1) { throw "Unknown DNS Client dump command sections must remain incomplete." }
           $dnsClientDumpEmpty = ConvertFrom-NetshDnsClientDump -Lines @('pushd dnsclient', '# no emitted settings', 'popd')
           if ($dnsClientDumpEmpty.parseState -ne "unknown") { throw "An empty DNS Client dump must not imply default settings." }
 

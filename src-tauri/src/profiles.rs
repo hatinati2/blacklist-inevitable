@@ -809,8 +809,9 @@ mod tests {
 
     #[test]
     fn vmess_accepts_url_safe_unpadded_base64_and_reports_unknown_field_names_only() {
-        let payload = r#"{"v":"2","ps":"URL-safe VMess","add":"vmess.example.net","port":443,"id":"12345678-1234-1234-1234-123456789012","aid":0,"net":"ws","path":"/edge","tls":"tls","x_custom_auth":"do-not-copy-this-value"}"#;
+        let payload = r#"{"v":"2","ps":"URL-safe VMess","add":"vmess.example.net","port":443,"id":"12345678-1234-1234-1234-123456789012","aid":0,"net":"ws","path":"/edge","tls":"tls","x_custom_auth":"???"}"#;
         let encoded = URL_SAFE_NO_PAD.encode(payload.as_bytes());
+        assert!(encoded.contains('_'), "fixture must exercise the URL-safe Base64 alphabet");
         let parsed = parse_share_uri(&format!("vmess://{encoded}"))
             .expect("valid URL-safe unpadded VMess URI");
 
@@ -829,7 +830,7 @@ mod tests {
 
         let metadata = serde_json::to_string(&parsed.profile).expect("serialize metadata");
         assert!(metadata.contains("x_custom_auth"));
-        assert!(!metadata.contains("do-not-copy-this-value"));
+        assert!(!metadata.contains("???"));
     }
 
     #[test]

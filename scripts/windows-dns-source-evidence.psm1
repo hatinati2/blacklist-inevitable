@@ -321,4 +321,273 @@ function Get-NetshIPv6InterfaceDnsPolicyForAdapter {
     }
 }
 
-Export-ModuleMember -Function ConvertTo-DnsAddressFamilyLabel, ConvertFrom-NetshInterfaceDnsDump, Get-NetshInterfaceDnsSourceForAdapter, ConvertFrom-NetshIPv6InterfaceDump, Get-NetshIPv6InterfaceDnsPolicyForAdapter
+
+
+function ConvertFrom-NetshDnsClientDump {
+    [CmdletBinding()]
+    param(
+        [AllowEmptyCollection()]
+        [string[]]$Lines = @()
+    )
+
+    $dnsServerCommands = @()
+    $encryptionCommands = @()
+    $globalCommands = @()
+    $interfaceCommands = @()
+    $malformedStatements = @()
+    $unsupportedStatements = @()
+    $recognizedCommandCount = 0
+    $lineNumber = 0
+
+    foreach ($line in $Lines) {
+        $lineNumber++
+        $text = [string]$line
+        $commandMatch = [regex]::Match(
+            $text,
+            '^\s*(?:(?:netsh)\s+)?(?:dnsclient\s+)?(?<verb>set|add|delete)\s+(?<section>dnsserver|encryption|global|interface)\b(?<arguments>.*)
+,
+            [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+        )
+        if (-not $commandMatch.Success) {
+            continue
+        }
+
+        $verb = $commandMatch.Groups["verb"].Value.ToLowerInvariant()
+        $section = $commandMatch.Groups["section"].Value.ToLowerInvariant()
+        if ($verb -eq "delete") {
+            $unsupportedStatements += [pscustomobject]@{
+                lineNumber = $lineNumber
+                verb = $verb
+                section = $section
+            }
+            continue
+        }
+
+        $arguments = $commandMatch.Groups["arguments"].Value
+        $tokenMatches = [regex]::Matches(
+            $arguments,
+            '(?<key>[A-Za-z][A-Za-z0-9]*)=(?:"(?<quoted>[^"]*)"|(?<bare>[^\s]+))'
+        )
+        $unparsedText = [regex]::Replace(
+            $arguments,
+            '(?<key>[A-Za-z][A-Za-z0-9]*)=(?:"[^"]*"|[^\s]+)',
+            ''
+        ).Trim()
+        $tokens = [ordered]@{}
+        $duplicateKeys = @()
+        foreach ($tokenMatch in $tokenMatches) {
+            $key = $tokenMatch.Groups["key"].Value.ToLowerInvariant()
+            $value = if ($tokenMatch.Groups["quoted"].Success) {
+                $tokenMatch.Groups["quoted"].Value
+            }
+            else {
+                $tokenMatch.Groups["bare"].Value
+            }
+            if ($tokens.Contains($key)) {
+                $duplicateKeys += $key
+                continue
+            }
+            $tokens[$key] = $value
+        }
+
+        $reason = $null
+        if ($tokenMatches.Count -eq 0) {
+            $reason = "No key/value arguments were parsed."
+        }
+        elseif (-not [string]::IsNullOrWhiteSpace($unparsedText)) {
+            $reason = "The command contains unparsed argument text."
+        }
+        elseif ($duplicateKeys.Count -gt 0) {
+            $reason = "The command contains duplicate option keys."
+        }
+
+        $allowedKeys = @()
+        switch ($section) {
+            "dnsserver" {
+                if ($verb -eq "set") { $allowedKeys = @("name", "source", "address", "register", "validate") }
+                else { $allowedKeys = @("name", "address", "index", "validate") }
+            }
+            "encryption" {
+                $allowedKeys = @("server", "dohtemplate", "dothost", "autoupgrade", "udpfallback")
+            }
+            "global" {
+                $allowedKeys = @("doh", "dot", "ddr")
+            }
+            "interface" {
+                $allowedKeys = @("name", "ddr", "ddrfallback")
+            }
+        }
+        $unknownKeys = @($tokens.Keys | Where-Object { $allowedKeys -notcontains $_ })
+        if ($null -eq $reason -and $unknownKeys.Count -gt 0) {
+            $reason = "The command contains unsupported option keys."
+        }
+
+        $alias = if ($tokens.Contains("name")) { [string]$tokens["name"] } else { $null }
+        if ($null -eq $reason) {
+            switch ($section) {
+                "dnsserver" {
+                    if ([string]::IsNullOrWhiteSpace($alias)) {
+                        $reason = "The DNS server command is missing its interface name."
+                    }
+                    elseif ($verb -eq "set") {
+                        if (-not $tokens.Contains("source") -or $tokens["source"].ToLowerInvariant() -notin @("dhcp", "static")) {
+                            $reason = "The DNS server source is missing or unsupported."
+                        }
+                        elseif ($tokens.Contains("address") -and $tokens["address"] -ne "none") {
+                            $parsedAddress = $null
+                            if (-not [System.Net.IPAddress]::TryParse([string]$tokens["address"], [ref]$parsedAddress)) {
+                                $reason = "The DNS server address is not a valid IP address."
+                            }
+                        }
+                    }
+                    elseif (-not $tokens.Contains("address")) {
+                        $reason = "The add-dnsserver command is missing its address."
+                    }
+                    else {
+                        $parsedAddress = $null
+                        if (-not [System.Net.IPAddress]::TryParse([string]$tokens["address"], [ref]$parsedAddress)) {
+                            $reason = "The added DNS server address is not a valid IP address."
+                        }
+                        elseif ($tokens.Contains("index") -and ([int]::TryParse([string]$tokens["index"], [ref]$null) -eq $false)) {
+                            $reason = "The DNS server index is not a valid integer."
+                        }
+                    }
+                    if ($null -eq $reason -and $tokens.Contains("register") -and $tokens["register"].ToLowerInvariant() -notin @("none", "primary", "both")) {
+                        $reason = "The DNS registration option is unsupported."
+                    }
+                    if ($null -eq $reason -and $tokens.Contains("validate") -and $tokens["validate"].ToLowerInvariant() -notin @("yes", "no")) {
+                        $reason = "The DNS validation option is unsupported."
+                    }
+                    if ($null -eq $reason) {
+                        $addressFamily = $null
+                        if ($tokens.Contains("address") -and $tokens["address"] -ne "none") {
+                            $parsedAddress = [System.Net.IPAddress]::Parse([string]$tokens["address"])
+                            $addressFamily = if ($parsedAddress.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork) { "IPv4" } elseif ($parsedAddress.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetworkV6) { "IPv6" } else { "Unknown" }
+                        }
+                        $dnsServerCommands += [pscustomobject]@{
+                            lineNumber = $lineNumber
+                            verb = $verb
+                            interfaceAlias = $alias
+                            source = if ($tokens.Contains("source")) { $tokens["source"].ToLowerInvariant() } else { $null }
+                            address = if ($tokens.Contains("address")) { $tokens["address"] } else { $null }
+                            addressFamily = $addressFamily
+                            index = if ($tokens.Contains("index")) { [int]$tokens["index"] } else { $null }
+                            register = if ($tokens.Contains("register")) { $tokens["register"].ToLowerInvariant() } else { $null }
+                            validate = if ($tokens.Contains("validate")) { $tokens["validate"].ToLowerInvariant() } else { $null }
+                        }
+                    }
+                }
+                "encryption" {
+                    if (-not $tokens.Contains("server")) {
+                        $reason = "The encryption command is missing its server address."
+                    }
+                    else {
+                        $parsedAddress = $null
+                        if (-not [System.Net.IPAddress]::TryParse([string]$tokens["server"], [ref]$parsedAddress)) {
+                            $reason = "The encryption server is not a valid IP address."
+                        }
+                        elseif (-not $tokens.Contains("dohtemplate") -and -not $tokens.Contains("dothost")) {
+                            $reason = "The encryption command has neither a DoH template nor a DoT host."
+                        }
+                    }
+                    foreach ($booleanOption in @("autoupgrade", "udpfallback")) {
+                        if ($null -eq $reason -and $tokens.Contains($booleanOption) -and $tokens[$booleanOption].ToLowerInvariant() -notin @("yes", "no")) {
+                            $reason = "The encryption command contains an unsupported Boolean option."
+                        }
+                    }
+                    if ($null -eq $reason) {
+                        $encryptionCommands += [pscustomobject]@{
+                            lineNumber = $lineNumber
+                            verb = $verb
+                            server = [string]$tokens["server"]
+                            dohTemplate = if ($tokens.Contains("dohtemplate")) { [string]$tokens["dohtemplate"] } else { $null }
+                            dotHost = if ($tokens.Contains("dothost")) { [string]$tokens["dothost"] } else { $null }
+                            autoUpgrade = if ($tokens.Contains("autoupgrade")) { $tokens["autoupgrade"].ToLowerInvariant() } else { $null }
+                            udpFallback = if ($tokens.Contains("udpfallback")) { $tokens["udpfallback"].ToLowerInvariant() } else { $null }
+                        }
+                    }
+                }
+                "global" {
+                    if ($tokens.Count -eq 0) {
+                        $reason = "The global command contains no supported settings."
+                    }
+                    elseif ($tokens.Contains("doh") -and $tokens["doh"].ToLowerInvariant() -notin @("yes", "no", "auto")) {
+                        $reason = "The global DoH value is unsupported."
+                    }
+                    elseif (($tokens.Contains("dot") -and $tokens["dot"].ToLowerInvariant() -notin @("yes", "no")) -or
+                        ($tokens.Contains("ddr") -and $tokens["ddr"].ToLowerInvariant() -notin @("yes", "no"))) {
+                        $reason = "The global DoT or DDR value is unsupported."
+                    }
+                    if ($null -eq $reason) {
+                        $globalCommands += [pscustomobject]@{
+                            lineNumber = $lineNumber
+                            verb = $verb
+                            doh = if ($tokens.Contains("doh")) { $tokens["doh"].ToLowerInvariant() } else { $null }
+                            dot = if ($tokens.Contains("dot")) { $tokens["dot"].ToLowerInvariant() } else { $null }
+                            ddr = if ($tokens.Contains("ddr")) { $tokens["ddr"].ToLowerInvariant() } else { $null }
+                        }
+                    }
+                }
+                "interface" {
+                    if ([string]::IsNullOrWhiteSpace($alias)) {
+                        $reason = "The interface command is missing its interface name."
+                    }
+                    elseif (-not $tokens.Contains("ddr") -and -not $tokens.Contains("ddrfallback")) {
+                        $reason = "The interface command contains no supported DDR settings."
+                    }
+                    elseif (($tokens.Contains("ddr") -and $tokens["ddr"].ToLowerInvariant() -notin @("yes", "no")) -or
+                        ($tokens.Contains("ddrfallback") -and $tokens["ddrfallback"].ToLowerInvariant() -notin @("yes", "no"))) {
+                        $reason = "The interface DDR setting is unsupported."
+                    }
+                    if ($null -eq $reason) {
+                        $interfaceCommands += [pscustomobject]@{
+                            lineNumber = $lineNumber
+                            verb = $verb
+                            interfaceAlias = $alias
+                            ddr = if ($tokens.Contains("ddr")) { $tokens["ddr"].ToLowerInvariant() } else { $null }
+                            ddrFallback = if ($tokens.Contains("ddrfallback")) { $tokens["ddrfallback"].ToLowerInvariant() } else { $null }
+                        }
+                    }
+                }
+            }
+        }
+
+        if ($null -ne $reason) {
+            $malformedStatements += [pscustomobject]@{
+                lineNumber = $lineNumber
+                verb = $verb
+                section = $section
+                interfaceAlias = $alias
+                reason = $reason
+            }
+        }
+        else {
+            $recognizedCommandCount++
+        }
+    }
+
+    $parseState = "unknown"
+    if ($recognizedCommandCount -gt 0 -and $malformedStatements.Count -eq 0 -and $unsupportedStatements.Count -eq 0) {
+        $parseState = "parsed"
+    }
+    elseif ($recognizedCommandCount -gt 0 -or $malformedStatements.Count -gt 0 -or $unsupportedStatements.Count -gt 0) {
+        $parseState = "incomplete"
+    }
+
+    return [pscustomobject]@{
+        parserSchemaVersion = 1
+        parseState = $parseState
+        recognizedCommandCount = $recognizedCommandCount
+        malformedCommandCount = $malformedStatements.Count
+        unsupportedCommandCount = $unsupportedStatements.Count
+        dnsServerCommands = @($dnsServerCommands)
+        encryptionCommands = @($encryptionCommands)
+        globalCommands = @($globalCommands)
+        interfaceCommands = @($interfaceCommands)
+        malformedStatements = @($malformedStatements)
+        unsupportedStatements = @($unsupportedStatements)
+        limitation = "Only documented set/add command forms are parsed. A parsed result does not prove complete per-interface/profile/family state, stable adapter identity, or a supported DNS restore contract; absent statement families are not inferred to be default."
+    }
+}
+
+Export-ModuleMember -Function ConvertTo-DnsAddressFamilyLabel, ConvertFrom-NetshInterfaceDnsDump, Get-NetshInterfaceDnsSourceForAdapter, ConvertFrom-NetshIPv6InterfaceDump, Get-NetshIPv6InterfaceDnsPolicyForAdapter, ConvertFrom-NetshDnsClientDump

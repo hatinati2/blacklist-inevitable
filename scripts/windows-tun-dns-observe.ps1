@@ -131,16 +131,7 @@ function Convert-DnsAddressFamily {
     # as the native Winsock numeric family: AF_INET=2 and AF_INET6=23.
     # PowerShell's table formatting renders these as IPv4/IPv6, but casting the
     # raw CIM property to string preserves the numeric values.
-    $familyText = ([string]$Value).Trim()
-    switch -Exact ($familyText) {
-        "2" { return "IPv4" }
-        "23" { return "IPv6" }
-        "IPv4" { return "IPv4" }
-        "IPv6" { return "IPv6" }
-        "InterNetwork" { return "IPv4" }
-        "InterNetworkV6" { return "IPv6" }
-        default { return "Unknown:$familyText" }
-    }
+    return ConvertTo-DnsAddressFamilyLabel -Value $Value
 }
 
 function Get-SelectedProperties {
@@ -404,13 +395,19 @@ function Get-DnsObservation {
                         Where-Object { [int]$_.InterfaceIndex -eq $interfaceIndex } |
                         Sort-Object -Property AddressFamily |
                         ForEach-Object {
-                            Get-SelectedProperties -InputObject $_ -PropertyNames @(
+                            $selected = Get-SelectedProperties -InputObject $_ -PropertyNames @(
                                 "AddressFamily",
                                 "Dhcp",
                                 "RouterDiscovery",
                                 "ManagedAddressConfiguration",
                                 "OtherStatefulConfiguration"
                             )
+                            $rawFamily = [string]$_.AddressFamily
+                            $normalizedFamily = ConvertTo-DnsAddressFamilyLabel -Value $_.AddressFamily
+                            $selected.values | Add-Member -MemberType NoteProperty -Name AddressFamily -Value $normalizedFamily -Force
+                            $selected.values | Add-Member -MemberType NoteProperty -Name AddressFamilyRaw -Value $rawFamily -Force
+                            $selected.availableProperties = @($selected.availableProperties) + @("AddressFamilyRaw")
+                            $selected
                         }
                 )
             }
@@ -784,7 +781,7 @@ foreach ($id in $baselineIds) {
             $unknown += "IPv6 DNS policy is missing properties for physical adapter $id in the $($adapterObservation.label) observation: $($missingPolicyProperties -join ', ')."
         }
     }
-    if ($null -ne $before.ipv6DnsPolicy -and $null -ne $after.ipv6DnsPolicy -and
+    if ($before.ipv6DnsPolicy.state -eq "observed" -and $after.ipv6DnsPolicy.state -eq "observed" -and
         (ConvertTo-ComparableJson $before.ipv6DnsPolicy.settings) -ne (ConvertTo-ComparableJson $after.ipv6DnsPolicy.settings)) {
         $changes += "IPv6 router-discovery/RDNSS/DHCP policy changed on physical adapter $id."
     }

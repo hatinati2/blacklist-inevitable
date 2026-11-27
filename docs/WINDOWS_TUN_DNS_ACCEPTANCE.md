@@ -64,6 +64,11 @@ The helper uses `InterfaceGuid` to correlate physical adapters and does not use 
 - `FAIL`: one or more observed physical-adapter/global DNS values changed.
 - `UNKNOWN`: a required collector failed, physical-adapter identity or physical/virtual classification is incomplete, per-interface DNS settings are missing, an IPv4/IPv6 DNS-family record is absent, or the requested virtual TUN adapter could not be identified.
 
+Microsoft documents `ConnectionSpecificSuffixSearchList` on the `MSFT_DNSClient` WMI class and exposes the global `UseSuffixSearchList` switch alongside `SuffixSearchList`. The comparison therefore treats either property being unavailable as UNKNOWN rather than assuming the search list is fully represented:
+
+- [MSFT_DNSClient](https://learn.microsoft.com/en-us/windows/win32/fwp/wmi/dnsclientcimprov/msft-dnsclient)
+- [Get-DnsClientGlobalSetting](https://learn.microsoft.com/en-us/powershell/module/dnsclient/get-dnsclientglobalsetting)
+
 The JSON also records:
 
 - adapter identity, hardware/virtual classification, and IPv4/IPv6 DNS server lists;

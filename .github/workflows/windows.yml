@@ -62,8 +62,11 @@ jobs:
           if ($malformedMode.state -ne "unknown" -or $malformedMode.sourceMode -ne "Unknown") { throw "An unrecognized source token must remain Unknown." }
 
           $scriptText = Get-Content -LiteralPath $scriptPath -Raw
+          $sourceModuleText = Get-Content -LiteralPath $sourceModulePath -Raw
           $forbiddenRegistryWrites = @('\.SetValue\s*\(', '\.CreateSubKey\s*\(', '\.DeleteValue\s*\(', '\.DeleteSubKey', '\b(New|Set|Remove)-ItemProperty\b')
-          foreach ($pattern in $forbiddenRegistryWrites) { if ($scriptText -match $pattern) { throw "The DNS observation script contains a forbidden registry mutation pattern: $pattern" } }
+          foreach ($pattern in $forbiddenRegistryWrites) {
+            if ($scriptText -match $pattern -or $sourceModuleText -match $pattern) { throw "The DNS observation scripts contain a forbidden registry mutation pattern: $pattern" }
+          }
           $snapshotPath = Join-Path $env:RUNNER_TEMP "windows-tun-dns-observation.json"
           $comparisonPath = Join-Path $env:RUNNER_TEMP "windows-tun-dns-comparison.json"
           $windowsPowerShell = Join-Path $env:WINDIR "System32\WindowsPowerShell\v1.0\powershell.exe"
@@ -77,7 +80,7 @@ jobs:
           $compareExitCode = $LASTEXITCODE
           if ($compareExitCode -notin @(0, 1, 2)) { throw "The DNS observer comparison returned an unexpected exit code: $compareExitCode." }
           $comparison = Get-Content -LiteralPath $comparisonPath -Raw | ConvertFrom-Json
-          if ($comparison.schemaVersion -ne 1 -or $comparison.status -notin @("PASS", "FAIL", "UNKNOWN")) { throw "The DNS observer comparison did not produce a valid result." }
+          if ($comparison.schemaVersion -ne 2 -or $comparison.status -notin @("PASS", "FAIL", "UNKNOWN")) { throw "The DNS observer comparison did not produce a valid result." }
           $expectedExitCode = switch ($comparison.status) { "PASS" { 0 } "FAIL" { 1 } "UNKNOWN" { 2 } }
           if ($compareExitCode -ne $expectedExitCode) { throw "The DNS observer comparison exit code does not match its status." }
           # The accepted UNKNOWN exit code belongs to the child observer process; do not leak it as the workflow step's exit code.

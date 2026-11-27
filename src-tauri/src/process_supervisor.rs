@@ -1249,9 +1249,30 @@ mod tests {
 #[cfg(all(test, windows))]
 mod windows_instance_lease_tests {
     use super::*;
+    use std::process::Command;
+
+    const INSTANCE_LEASE_TEST_NAME_ENV: &str =
+        "BLACKLIST_INEVITABLE_TEST_INSTANCE_LEASE_NAME";
+
+    // Spawned by the parent test below. A separate process must observe the
+    // named kernel object and refuse to proceed with startup recovery.
+    #[test]
+    fn child_process_cannot_acquire_a_live_instance_lease() {
+        let Ok(name) = std::env::var(INSTANCE_LEASE_TEST_NAME_ENV) else {
+            return;
+        };
+
+        let error = WindowsInstanceMutex::acquire(&name)
+            .err()
+            .expect("a second process must be rejected while the first lease is held");
+        assert!(
+            error.contains("already running"),
+            "duplicate process should be rejected with a clear diagnostic"
+        );
+    }
 
     #[test]
-    fn named_instance_lease_rejects_a_second_owner_until_the_first_closes() {
+    fn named_instance_lease_rejects_another_process_and_releases_after_owner_exits() {
         let name = format!(
             "Local\\BlacklistInevitable.Test.{}",
             uuid::Uuid::new_v4()
@@ -1259,19 +1280,25 @@ mod windows_instance_lease_tests {
         let first = WindowsInstanceMutex::acquire(&name)
             .expect("first app-like process must acquire the instance lease");
 
-        let second = WindowsInstanceMutex::acquire(&name);
+        let executable = std::env::current_exe().expect("resolve current test executable");
+        let status = Command::new(executable)
+            .args([
+                "--exact",
+                "process_supervisor::windows_instance_lease_tests::child_process_cannot_acquire_a_live_instance_lease",
+                "--nocapture",
+            ])
+            .env(INSTANCE_LEASE_TEST_NAME_ENV, &name)
+            .status()
+            .expect("spawn second app-like process");
+
         assert!(
-            second.is_err(),
-            "a second app-like process must not acquire the same lease"
-        );
-        assert!(
-            second.err().unwrap_or_default().contains("already running"),
-            "duplicate instance should be rejected with a clear diagnostic"
+            status.success(),
+            "a second process must be rejected before it can run startup cleanup"
         );
 
         drop(first);
         let replacement = WindowsInstanceMutex::acquire(&name)
-            .expect("the OS must release the lease after its owner closes the handle");
+            .expect("the OS must release the lease after its owner process exits");
         drop(replacement);
     }
 }

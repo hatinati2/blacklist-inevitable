@@ -332,6 +332,8 @@ function Get-DnsObservation {
     $netshGlobal = Invoke-NetshReadOnly -Arguments @("dnsclient", "show", "global")
     $netshState = Invoke-NetshReadOnly -Arguments @("dnsclient", "show", "state")
     $netshEncryption = Invoke-NetshReadOnly -Arguments @("dnsclient", "show", "encryption")
+    # Parse only documented DNS Client dump statement forms; the emitted script is never replayed.
+    $netshDnsClientDumpParsed = ConvertFrom-NetshDnsClientDump -Lines $netshDump.output
     # Each IP family has a distinct, documented read-only dump and DNS source setting.
     # These generated commands are parsed as evidence only and are never replayed.
     $netshIpv4Dump = Invoke-NetshReadOnly -Arguments @("interface", "ipv4", "dump")
@@ -504,7 +506,7 @@ function Get-DnsObservation {
     }
 
     return [pscustomobject]@{
-        schemaVersion = 4
+        schemaVersion = 5
         capturedAtUtc = [DateTime]::UtcNow.ToString("o")
         os = $os
         collection = [pscustomobject]@{
@@ -535,6 +537,7 @@ function Get-DnsObservation {
         evidence = [pscustomobject]@{
             # This is captured as text for review only and is never replayed.
             netshDnsClientDump = @($netshDump.output)
+            netshDnsClientDumpParsed = $netshDnsClientDumpParsed
             netshDnsClientShowGlobal = @($netshGlobal.output)
             netshDnsClientShowState = @($netshState.output)
             netshDnsClientShowEncryption = @($netshEncryption.output)
@@ -550,7 +553,8 @@ function Get-DnsObservation {
             "Get-NetIPInterface records per-family DHCP, router-discovery, managed-address, and other-stateful configuration. These are configuration-policy cross-checks, not proof of the actual resolver source.",
             "The IPv6 netsh interface dump records RouterDiscovery, ManagedAddress, OtherStateful, RABasedDnsConfig, and DHCPSstaticIPCoexistence only when explicitly present; absent flags remain Unknown and do not prove the actual source of effective DNS servers.",
             "This observation does not prove DNS packet containment or absence of leaks; packet capture and live Windows acceptance are separate gates.",
-            "netsh dnsclient and interface IPv4/IPv6 dump output is evidence only. No generated command is executed or accepted as a canonical restorable snapshot by this script."
+            "netsh dnsclient dump output is retained raw and parsed only for documented set/add DNS server, encryption, global, and per-interface DDR statements. Unsupported or malformed statements remain incomplete; parsed output is supplemental diagnostics only and does not prove complete family/profile/identity coverage or a restorable snapshot.",
+            "netsh interface IPv4/IPv6 dump output is evidence only. No generated command is executed or accepted as a canonical restorable snapshot by this script."
         )
     }
 }
@@ -602,7 +606,7 @@ if (-not (Test-Path -LiteralPath $BaselinePath -PathType Leaf)) {
 }
 
 $baseline = Get-Content -LiteralPath $BaselinePath -Raw | ConvertFrom-Json
-if ($baseline.schemaVersion -ne 4) {
+if ($baseline.schemaVersion -notin @(4, 5)) {
     throw "Unsupported baseline schema version."
 }
 
@@ -611,7 +615,7 @@ if (-not [string]::IsNullOrWhiteSpace($CurrentSnapshotPath)) {
         throw "Current snapshot file does not exist: $CurrentSnapshotPath"
     }
     $current = Get-Content -LiteralPath $CurrentSnapshotPath -Raw | ConvertFrom-Json
-    if ($current.schemaVersion -ne 4) {
+    if ($current.schemaVersion -notin @(4, 5)) {
         throw "Unsupported current snapshot schema version."
     }
 }
@@ -932,7 +936,7 @@ $result = [pscustomobject]@{
     schemaVersion = 3
     comparedAtUtc = [DateTime]::UtcNow.ToString("o")
     status = $status
-    meaning = "PASS means only that the observed physical-adapter DNS server lists, selected DNS Client fields, selected read-only registry DoH evidence, selected per-family netsh DNS source tokens, Get-NetIPInterface policy fields, selected IPv6 router-discovery/RDNSS policy flags, and selected global DNS evidence were unchanged. The source token dhcp and configuration policy flags do not prove which protocol delivered each effective IPv6 resolver address. Registry DoH data is diagnostic only. This is not proof of DNS leak freedom or a complete restorable DNS snapshot."
+    meaning = "PASS means only that the observed physical-adapter DNS server lists, selected DNS Client fields, selected read-only registry DoH evidence, selected per-family netsh DNS source tokens, Get-NetIPInterface policy fields, selected IPv6 router-discovery/RDNSS policy flags, and selected global DNS evidence were unchanged. Parsed netsh dnsclient dump statements are supplemental diagnostics and are not compared as authoritative state. The source token dhcp and configuration policy flags do not prove which protocol delivered each effective IPv6 resolver address. Registry DoH data is diagnostic only. This is not proof of DNS leak freedom or a complete restorable DNS snapshot."
     baselinePath = [System.IO.Path]::GetFullPath($BaselinePath)
     currentSnapshotPath = if ([string]::IsNullOrWhiteSpace($CurrentSnapshotPath)) { $null } else { [System.IO.Path]::GetFullPath($CurrentSnapshotPath) }
     changes = @($changes)

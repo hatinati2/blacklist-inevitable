@@ -264,8 +264,10 @@ function Get-InterfaceRegistryDohEvidence {
         }
 
         $anyPresent = @($families | Where-Object { $_.state -eq "present" }).Count -gt 0
+        $overallState = "absent"
+        if ($anyPresent) { $overallState = "present" }
         return [pscustomobject]@{
-            state = if ($anyPresent) { "present" } else { "absent" }
+            state = $overallState
             error = $null
             families = @($families)
         }
@@ -438,7 +440,7 @@ function Get-DnsObservation {
     }
 
     return [pscustomobject]@{
-        schemaVersion = 1
+        schemaVersion = 2
         capturedAtUtc = [DateTime]::UtcNow.ToString("o")
         os = $os
         collection = [pscustomobject]@{
@@ -528,7 +530,7 @@ if (-not (Test-Path -LiteralPath $BaselinePath -PathType Leaf)) {
 }
 
 $baseline = Get-Content -LiteralPath $BaselinePath -Raw | ConvertFrom-Json
-if ($baseline.schemaVersion -ne 1) {
+if ($baseline.schemaVersion -ne 2) {
     throw "Unsupported baseline schema version."
 }
 

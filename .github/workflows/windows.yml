@@ -61,6 +61,8 @@ jobs:
           if ($comparison.schemaVersion -ne 1 -or $comparison.status -notin @("PASS", "FAIL", "UNKNOWN")) { throw "The DNS observer comparison did not produce a valid result." }
           $expectedExitCode = switch ($comparison.status) { "PASS" { 0 } "FAIL" { 1 } "UNKNOWN" { 2 } }
           if ($compareExitCode -ne $expectedExitCode) { throw "The DNS observer comparison exit code does not match its status." }
+          # The accepted UNKNOWN exit code belongs to the child observer process; do not leak it as the workflow step's exit code.
+          $global:LASTEXITCODE = 0
           if ($comparison.status -eq "FAIL") { throw "A no-change DNS observer comparison reported DNS state changes." }
 
       - name: Install frontend dependencies

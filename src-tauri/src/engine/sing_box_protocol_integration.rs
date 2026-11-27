@@ -1,4 +1,6 @@
-use super::*;
+use super::{build_probe_config, build_probe_http_client, measure_request_with_client};
+use crate::profiles::ProfileSummary;
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::fs;
 use std::net::{TcpListener as StdTcpListener, UdpSocket as StdUdpSocket};
@@ -176,27 +178,41 @@ fn inbound_tls(certificate: &Path, private_key: &Path, alpn: &[&str]) -> Value {
     tls
 }
 
-fn tcp_port() -> u16 {
-    StdTcpListener::bind(("127.0.0.1", 0))
-        .expect("reserve controlled TCP port")
-        .local_addr()
-        .expect("read controlled TCP port")
-        .port()
+fn tcp_port(used: &mut Vec<u16>) -> u16 {
+    loop {
+        let port = StdTcpListener::bind(("127.0.0.1", 0))
+            .expect("reserve controlled TCP port")
+            .local_addr()
+            .expect("read controlled TCP port")
+            .port();
+        if !used.contains(&port) {
+            used.push(port);
+            return port;
+        }
+    }
 }
 
-fn udp_port() -> u16 {
-    StdUdpSocket::bind(("127.0.0.1", 0))
-        .expect("reserve controlled UDP port")
-        .local_addr()
-        .expect("read controlled UDP port")
-        .port()
+fn udp_port(used: &mut Vec<u16>) -> u16 {
+    loop {
+        let port = StdUdpSocket::bind(("127.0.0.1", 0))
+            .expect("reserve controlled UDP port")
+            .local_addr()
+            .expect("read controlled UDP port")
+            .port();
+        if !used.contains(&port) {
+            used.push(port);
+            return port;
+        }
+    }
 }
 
 fn make_cases(certificate: &Path, private_key: &Path) -> Vec<ProtocolCase> {
+    let mut used_tcp_ports = Vec::new();
+    let mut used_udp_ports = Vec::new();
     let uuid = "12345678-1234-1234-1234-123456789012";
     let mut cases = Vec::new();
 
-    let port = tcp_port();
+    let port = tcp_port(&mut used_tcp_ports);
     let tls = inbound_tls(certificate, private_key, &[]);
     cases.push(ProtocolCase {
         label: "vless-tls",
@@ -253,7 +269,7 @@ fn make_cases(certificate: &Path, private_key: &Path) -> Vec<ProtocolCase> {
         network: Network::Tcp,
     });
 
-    let port = udp_port();
+    let port = udp_port(&mut used_udp_ports);
     let tls = inbound_tls(certificate, private_key, &["h3"]);
     cases.push(ProtocolCase {
         label: "hysteria2-salamander",
@@ -459,7 +475,7 @@ async fn every_supported_outbound_completes_an_authenticated_controlled_http_rou
     let url = format!("http://127.0.0.1:{origin_port}/generate_204");
 
     for case in &cases {
-        let socks_port = tcp_port();
+        let socks_port = tcp_port(&mut Vec::new());
         let mut client_config =
             build_probe_config(&case.profile, &case.credentials, socks_port)
                 .unwrap_or_else(|error| panic!("{} adapter rejected its test profile: {error}", case.label));

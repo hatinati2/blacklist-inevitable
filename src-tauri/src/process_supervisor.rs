@@ -809,6 +809,7 @@ mod tests {
                 }),
                 idle: Notify::new(),
                 job: None,
+                instance_mutex: Mutex::new(None),
             }),
         }
     }

@@ -1,4 +1,7 @@
-use super::{build_probe_config, build_probe_http_client, measure_request_with_client};
+use super::{
+    build_probe_config_with_socks_auth, build_probe_http_client, measure_request_with_client,
+    ProbeSocksCredentials,
+};
 use crate::profiles::ProfileSummary;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;

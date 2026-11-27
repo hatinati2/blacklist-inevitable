@@ -262,7 +262,7 @@ fn make_cases(certificate: &Path, private_key: &Path) -> Vec<ProtocolCase> {
         profile: profile("shadowsocks", port, &[("method", "aes-256-gcm")]),
         credentials: credentials(&[("password", "controlled-shadowsocks-secret")]),
         inbound: json!({
-            "type": "shadowsocks", "tag": "shadowsocks-in",
+            "type": "shadowsocks", "tag": "shadowsocks-in", "network": "tcp",
             "listen": "127.0.0.1", "listen_port": port,
             "method": "aes-256-gcm", "password": "controlled-shadowsocks-secret"
         }),

@@ -17,6 +17,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+Import-Module (Join-Path $PSScriptRoot "windows-dns-source-evidence.psm1") -Force
 
 function Invoke-ReadOnlyCapture {
     param(
@@ -337,6 +338,12 @@ function Get-DnsObservation {
     $netshGlobal = Invoke-NetshReadOnly -Arguments @("dnsclient", "show", "global")
     $netshState = Invoke-NetshReadOnly -Arguments @("dnsclient", "show", "state")
     $netshEncryption = Invoke-NetshReadOnly -Arguments @("dnsclient", "show", "encryption")
+    # Each IP family has a distinct, documented read-only dump and DNS source setting.
+    # These generated commands are parsed as evidence only and are never replayed.
+    $netshIpv4Dump = Invoke-NetshReadOnly -Arguments @("interface", "ipv4", "dump")
+    $netshIpv6Dump = Invoke-NetshReadOnly -Arguments @("interface", "ipv6", "dump")
+    $ipv4SourceEvidence = ConvertFrom-NetshInterfaceDnsDump -AddressFamily IPv4 -Lines $netshIpv4Dump.output
+    $ipv6SourceEvidence = ConvertFrom-NetshInterfaceDnsDump -AddressFamily IPv6 -Lines $netshIpv6Dump.output
 
     $adapters = @()
     if ($adapterCapture.succeeded) {
@@ -392,6 +399,11 @@ function Get-DnsObservation {
                 $hardwareInterface = [bool]$hardwareProperty.Value
             }
 
+            $dnsSourceMode = [pscustomobject]@{
+                ipv4 = Get-NetshInterfaceDnsSourceForAdapter -ParsedEvidence $ipv4SourceEvidence -InterfaceAlias ([string]$adapter.Name)
+                ipv6 = Get-NetshInterfaceDnsSourceForAdapter -ParsedEvidence $ipv6SourceEvidence -InterfaceAlias ([string]$adapter.Name)
+            }
+
             $adapters += [pscustomobject]@{
                 interfaceGuid = $guid
                 interfaceIndex = $interfaceIndex
@@ -402,6 +414,7 @@ function Get-DnsObservation {
                 macAddress = [string]$adapter.MacAddress
                 dnsServerAddresses = @($serverRecords)
                 dnsClientSettings = @($clientRecords)
+                dnsSourceMode = $dnsSourceMode
                 # This is a version-sensitive, read-only registry cross-check.
                 # It is not an authoritative or supported DNS restore contract.
                 registryDohEvidence = Get-InterfaceRegistryDohEvidence -InterfaceGuid $guid
@@ -467,7 +480,7 @@ function Get-DnsObservation {
     }
 
     return [pscustomobject]@{
-        schemaVersion = 2
+        schemaVersion = 3
         capturedAtUtc = [DateTime]::UtcNow.ToString("o")
         os = $os
         collection = [pscustomobject]@{
@@ -487,6 +500,8 @@ function Get-DnsObservation {
             netshDnsClientShowGlobal = [pscustomobject]@{ available = $netshGlobal.available; succeeded = $netshGlobal.succeeded; exitCode = $netshGlobal.exitCode; error = $netshGlobal.error }
             netshDnsClientShowState = [pscustomobject]@{ available = $netshState.available; succeeded = $netshState.succeeded; exitCode = $netshState.exitCode; error = $netshState.error }
             netshDnsClientShowEncryption = [pscustomobject]@{ available = $netshEncryption.available; succeeded = $netshEncryption.succeeded; exitCode = $netshEncryption.exitCode; error = $netshEncryption.error }
+            netshInterfaceIpv4Dump = [pscustomobject]@{ available = $netshIpv4Dump.available; succeeded = $netshIpv4Dump.succeeded; exitCode = $netshIpv4Dump.exitCode; error = $netshIpv4Dump.error }
+            netshInterfaceIpv6Dump = [pscustomobject]@{ available = $netshIpv6Dump.available; succeeded = $netshIpv6Dump.succeeded; exitCode = $netshIpv6Dump.exitCode; error = $netshIpv6Dump.error }
         }
         adapters = @($adapters)
         globalSettings = @($globalSettings)
@@ -498,14 +513,17 @@ function Get-DnsObservation {
             netshDnsClientShowGlobal = @($netshGlobal.output)
             netshDnsClientShowState = @($netshState.output)
             netshDnsClientShowEncryption = @($netshEncryption.output)
+            netshInterfaceIpv4Dump = @($netshIpv4Dump.output)
+            netshInterfaceIpv6Dump = @($netshIpv6Dump.output)
         }
         limitations = @(
             "Get-DnsClientDohServerAddress is a system known-server inventory, not the adapter/profile DoH property arrays in DNS_INTERFACE_SETTINGS3.",
             "Get-DnsClientServerAddress reports configured address lists, not a complete adapter/profile recovery snapshot.",
-            "The DHCP-versus-static DNS source mode is retained in raw netsh output for manual review and is not automatically compared by this probe.",
+            "Per-family netsh interface IPv4/IPv6 dump statements are parsed read-only into Static or Automatic source-mode evidence; absent, duplicate, or unrecognized statements remain Unknown.",
+            "Automatic describes the netsh DNS source setting only. It does not identify whether IPv6 effective resolvers arrived through RA/RDNSS or DHCPv6.",
             "Per-interface registry Doh/Doh6 keys are read-only diagnostic evidence; their presence, absence, and value layout are not treated as a supported complete DoH snapshot or restore contract.",
             "This observation does not prove DNS packet containment or absence of leaks; packet capture and live Windows acceptance are separate gates.",
-            "netsh dnsclient dump output is evidence only. It is not executed or accepted as a canonical restorable snapshot by this script."
+            "netsh dnsclient and interface IPv4/IPv6 dump output is evidence only. No generated command is executed or accepted as a canonical restorable snapshot by this script."
         )
     }
 }
@@ -557,7 +575,7 @@ if (-not (Test-Path -LiteralPath $BaselinePath -PathType Leaf)) {
 }
 
 $baseline = Get-Content -LiteralPath $BaselinePath -Raw | ConvertFrom-Json
-if ($baseline.schemaVersion -ne 2) {
+if ($baseline.schemaVersion -ne 3) {
     throw "Unsupported baseline schema version."
 }
 
@@ -566,7 +584,7 @@ if (-not [string]::IsNullOrWhiteSpace($CurrentSnapshotPath)) {
         throw "Current snapshot file does not exist: $CurrentSnapshotPath"
     }
     $current = Get-Content -LiteralPath $CurrentSnapshotPath -Raw | ConvertFrom-Json
-    if ($current.schemaVersion -ne 2) {
+    if ($current.schemaVersion -ne 3) {
         throw "Unsupported current snapshot schema version."
     }
 }
@@ -584,7 +602,9 @@ $requiredCollectors = @(
     "getDnsClientDohServerAddress",
     "getDnsClientNrptRule",
     "registryDoh",
-    "netshDnsClientDump"
+    "netshDnsClientDump",
+    "netshInterfaceIpv4Dump",
+    "netshInterfaceIpv6Dump"
 )
 
 foreach ($collectorName in $requiredCollectors) {
@@ -680,6 +700,20 @@ foreach ($id in $baselineIds) {
     }
     if ((ConvertTo-ComparableJson $before.dnsClientSettings) -ne (ConvertTo-ComparableJson $after.dnsClientSettings)) {
         $changes += "Per-interface DNS Client settings changed on physical adapter $id."
+    }
+
+    foreach ($family in @("ipv4", "ipv6")) {
+        $beforeSource = $before.dnsSourceMode.$family
+        $afterSource = $after.dnsSourceMode.$family
+        if ($null -eq $beforeSource -or $null -eq $afterSource -or
+            $beforeSource.state -ne "observed" -or $afterSource.state -ne "observed" -or
+            $beforeSource.sourceToken -notin @("dhcp", "static") -or
+            $afterSource.sourceToken -notin @("dhcp", "static")) {
+            $unknown += "The $family DNS source-mode evidence is missing, ambiguous, or unrecognized for physical adapter $id."
+        }
+        elseif ($beforeSource.sourceToken -ne $afterSource.sourceToken) {
+            $changes += "The $family DNS source mode changed on physical adapter $id ($($beforeSource.sourceToken) -> $($afterSource.sourceToken))."
+        }
     }
     if ($before.registryDohEvidence.state -in @("error", "unknown") -or $after.registryDohEvidence.state -in @("error", "unknown")) {
         $unknown += "Per-interface registry DoH evidence is incomplete for physical adapter $id."
@@ -777,10 +811,10 @@ elseif ($unknown.Count -gt 0) {
 }
 
 $result = [pscustomobject]@{
-    schemaVersion = 1
+    schemaVersion = 2
     comparedAtUtc = [DateTime]::UtcNow.ToString("o")
     status = $status
-    meaning = "PASS means only that the observed physical-adapter DNS server lists, selected DNS Client fields, selected read-only registry DoH evidence, and selected global DNS evidence were unchanged. DHCP/static source mode is not automatically compared. Registry DoH data is diagnostic only. This is not proof of DNS leak freedom or a complete restorable DNS snapshot."
+    meaning = "PASS means only that the observed physical-adapter DNS server lists, selected DNS Client fields, selected read-only registry DoH evidence, selected per-family netsh DNS source tokens, and selected global DNS evidence were unchanged. Automatic is the netsh source token dhcp and does not identify the dynamic IPv6 resolver origin (RA/RDNSS versus DHCPv6). Registry DoH data is diagnostic only. This is not proof of DNS leak freedom or a complete restorable DNS snapshot."
     baselinePath = [System.IO.Path]::GetFullPath($BaselinePath)
     currentSnapshotPath = if ([string]::IsNullOrWhiteSpace($CurrentSnapshotPath)) { $null } else { [System.IO.Path]::GetFullPath($CurrentSnapshotPath) }
     changes = @($changes)

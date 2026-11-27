@@ -321,6 +321,7 @@ function Get-DnsObservation {
         limitations = @(
             "Get-DnsClientDohServerAddress is a system known-server inventory, not the adapter/profile DoH property arrays in DNS_INTERFACE_SETTINGS3.",
             "Get-DnsClientServerAddress reports configured address lists, not a complete adapter/profile recovery snapshot.",
+            "The DHCP-versus-static DNS source mode is retained in raw netsh output for manual review and is not automatically compared by this probe.",
             "This observation does not prove DNS packet containment or absence of leaks; packet capture and live Windows acceptance are separate gates.",
             "netsh dnsclient dump output is evidence only. It is not executed or accepted as a canonical restorable snapshot by this script."
         )
@@ -434,6 +435,16 @@ foreach ($id in $baselineIds) {
         $unknown += "Baseline physical adapter $id is absent from the current observation."
         continue
     }
+    if (@($before.dnsClientSettings).Count -eq 0 -or @($after.dnsClientSettings).Count -eq 0) {
+        $unknown += "Per-interface DNS Client settings were not returned for physical adapter $id."
+    }
+    $requiredClientFields = @("ConnectionSpecificSuffix", "RegisterThisConnectionsAddress", "UseSuffixWhenRegistering")
+    foreach ($record in @($before.dnsClientSettings) + @($after.dnsClientSettings)) {
+        $missingClientFields = @($requiredClientFields | Where-Object { $record.availableProperties -notcontains $_ })
+        if ($missingClientFields.Count -gt 0) {
+            $unknown += "Physical adapter $id is missing DNS Client properties: $($missingClientFields -join ", ")."
+        }
+    }
 
     if ((ConvertTo-ComparableJson $before.dnsServerAddresses) -ne (ConvertTo-ComparableJson $after.dnsServerAddresses)) {
         $changes += "DNS server address list changed on physical adapter $id."
@@ -447,6 +458,42 @@ foreach ($id in $currentIds) {
     if ($baselineIds -notcontains $id) {
         $unknown += "A new physical adapter $id appeared after the baseline."
     }
+}
+
+if (@($baseline.globalSettings).Count -eq 0 -or @($current.globalSettings).Count -eq 0) {
+    $unknown += "Global DNS suffix/devolution settings were not returned."
+}
+else {
+    $requiredGlobalFields = @("SuffixSearchList", "UseDevolution", "DevolutionLevel")
+    foreach ($record in @($baseline.globalSettings) + @($current.globalSettings)) {
+        $missingGlobalFields = @($requiredGlobalFields | Where-Object { $record.availableProperties -notcontains $_ })
+        if ($missingGlobalFields.Count -gt 0) {
+            $unknown += "Global DNS settings are missing properties: $($missingGlobalFields -join ", ")."
+        }
+    }
+}
+
+foreach ($record in @($baseline.dohServerInventory) + @($current.dohServerInventory)) {
+    $requiredDohFields = @("ServerAddress", "DohTemplate", "AutoUpgrade", "AllowFallbackToUdp")
+    $missingDohFields = @($requiredDohFields | Where-Object { $record.availableProperties -notcontains $_ })
+    if ($missingDohFields.Count -gt 0) {
+        $unknown += "A DoH inventory record is missing properties: $($missingDohFields -join ", ")."
+    }
+}
+
+foreach ($record in @($baseline.nrptRules) + @($current.nrptRules)) {
+    $requiredNrptFields = @("Namespace", "NameServers")
+    $missingNrptFields = @($requiredNrptFields | Where-Object { $record.availableProperties -notcontains $_ })
+    if ($missingNrptFields.Count -gt 0) {
+        $unknown += "An NRPT rule is missing properties: $($missingNrptFields -join ", ")."
+    }
+}
+
+if ($null -eq $baseline.os -or $null -eq $current.os) {
+    $unknown += "Windows version/build information was not available in both observations."
+}
+elseif ((ConvertTo-ComparableJson $baseline.os.values) -ne (ConvertTo-ComparableJson $current.os.values)) {
+    $unknown += "Windows version/build information changed between baseline and current observations."
 }
 
 foreach ($propertyName in @("globalSettings", "dohServerInventory", "nrptRules")) {
@@ -498,7 +545,7 @@ $result = [pscustomobject]@{
     schemaVersion = 1
     comparedAtUtc = [DateTime]::UtcNow.ToString("o")
     status = $status
-    meaning = "PASS means only that the observed physical-adapter DNS fields and selected global DNS evidence were unchanged. It is not proof of DNS leak freedom or a complete restorable DNS snapshot."
+    meaning = "PASS means only that the observed physical-adapter DNS server lists, selected DNS Client fields, and selected global DNS evidence were unchanged. DHCP/static source mode is not automatically compared. This is not proof of DNS leak freedom or a complete restorable DNS snapshot."
     baselinePath = [System.IO.Path]::GetFullPath($BaselinePath)
     changes = @($changes)
     unknown = @($unknown)

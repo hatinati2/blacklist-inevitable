@@ -43,53 +43,77 @@ try {
     $usersGroupName = $usersGroupAccount.Split('\')[-1]
     Add-LocalGroupMember -Group $usersGroupName -Member "$env:COMPUTERNAME\$userName"
 
-    # Use the explicit local-account prefix; the account is not a domain identity.
-    $credential = [System.Management.Automation.PSCredential]::new(
-        ".\$userName",
-        $securePassword
-    )
-    $childScript = @'
-$ErrorActionPreference = 'Stop'
-$parent = '__PARENT__'
-$root = '__ROOT__'
-$runDir = '__RUNDIR__'
-$config = '__CONFIG__'
-# Positive control: the test account can traverse and list the common parent.
-Get-ChildItem -LiteralPath $parent -Force -ErrorAction Stop | Out-Null
-$checks = @(
-    @{ Name = 'list preflight root'; Action = { Get-ChildItem -LiteralPath $root -Force -ErrorAction Stop | Out-Null } },
-    @{ Name = 'list per-run directory'; Action = { Get-ChildItem -LiteralPath $runDir -Force -ErrorAction Stop | Out-Null } },
-    @{ Name = 'read credential-bearing config'; Action = { Get-Content -LiteralPath $config -Raw -ErrorAction Stop | Out-Null } }
-)
-foreach ($check in $checks) {
-    try {
-        & ($check.Action)
-        [Console]::Error.WriteLine("Unexpectedly succeeded: $($check.Name)")
-        exit 41
-    } catch {
-        if ($_.Exception -is [System.UnauthorizedAccessException] -or $_.Exception.HResult -eq -2147024891) {
-            Write-Output "Denied as expected: $($check.Name)"
-        } else {
-            [Console]::Error.WriteLine("Unexpected error while checking $($check.Name): $($_.Exception.GetType().FullName) / $($_.Exception.Message)")
-            exit 42
+    # Use a native token impersonation probe instead of starting a second process.
+    # This avoids interactive process-launch restrictions on hosted Windows runners
+    # while making every filesystem access execute under the second standard-user token.
+    $nativeProbe = @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+
+public static class PreflightAclImpersonationProbe {
+    private const int Logon32LogonInteractive = 2;
+    private const int Logon32ProviderDefault = 0;
+    private const int OpenExisting = 3;
+    private const uint FileListDirectory = 0x00000001;
+    private const uint GenericRead = 0x80000000;
+    private const uint ShareAll = 0x00000007;
+    private const uint FileFlagBackupSemantics = 0x02000000;
+    private const uint FileAttributeNormal = 0x00000080;
+
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool LogonUser(string user, string domain, string password, int logonType, int provider, out IntPtr token);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool ImpersonateLoggedOnUser(IntPtr token);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool RevertToSelf();
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CreateFile(string path, uint access, uint share, IntPtr security, int creation, uint flags, IntPtr template);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    private static int OpenError(string path, bool directory) {
+        uint access = directory ? FileListDirectory : GenericRead;
+        uint flags = directory ? FileFlagBackupSemantics : FileAttributeNormal;
+        IntPtr handle = CreateFile(path, access, ShareAll, IntPtr.Zero, OpenExisting, flags, IntPtr.Zero);
+        if (handle == new IntPtr(-1)) return Marshal.GetLastWin32Error();
+        CloseHandle(handle);
+        return 0;
+    }
+
+    public static int[] Check(string user, string domain, string password, string parent, string root, string runDir, string config) {
+        IntPtr token;
+        if (!LogonUser(user, domain, password, Logon32LogonInteractive, Logon32ProviderDefault, out token))
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "LogonUser failed for the temporary standard user.");
+        try {
+            if (!ImpersonateLoggedOnUser(token))
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "ImpersonateLoggedOnUser failed.");
+            try {
+                return new int[] { OpenError(parent, true), OpenError(root, true), OpenError(runDir, true), OpenError(config, false) };
+            } finally {
+                if (!RevertToSelf()) throw new Win32Exception(Marshal.GetLastWin32Error(), "RevertToSelf failed.");
+            }
+        } finally {
+            CloseHandle(token);
         }
     }
 }
-exit 0
 '@
-    $childScript = $childScript.Replace("__PARENT__", $sharedParent.Replace("'", "''"))
-    $childScript = $childScript.Replace("__ROOT__", $root.Replace("'", "''"))
-    $childScript = $childScript.Replace("__RUNDIR__", $runDir.Replace("'", "''"))
-    $childScript = $childScript.Replace("__CONFIG__", $config.Replace("'", "''"))
-    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childScript))
-    $pwsh = (Get-Process -Id $PID).Path
-    try {
-        $process = Start-Process -FilePath $pwsh -Credential $credential -ArgumentList @(
-            "-NoProfile", "-NonInteractive", "-EncodedCommand", $encoded
-        ) -PassThru -Wait -LoadUserProfile -ErrorAction Stop
-    } catch {
-        throw "Unable to launch the standard-user ACL probe process: $($_.Exception.ToString())"
+    Add-Type -TypeDefinition $nativeProbe -ErrorAction Stop
+    $errors = [PreflightAclImpersonationProbe]::Check(
+        $userName, $env:COMPUTERNAME, $passwordText, $sharedParent, $root, $runDir, $config
+    )
+    if ($errors[0] -ne 0) {
+        throw "Positive control failed: the standard user could not list the shared parent (Win32 error $($errors[0]))."
     }
+    $labels = @("preflight root", "per-run directory", "credential-bearing config")
+    for ($index = 1; $index -lt $errors.Length; $index++) {
+        if ($errors[$index] -ne 5) {
+            throw "Expected access denied for $($labels[$index - 1]); native CreateFile returned Win32 error $($errors[$index])."
+        }
+        Write-Host "Denied as expected: $($labels[$index - 1])"
+    }
+    Write-Host "PASS: the current user can read the fixture; a second local standard-user token cannot list/read it."
 
     if ($process.ExitCode -ne 0) {
         throw "The second standard-user ACL denial check failed with exit code $($process.ExitCode)."

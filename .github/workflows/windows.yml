@@ -47,7 +47,7 @@ jobs:
           & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $scriptPath -Mode Snapshot -OutputPath $snapshotPath
           if ($LASTEXITCODE -ne 0) { throw "The read-only DNS observer snapshot command failed with exit code $LASTEXITCODE." }
           $observation = Get-Content -LiteralPath $snapshotPath -Raw | ConvertFrom-Json
-          if ($observation.schemaVersion -ne 1) { throw "The DNS observer wrote an unsupported schema version." }
+          if ($observation.schemaVersion -ne 2) { throw "The DNS observer wrote an unsupported schema version." }
           if (-not $observation.collection.getNetAdapter.succeeded) { throw "Get-NetAdapter did not produce a usable observer snapshot." }
           if (-not $observation.collection.getDnsClientServerAddress.succeeded) { throw "Get-DnsClientServerAddress did not produce a usable observer snapshot." }
 

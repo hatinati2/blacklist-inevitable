@@ -363,7 +363,6 @@ mod platform {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use std::fs;
         use uuid::Uuid;
 
         fn test_path(label: &str) -> std::path::PathBuf {

@@ -86,6 +86,31 @@ jobs:
           $ipv6PolicyUnaffected = Get-NetshIPv6InterfaceDnsPolicyForAdapter -ParsedEvidence $ipv6PolicyBadEvidence -InterfaceAlias "Wi-Fi fixture"
           if ($ipv6PolicyBad.state -ne "unknown" -or $ipv6PolicyUnaffected.state -ne "observed") { throw "Malformed IPv6 policy must be scoped to its adapter." }
 
+          $dnsClientDumpFixture = @(
+            'pushd dnsclient',
+            'set global doh=yes dot=no ddr=yes',
+            'set dnsserver name="Ethernet fixture" source=static address=192.0.2.53 register=primary validate=yes',
+            'add dnsserver name="Ethernet fixture" address=2001:db8::53 index=2 validate=no',
+            'add encryption server=1.1.1.1 dohtemplate="https://resolver.example/dns-query{?dns}" autoupgrade=yes udpfallback=no',
+            'set interface name="Ethernet fixture" ddr=yes ddrfallback=no',
+            'popd'
+          )
+          $dnsClientDumpEvidence = ConvertFrom-NetshDnsClientDump -Lines $dnsClientDumpFixture
+          if ($dnsClientDumpEvidence.parseState -ne "parsed" -or $dnsClientDumpEvidence.recognizedCommandCount -ne 5) { throw "Documented DNS Client dump commands were not parsed." }
+          if ($dnsClientDumpEvidence.dnsServerCommands.Count -ne 2 -or $dnsClientDumpEvidence.dnsServerCommands[1].addressFamily -ne "IPv6") { throw "DNS Client dump server addresses/families were not preserved." }
+          if ($dnsClientDumpEvidence.globalCommands.Count -ne 1 -or $dnsClientDumpEvidence.globalCommands[0].doh -ne "yes" -or $dnsClientDumpEvidence.globalCommands[0].ddr -ne "yes") { throw "DNS Client dump global DoH/DDR settings were not parsed." }
+          if ($dnsClientDumpEvidence.encryptionCommands.Count -ne 1 -or $dnsClientDumpEvidence.encryptionCommands[0].autoUpgrade -ne "yes" -or $dnsClientDumpEvidence.encryptionCommands[0].udpFallback -ne "no") { throw "DNS Client dump encryption settings were not parsed." }
+          if ($dnsClientDumpEvidence.interfaceCommands.Count -ne 1 -or $dnsClientDumpEvidence.interfaceCommands[0].ddrFallback -ne "no") { throw "DNS Client dump per-interface DDR settings were not parsed." }
+          $dnsClientDumpDuplicate = ConvertFrom-NetshDnsClientDump -Lines @('set global doh=yes doh=no')
+          if ($dnsClientDumpDuplicate.parseState -ne "incomplete" -or $dnsClientDumpDuplicate.malformedCommandCount -ne 1) { throw "Duplicate DNS Client dump options must remain incomplete." }
+          $dnsClientDumpInvalid = ConvertFrom-NetshDnsClientDump -Lines @('set dnsserver name="Ethernet fixture" source=manual')
+          if ($dnsClientDumpInvalid.parseState -ne "incomplete") { throw "Unsupported DNS Client dump source values must remain incomplete." }
+          $dnsClientDumpUnsupported = ConvertFrom-NetshDnsClientDump -Lines @('delete global global=doh')
+          if ($dnsClientDumpUnsupported.parseState -ne "incomplete" -or $dnsClientDumpUnsupported.unsupportedCommandCount -ne 1) { throw "Unimplemented DNS Client dump statements must remain incomplete." }
+          $dnsClientDumpEmpty = ConvertFrom-NetshDnsClientDump -Lines @('pushd dnsclient', '# no emitted settings', 'popd')
+          if ($dnsClientDumpEmpty.parseState -ne "unknown") { throw "An empty DNS Client dump must not imply default settings." }
+
+
           $scriptText = Get-Content -LiteralPath $scriptPath -Raw
           $sourceModuleText = Get-Content -LiteralPath $sourceModulePath -Raw
           $forbiddenRegistryWrites = @('\.SetValue\s*\(', '\.CreateSubKey\s*\(', '\.DeleteValue\s*\(', '\.DeleteSubKey', '\b(New|Set|Remove)-ItemProperty\b')
@@ -98,7 +123,7 @@ jobs:
           & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $scriptPath -Mode Snapshot -OutputPath $snapshotPath
           if ($LASTEXITCODE -ne 0) { throw "The read-only DNS observer snapshot command failed with exit code $LASTEXITCODE." }
           $observation = Get-Content -LiteralPath $snapshotPath -Raw | ConvertFrom-Json
-          if ($observation.schemaVersion -ne 4) { throw "The DNS observer wrote an unsupported schema version." }
+          if ($observation.schemaVersion -ne 5) { throw "The DNS observer wrote an unsupported schema version." }
           if (-not $observation.collection.getNetAdapter.succeeded) { throw "Get-NetAdapter did not produce a usable observer snapshot." }
           if (-not $observation.collection.getDnsClientServerAddress.succeeded) { throw "Get-DnsClientServerAddress did not produce a usable observer snapshot." }
           if (-not $observation.collection.getNetIPInterface.succeeded) { throw "Get-NetIPInterface did not produce a usable observer snapshot." }
@@ -166,7 +191,7 @@ jobs:
               $addressRecords += [pscustomobject]@{ addressFamily = "IPv6"; addressFamilyRaw = "23"; serverAddresses = @("2001:db8::53") }
             }
             return [pscustomobject]@{
-              schemaVersion = 4
+              schemaVersion = 5
               capturedAtUtc = "2026-01-01T00:00:00.0000000Z"
               os = [pscustomobject]@{
                 values = [pscustomobject]@{ Caption = "Microsoft Windows 11 Pro"; Version = "10.0"; BuildNumber = "26100"; OSArchitecture = "64-bit" }

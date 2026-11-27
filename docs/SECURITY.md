@@ -46,7 +46,7 @@ Remaining requirements:
 - Keep the Windows app-process Job Object inheritance and per-instance isolation regression tests enabled (issue #24).
 - Verify child termination, listener release, and file cleanup on success, failure, timeout, user cancellation, graceful app shutdown, and app-level forced termination on Windows.
 - Production engine operations start blocked and are enabled only after Tauri setup confirms that the application joined its kill-on-close Job Object. If attachment fails, keep runtime cleanup unhealthy and block every engine operation; do not fall back to an uncontained spawn.
-- Complete real Windows 10/11 acceptance with a second standard-user SID: verify it cannot list/read the preflight root, per-run directories, or live config files while the app identity can. Hosted CI and same-user unit tests do not prove this cross-account boundary.
+- Complete real Windows 10/11 acceptance with a second standard-user SID: verify it cannot list/read the preflight root, per-run directories, or live config files while the app identity can. The hosted CI harness uses a second-user impersonated token and native file opens, but hosted CI and same-user unit tests do not replace device acceptance.
 - Keep preflight isolated from all normal connection and device-routing state.
 
 ## Process supervision

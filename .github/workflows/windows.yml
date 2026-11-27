@@ -60,6 +60,11 @@ jobs:
           $malformedEvidence = ConvertFrom-NetshInterfaceDnsDump -AddressFamily IPv4 -Lines @('set dnsservers name="Ethernet fixture" source=manual')
           $malformedMode = Get-NetshInterfaceDnsSourceForAdapter -ParsedEvidence $malformedEvidence -InterfaceAlias "Ethernet fixture"
           if ($malformedMode.state -ne "unknown" -or $malformedMode.sourceMode -ne "Unknown") { throw "An unrecognized source token must remain Unknown." }
+          $scopedMalformedEvidence = ConvertFrom-NetshInterfaceDnsDump -AddressFamily IPv4 -Lines @('set dnsservers name="Ethernet fixture" source=manual', 'set dnsservers name="Wi-Fi fixture" source=dhcp')
+          $scopedMalformedMode = Get-NetshInterfaceDnsSourceForAdapter -ParsedEvidence $scopedMalformedEvidence -InterfaceAlias "Ethernet fixture"
+          $unaffectedAdapterMode = Get-NetshInterfaceDnsSourceForAdapter -ParsedEvidence $scopedMalformedEvidence -InterfaceAlias "Wi-Fi fixture"
+          if ($scopedMalformedMode.state -ne "unknown" -or $scopedMalformedMode.sourceMode -ne "Unknown") { throw "An adapter with a malformed source token must remain Unknown." }
+          if ($unaffectedAdapterMode.state -ne "observed" -or $unaffectedAdapterMode.sourceToken -ne "dhcp") { throw "A malformed source token attributed to another adapter must not poison valid evidence." }
           $caseInsensitiveEvidence = ConvertFrom-NetshInterfaceDnsDump -AddressFamily IPv4 -Lines @('SET DNSSERVERS name=Ethernet source=DHCP register=primary validate=no', 'add dnsservers name=Ethernet address=192.0.2.54 index=2')
           $caseInsensitiveMode = Get-NetshInterfaceDnsSourceForAdapter -ParsedEvidence $caseInsensitiveEvidence -InterfaceAlias "ethernet"
           if ($caseInsensitiveMode.state -ne "observed" -or $caseInsensitiveMode.sourceToken -ne "dhcp") { throw "Source parsing must be case-insensitive and ignore add-server lines." }

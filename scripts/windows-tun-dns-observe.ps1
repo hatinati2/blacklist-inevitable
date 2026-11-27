@@ -6,6 +6,8 @@ param(
 
     [string]$BaselinePath,
 
+    [string]$CurrentSnapshotPath,
+
     [string]$OutputPath,
 
     [switch]$RequireTunAdapter,
@@ -534,7 +536,18 @@ if ($baseline.schemaVersion -ne 2) {
     throw "Unsupported baseline schema version."
 }
 
-$current = Get-DnsObservation
+if (-not [string]::IsNullOrWhiteSpace($CurrentSnapshotPath)) {
+    if (-not (Test-Path -LiteralPath $CurrentSnapshotPath -PathType Leaf)) {
+        throw "Current snapshot file does not exist: $CurrentSnapshotPath"
+    }
+    $current = Get-Content -LiteralPath $CurrentSnapshotPath -Raw | ConvertFrom-Json
+    if ($current.schemaVersion -ne 2) {
+        throw "Unsupported current snapshot schema version."
+    }
+}
+else {
+    $current = Get-DnsObservation
+}
 $changes = @()
 $unknown = @()
 
@@ -734,6 +747,7 @@ $result = [pscustomobject]@{
     status = $status
     meaning = "PASS means only that the observed physical-adapter DNS server lists, selected DNS Client fields, selected read-only registry DoH evidence, and selected global DNS evidence were unchanged. DHCP/static source mode is not automatically compared. Registry DoH data is diagnostic only. This is not proof of DNS leak freedom or a complete restorable DNS snapshot."
     baselinePath = [System.IO.Path]::GetFullPath($BaselinePath)
+    currentSnapshotPath = if ([string]::IsNullOrWhiteSpace($CurrentSnapshotPath)) { $null } else { [System.IO.Path]::GetFullPath($CurrentSnapshotPath) }
     changes = @($changes)
     unknown = @($unknown)
     newVirtualAdapters = @($newVirtualAdapters)

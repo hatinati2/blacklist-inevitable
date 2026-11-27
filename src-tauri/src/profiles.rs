@@ -95,17 +95,17 @@ fn parse_share_uri(input: &str) -> Result<ParsedProfile, String> {
         let legacy_link = input.strip_prefix("ss://").unwrap_or(input);
         // Legacy links Base64-encode the complete authority, but keep the display
         // name as a normal URL fragment outside the encoded payload.
-        let fragment = legacy_link
+        let (link_without_fragment, fragment) = legacy_link
             .split_once('#')
-            .map(|(_, fragment)| format!("#{fragment}"))
-            .unwrap_or_default();
-        let payload = legacy_link
-            .split(['?', '#'])
-            .next()
-            .unwrap_or_default();
+            .map(|(link, fragment)| (link, format!("#{fragment}")))
+            .unwrap_or((legacy_link, String::new()));
+        let (payload, query) = link_without_fragment
+            .split_once('?')
+            .map(|(payload, query)| (payload, format!("?{query}")))
+            .unwrap_or((link_without_fragment, String::new()));
         let decoded = decode_base64(payload)
             .and_then(|bytes| String::from_utf8(bytes).map_err(|_| "Invalid Shadowsocks link.".to_string()))?;
-        url = Url::parse(&format!("ss://{decoded}{fragment}"))
+        url = Url::parse(&format!("ss://{decoded}{query}{fragment}"))
             .map_err(|_| "Malformed legacy Shadowsocks link.".to_string())?;
     }
 
@@ -686,6 +686,13 @@ mod tests {
             "ss://aes-128-gcm:password@ss.example.org:8388/?plugin=v2ray-plugin%3Bmode%3Dwebsocket",
         )
         .unwrap_err();
+        assert_eq!(error, "Shadowsocks plugin links are not supported yet.");
+
+        let legacy_authority = STANDARD.encode(
+            b"aes-256-gcm:legacy-password@legacy.ss.example.org:8388",
+        );
+        let legacy = format!("ss://{legacy_authority}?plugin=v2ray-plugin%3Bmode%3Dwebsocket#Legacy");
+        let error = parse_share_uri(&legacy).unwrap_err();
         assert_eq!(error, "Shadowsocks plugin links are not supported yet.");
     }
 

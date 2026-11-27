@@ -26,14 +26,23 @@ pub fn run() {
                 .state::<process_supervisor::ProcessSupervisor>()
                 .inner()
                 .clone();
-            if let Err(error) = supervisor.attach_current_process_to_job() {
-                eprintln!("Windows process containment is unavailable for this app instance: {error}");
-                supervisor.mark_cleanup_unhealthy();
-            }
-            if let Err(error) =
-                crate::engine::sing_box::recover_stale_preflight_data(app.handle(), &supervisor)
-            {
-                eprintln!("Stale preflight recovery failed; engine startup remains blocked: {error}");
+            let instance_ready = match supervisor.attach_current_process_to_job() {
+                Ok(()) => true,
+                Err(error) => {
+                    eprintln!("Windows process containment or desktop instance lease is unavailable: {error}");
+                    supervisor.mark_cleanup_unhealthy();
+                    false
+                }
+            };
+            // Never run shared-cache recovery unless this process owns the
+            // exclusive OS-backed instance lease. A second launch must not
+            // delete another live instance's credential-bearing probe files.
+            if instance_ready {
+                if let Err(error) =
+                    crate::engine::sing_box::recover_stale_preflight_data(app.handle(), &supervisor)
+                {
+                    eprintln!("Stale preflight recovery failed; engine startup remains blocked: {error}");
+                }
             }
             Ok(())
         })

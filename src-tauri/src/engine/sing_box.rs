@@ -3339,3 +3339,8 @@ mod engine_archive_tests {
         fs::remove_dir_all(directory).expect("remove temp directory");
     }
 }
+
+
+#[cfg(test)]
+#[path = "sing_box_protocol_integration.rs"]
+mod protocol_integration;

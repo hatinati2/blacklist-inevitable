@@ -285,18 +285,28 @@ mod platform {
         Ok(())
     }
 
-    pub fn ensure_private_directory(path: &Path) -> Result<(), String> {
+    pub fn create_private_directory(path: &Path) -> Result<(), String> {
         let descriptor = PrivateDescriptor::new(true)?;
         let attributes = descriptor.security_attributes();
         let path_wide = wide_path(path);
-        let created = unsafe { CreateDirectoryW(path_wide.as_ptr(), &attributes) };
-        if created == 0 && unsafe { GetLastError() } != ERROR_ALREADY_EXISTS {
-            return Err("A private preflight directory could not be created.".into());
+        if unsafe { CreateDirectoryW(path_wide.as_ptr(), &attributes) } == 0 {
+            return Err("A new private preflight directory could not be created.".into());
         }
 
         let handle = open_directory(path, false)?
-            .ok_or_else(|| "A private preflight directory could not be created.".to_string())?;
+            .ok_or_else(|| "A new private preflight directory could not be created.".to_string())?;
         verify_handle_acl(handle.0, &descriptor)
+    }
+
+    pub fn ensure_private_directory(path: &Path) -> Result<(), String> {
+        let descriptor = PrivateDescriptor::new(true)?;
+        if let Some(handle) = open_directory(path, true)? {
+            return verify_handle_acl(handle.0, &descriptor);
+        }
+        // Do not accept a directory that appeared between the existence check
+        // and creation; callers that need a unique run directory use the strict
+        // create_private_directory path directly.
+        create_private_directory(path)
     }
 
     pub fn create_private_file(path: &Path, contents: &[u8]) -> Result<(), String> {
@@ -451,15 +461,23 @@ mod platform {
         }
     }
 
-    pub fn ensure_private_directory(path: &Path) -> Result<(), String> {
+    pub fn create_private_directory(path: &Path) -> Result<(), String> {
         let mut builder = DirBuilder::new();
         builder.mode(0o700);
-        match builder.create(path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(_) => return Err("A private preflight directory could not be created.".into()),
-        }
+        builder
+            .create(path)
+            .map_err(|_| "A new private preflight directory could not be created.".to_string())?;
         verify_private_directory(path)
+    }
+
+    pub fn ensure_private_directory(path: &Path) -> Result<(), String> {
+        match fs::symlink_metadata(path) {
+            Ok(_) => verify_private_directory(path),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                create_private_directory(path)
+            }
+            Err(_) => Err("The preflight directory could not be inspected.".into()),
+        }
     }
 
     pub fn create_private_file(path: &Path, contents: &[u8]) -> Result<(), String> {
@@ -493,6 +511,10 @@ mod platform {
         Err("Secure temporary preflight storage is unavailable on this platform.".into())
     }
 
+    pub fn create_private_directory(_path: &Path) -> Result<(), String> {
+        Err("Secure temporary preflight storage is unavailable on this platform.".into())
+    }
+
     pub fn ensure_private_directory(_path: &Path) -> Result<(), String> {
         Err("Secure temporary preflight storage is unavailable on this platform.".into())
     }
@@ -503,5 +525,6 @@ mod platform {
 }
 
 pub use platform::{
-    create_private_file, ensure_private_directory, verify_private_directory_if_exists,
+    create_private_directory, create_private_file, ensure_private_directory,
+    verify_private_directory_if_exists,
 };

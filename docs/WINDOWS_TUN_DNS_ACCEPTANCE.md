@@ -25,6 +25,7 @@ References:
 - [sing-box 1.14.4 TUN documentation](https://github.com/SagerNet/sing-box/blob/v1.14.4/docs/configuration/inbound/tun.md)
 - [Pinned sing-tun Windows implementation](https://github.com/SagerNet/sing-tun/blob/040db71fcd33196f1d15708b91eb61e9dc6ab8dd/tun_windows.go)
 - [Microsoft netsh dnsclient](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/netsh-dnsclient)
+- [Microsoft netsh interface (IPv4/IPv6 DNS source and show/dump commands)](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/netsh-interface)
 
 ## How to run
 
@@ -72,17 +73,19 @@ Microsoft documents `ConnectionSpecificSuffixSearchList` on the `MSFT_DNSClient`
 The JSON also records:
 
 - adapter identity, hardware/virtual classification, and IPv4/IPv6 DNS server lists; the native CIM family value is retained as `addressFamilyRaw` (`2` = IPv4, `23` = IPv6) while normalized labels are used for comparison;
+- separate read-only IPv4 and IPv6 DNS source-mode statements parsed from `netsh interface ipv4 dump` and `netsh interface ipv6 dump`, correlated to the contemporaneous adapter alias and retained alongside raw dump output;
 - selected per-interface DNS Client settings;
 - global suffix-search settings, the system DoH known-server inventory, and NRPT rules where available;
 - raw `netsh dnsclient dump`, `show global`, `show state`, and `show encryption` output as review-only evidence;
+- raw `netsh interface ipv4/ipv6 dump` output as review-only evidence; the helper parses only the `set dnsservers ... source=dhcp|static` token and never executes dump output;
 - per-interface registry `Doh` (IPv4) and `Doh6` (IPv6) subkeys and each value's registry type as read-only forensic evidence.
 
 ## Important limits
 
 1. `Get-DnsClientDohServerAddress` is a system known-server inventory. It is not the per-adapter/per-profile DoH property arrays in `DNS_INTERFACE_SETTINGS3`.
-2. `Get-DnsClientServerAddress` reports server-address lists; it is not a full previous-state snapshot. The DHCP-versus-static DNS source mode appears only in the raw `netsh dnsclient dump` evidence and is not automatically compared by this probe.
+2. `Get-DnsClientServerAddress` reports server-address lists; it is not a full previous-state snapshot. The observer now also parses the per-family `set dnsservers source=dhcp|static` record from the corresponding read-only `netsh interface ipv4/ipv6 dump` output and compares that token by physical adapter. Missing, duplicate, or unrecognized statements remain UNKNOWN. A `dhcp` token is represented as `Automatic`, not as proof of the actual upstream resolver mechanism; in particular, it does not distinguish IPv6 RA/RDNSS from DHCPv6.
 3. The `Doh`/`Doh6` registry paths are included as diagnostic evidence because community tooling uses them to configure DoH. Microsoft does not document these paths as a stable complete read/restore contract; registry values are never written or deleted by this helper, and their presence alone is not accepted as proof that a server is actively using DoH.
-4. `netsh dnsclient dump` is retained as text only. It is not parsed as an authoritative schema, replayed, or accepted as a canonical restore file.
+4. `netsh dnsclient dump` is retained as text only. It is not parsed, replayed, or accepted as a canonical restore file. The separate IPv4/IPv6 interface dumps are parsed only for documented source tokens; no generated command is executed.
 5. A physical adapter DNS configuration that remains unchanged does not prove that every DNS query stayed inside the tunnel. Validate with packet capture on both physical and TUN interfaces, including UDP/TCP 53, PTR, SVCB/HTTPS record types, IPv4 and IPv6, reconnect, engine exit, and network changes.
 6. This probe does not test DoH/DoT application traffic, WFP crash behavior, full egress protection, or DNS profile restoration.
 7. Do not share observation JSON without reviewing it; DNS server addresses, search suffixes, NRPT namespaces, and adapter metadata can disclose local network details.

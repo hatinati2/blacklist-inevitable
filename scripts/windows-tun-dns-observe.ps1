@@ -333,6 +333,9 @@ function Get-DnsObservation {
     $nrptCapture = Invoke-ReadOnlyCapture -CommandName "Get-DnsClientNrptRule" -Action {
         Get-DnsClientNrptRule -ErrorAction Stop
     }
+    $ipInterfaceCapture = Invoke-ReadOnlyCapture -CommandName "Get-NetIPInterface" -Action {
+        Get-NetIPInterface -ErrorAction Stop
+    }
 
     $netshDump = Invoke-NetshReadOnly -Arguments @("dnsclient", "dump")
     $netshGlobal = Invoke-NetshReadOnly -Arguments @("dnsclient", "show", "global")
@@ -344,6 +347,7 @@ function Get-DnsObservation {
     $netshIpv6Dump = Invoke-NetshReadOnly -Arguments @("interface", "ipv6", "dump")
     $ipv4SourceEvidence = ConvertFrom-NetshInterfaceDnsDump -AddressFamily IPv4 -Lines $netshIpv4Dump.output
     $ipv6SourceEvidence = ConvertFrom-NetshInterfaceDnsDump -AddressFamily IPv6 -Lines $netshIpv6Dump.output
+    $ipv6InterfacePolicyEvidence = ConvertFrom-NetshIPv6InterfaceDump -Lines $netshIpv6Dump.output
 
     $adapters = @()
     if ($adapterCapture.succeeded) {
@@ -393,6 +397,26 @@ function Get-DnsObservation {
                 )
             }
 
+            $ipInterfaceSettings = @()
+            if ($ipInterfaceCapture.succeeded) {
+                $ipInterfaceSettings = @(
+                    $ipInterfaceCapture.data |
+                        Where-Object { [int]$_.InterfaceIndex -eq $interfaceIndex } |
+                        Sort-Object -Property AddressFamily |
+                        ForEach-Object {
+                            Get-SelectedProperties -InputObject $_ -PropertyNames @(
+                                "AddressFamily",
+                                "Dhcp",
+                                "RouterDiscovery",
+                                "ManagedAddressConfiguration",
+                                "OtherStatefulConfiguration"
+                            )
+                        }
+                )
+            }
+
+            $ipv6DnsPolicy = Get-NetshIPv6InterfaceDnsPolicyForAdapter -ParsedEvidence $ipv6InterfacePolicyEvidence -InterfaceAlias ([string]$adapter.Name)
+
             $hardwareInterface = $null
             $hardwareProperty = $adapter.PSObject.Properties["HardwareInterface"]
             if ($null -ne $hardwareProperty) {
@@ -415,6 +439,8 @@ function Get-DnsObservation {
                 dnsServerAddresses = @($serverRecords)
                 dnsClientSettings = @($clientRecords)
                 dnsSourceMode = $dnsSourceMode
+                ipInterfaceSettings = @($ipInterfaceSettings)
+                ipv6DnsPolicy = $ipv6DnsPolicy
                 # This is a version-sensitive, read-only registry cross-check.
                 # It is not an authoritative or supported DNS restore contract.
                 registryDohEvidence = Get-InterfaceRegistryDohEvidence -InterfaceGuid $guid
@@ -480,7 +506,7 @@ function Get-DnsObservation {
     }
 
     return [pscustomobject]@{
-        schemaVersion = 3
+        schemaVersion = 4
         capturedAtUtc = [DateTime]::UtcNow.ToString("o")
         os = $os
         collection = [pscustomobject]@{
@@ -491,6 +517,7 @@ function Get-DnsObservation {
             getDnsClientGlobalSetting = [pscustomobject]@{ available = $globalCapture.available; succeeded = $globalCapture.succeeded; error = $globalCapture.error }
             getDnsClientDohServerAddress = [pscustomobject]@{ available = $dohCapture.available; succeeded = $dohCapture.succeeded; error = $dohCapture.error }
             getDnsClientNrptRule = [pscustomobject]@{ available = $nrptCapture.available; succeeded = $nrptCapture.succeeded; error = $nrptCapture.error }
+            getNetIPInterface = [pscustomobject]@{ available = $ipInterfaceCapture.available; succeeded = $ipInterfaceCapture.succeeded; error = $ipInterfaceCapture.error }
             registryDoh = [pscustomobject]@{
                 available = $adapterCapture.succeeded
                 succeeded = ($adapterCapture.succeeded -and $registryDohErrors.Count -eq 0)
@@ -522,6 +549,8 @@ function Get-DnsObservation {
             "Per-family netsh interface IPv4/IPv6 dump statements are parsed read-only into Static or Automatic source-mode evidence; absent, duplicate, or unrecognized statements remain Unknown.",
             "Automatic describes the netsh DNS source setting only. It does not identify whether IPv6 effective resolvers arrived through RA/RDNSS or DHCPv6.",
             "Per-interface registry Doh/Doh6 keys are read-only diagnostic evidence; their presence, absence, and value layout are not treated as a supported complete DoH snapshot or restore contract.",
+            "Get-NetIPInterface records per-family DHCP, router-discovery, managed-address, and other-stateful configuration. These are configuration-policy cross-checks, not proof of the actual resolver source.",
+            "The IPv6 netsh interface dump records RouterDiscovery, ManagedAddress, OtherStateful, RABasedDnsConfig, and DHCPSstaticIPCoexistence only when explicitly present; absent flags remain Unknown and do not prove the actual source of effective DNS servers.",
             "This observation does not prove DNS packet containment or absence of leaks; packet capture and live Windows acceptance are separate gates.",
             "netsh dnsclient and interface IPv4/IPv6 dump output is evidence only. No generated command is executed or accepted as a canonical restorable snapshot by this script."
         )
@@ -575,7 +604,7 @@ if (-not (Test-Path -LiteralPath $BaselinePath -PathType Leaf)) {
 }
 
 $baseline = Get-Content -LiteralPath $BaselinePath -Raw | ConvertFrom-Json
-if ($baseline.schemaVersion -ne 3) {
+if ($baseline.schemaVersion -ne 4) {
     throw "Unsupported baseline schema version."
 }
 
@@ -584,7 +613,7 @@ if (-not [string]::IsNullOrWhiteSpace($CurrentSnapshotPath)) {
         throw "Current snapshot file does not exist: $CurrentSnapshotPath"
     }
     $current = Get-Content -LiteralPath $CurrentSnapshotPath -Raw | ConvertFrom-Json
-    if ($current.schemaVersion -ne 3) {
+    if ($current.schemaVersion -ne 4) {
         throw "Unsupported current snapshot schema version."
     }
 }
@@ -604,7 +633,8 @@ $requiredCollectors = @(
     "registryDoh",
     "netshDnsClientDump",
     "netshInterfaceIpv4Dump",
-    "netshInterfaceIpv6Dump"
+    "netshInterfaceIpv6Dump",
+    "getNetIPInterface"
 )
 
 foreach ($collectorName in $requiredCollectors) {
@@ -700,6 +730,58 @@ foreach ($id in $baselineIds) {
     }
     if ((ConvertTo-ComparableJson $before.dnsClientSettings) -ne (ConvertTo-ComparableJson $after.dnsClientSettings)) {
         $changes += "Per-interface DNS Client settings changed on physical adapter $id."
+    }
+
+    foreach ($adapterObservation in @(
+        [pscustomobject]@{ label = "baseline"; adapter = $before },
+        [pscustomobject]@{ label = "current"; adapter = $after }
+    )) {
+        $ipRows = @($adapterObservation.adapter.ipInterfaceSettings)
+        if ($ipRows.Count -eq 0) {
+            $unknown += "Get-NetIPInterface returned no per-family interface settings for physical adapter $id in the $($adapterObservation.label) observation."
+            continue
+        }
+        foreach ($family in @("IPv4", "IPv6")) {
+            $familyRows = @($ipRows | Where-Object { [string]$_.values.AddressFamily -ieq $family })
+            if ($familyRows.Count -ne 1) {
+                $unknown += "Get-NetIPInterface returned $($familyRows.Count) $family rows for physical adapter $id in the $($adapterObservation.label) observation."
+                continue
+            }
+            $requiredIpProperties = if ($family -eq "IPv4") {
+                @("AddressFamily", "Dhcp")
+            }
+            else {
+                @("AddressFamily", "Dhcp", "RouterDiscovery", "ManagedAddressConfiguration", "OtherStatefulConfiguration")
+            }
+            $missingIpProperties = @($requiredIpProperties | Where-Object { $familyRows[0].availableProperties -notcontains $_ })
+            if ($missingIpProperties.Count -gt 0) {
+                $unknown += "Get-NetIPInterface is missing $family properties for physical adapter $id in the $($adapterObservation.label) observation: $($missingIpProperties -join ', ')."
+            }
+        }
+    }
+
+    if ((ConvertTo-ComparableJson $before.ipInterfaceSettings) -ne (ConvertTo-ComparableJson $after.ipInterfaceSettings)) {
+        $changes += "Per-family IP interface DHCP/router-discovery configuration changed on physical adapter $id."
+    }
+
+    foreach ($adapterObservation in @(
+        [pscustomobject]@{ label = "baseline"; adapter = $before },
+        [pscustomobject]@{ label = "current"; adapter = $after }
+    )) {
+        $policy = $adapterObservation.adapter.ipv6DnsPolicy
+        if ($null -eq $policy -or $policy.state -ne "observed") {
+            $unknown += "IPv6 router-discovery/RDNSS/DHCP policy evidence is incomplete for physical adapter $id in the $($adapterObservation.label) observation."
+            continue
+        }
+        $requiredPolicyProperties = @("routerDiscovery", "managedAddress", "otherStateful", "raBasedDnsConfig", "dhcpStaticIpCoexistence")
+        $missingPolicyProperties = @($requiredPolicyProperties | Where-Object { $policy.availableProperties -notcontains $_ })
+        if ($missingPolicyProperties.Count -gt 0) {
+            $unknown += "IPv6 DNS policy is missing properties for physical adapter $id in the $($adapterObservation.label) observation: $($missingPolicyProperties -join ', ')."
+        }
+    }
+    if ($null -ne $before.ipv6DnsPolicy -and $null -ne $after.ipv6DnsPolicy -and
+        (ConvertTo-ComparableJson $before.ipv6DnsPolicy.settings) -ne (ConvertTo-ComparableJson $after.ipv6DnsPolicy.settings)) {
+        $changes += "IPv6 router-discovery/RDNSS/DHCP policy changed on physical adapter $id."
     }
 
     foreach ($family in @("ipv4", "ipv6")) {
@@ -811,10 +893,10 @@ elseif ($unknown.Count -gt 0) {
 }
 
 $result = [pscustomobject]@{
-    schemaVersion = 2
+    schemaVersion = 3
     comparedAtUtc = [DateTime]::UtcNow.ToString("o")
     status = $status
-    meaning = "PASS means only that the observed physical-adapter DNS server lists, selected DNS Client fields, selected read-only registry DoH evidence, selected per-family netsh DNS source tokens, and selected global DNS evidence were unchanged. Automatic is the netsh source token dhcp and does not identify the dynamic IPv6 resolver origin (RA/RDNSS versus DHCPv6). Registry DoH data is diagnostic only. This is not proof of DNS leak freedom or a complete restorable DNS snapshot."
+    meaning = "PASS means only that the observed physical-adapter DNS server lists, selected DNS Client fields, selected read-only registry DoH evidence, selected per-family netsh DNS source tokens, Get-NetIPInterface policy fields, selected IPv6 router-discovery/RDNSS policy flags, and selected global DNS evidence were unchanged. The source token dhcp and configuration policy flags do not prove which protocol delivered each effective IPv6 resolver address. Registry DoH data is diagnostic only. This is not proof of DNS leak freedom or a complete restorable DNS snapshot."
     baselinePath = [System.IO.Path]::GetFullPath($BaselinePath)
     currentSnapshotPath = if ([string]::IsNullOrWhiteSpace($CurrentSnapshotPath)) { $null } else { [System.IO.Path]::GetFullPath($CurrentSnapshotPath) }
     changes = @($changes)

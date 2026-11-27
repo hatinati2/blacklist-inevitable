@@ -46,6 +46,7 @@ jobs:
           $forbiddenRegistryWrites = @('\.SetValue\s*\(', '\.CreateSubKey\s*\(', '\.DeleteValue\s*\(', '\.DeleteSubKey', '\b(New|Set|Remove)-ItemProperty\b')
           foreach ($pattern in $forbiddenRegistryWrites) { if ($scriptText -match $pattern) { throw "The DNS observation script contains a forbidden registry mutation pattern: $pattern" } }
           $snapshotPath = Join-Path $env:RUNNER_TEMP "windows-tun-dns-observation.json"
+          $comparisonPath = Join-Path $env:RUNNER_TEMP "windows-tun-dns-comparison.json"
           $windowsPowerShell = Join-Path $env:WINDIR "System32\WindowsPowerShell\v1.0\powershell.exe"
           & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $scriptPath -Mode Snapshot -OutputPath $snapshotPath
           if ($LASTEXITCODE -ne 0) { throw "The read-only DNS observer snapshot command failed with exit code $LASTEXITCODE." }
@@ -53,6 +54,11 @@ jobs:
           if ($observation.schemaVersion -ne 2) { throw "The DNS observer wrote an unsupported schema version." }
           if (-not $observation.collection.getNetAdapter.succeeded) { throw "Get-NetAdapter did not produce a usable observer snapshot." }
           if (-not $observation.collection.getDnsClientServerAddress.succeeded) { throw "Get-DnsClientServerAddress did not produce a usable observer snapshot." }
+          & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $scriptPath -Mode Compare -BaselinePath $snapshotPath -OutputPath $comparisonPath
+          $compareExitCode = $LASTEXITCODE
+          if ($compareExitCode -ne 0) { throw "A no-change DNS observer comparison should PASS, but exited with code $compareExitCode." }
+          $comparison = Get-Content -LiteralPath $comparisonPath -Raw | ConvertFrom-Json
+          if ($comparison.schemaVersion -ne 1 -or $comparison.status -ne "PASS") { throw "The DNS observer no-change comparison did not produce a PASS result." }
 
       - name: Install frontend dependencies
         run: npm ci --include=optional

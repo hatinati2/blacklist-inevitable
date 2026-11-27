@@ -42,6 +42,25 @@ jobs:
           $parseErrors = $null
           [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$parseErrors) | Out-Null
           if ($parseErrors.Count -gt 0) { throw ($parseErrors | Out-String) }
+          $sourceModulePath = Join-Path $PWD "scripts/windows-dns-source-evidence.psm1"
+          $moduleTokens = $null
+          $moduleParseErrors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile($sourceModulePath, [ref]$moduleTokens, [ref]$moduleParseErrors) | Out-Null
+          if ($moduleParseErrors.Count -gt 0) { throw ($moduleParseErrors | Out-String) }
+          Import-Module $sourceModulePath -Force
+          $ipv4DhcpEvidence = ConvertFrom-NetshInterfaceDnsDump -AddressFamily IPv4 -Lines @('pushd interface ipv4', 'set dnsservers name="Ethernet fixture" source=dhcp', 'popd')
+          $ipv4DhcpMode = Get-NetshInterfaceDnsSourceForAdapter -ParsedEvidence $ipv4DhcpEvidence -InterfaceAlias "Ethernet fixture"
+          if ($ipv4DhcpMode.state -ne "observed" -or $ipv4DhcpMode.sourceMode -ne "Automatic" -or $ipv4DhcpMode.sourceToken -ne "dhcp") { throw "The IPv4 DHCP source fixture was not recognized." }
+          $ipv6StaticEvidence = ConvertFrom-NetshInterfaceDnsDump -AddressFamily IPv6 -Lines @('set dnsservers name="Ethernet fixture" source=static address=2001:db8::53')
+          $ipv6StaticMode = Get-NetshInterfaceDnsSourceForAdapter -ParsedEvidence $ipv6StaticEvidence -InterfaceAlias "Ethernet fixture"
+          if ($ipv6StaticMode.state -ne "observed" -or $ipv6StaticMode.sourceMode -ne "Static" -or $ipv6StaticMode.sourceToken -ne "static") { throw "The IPv6 static source fixture was not recognized." }
+          $duplicateEvidence = ConvertFrom-NetshInterfaceDnsDump -AddressFamily IPv4 -Lines @('set dnsservers name="Ethernet fixture" source=dhcp', 'set dnsservers name="Ethernet fixture" source=static address=192.0.2.53')
+          $duplicateMode = Get-NetshInterfaceDnsSourceForAdapter -ParsedEvidence $duplicateEvidence -InterfaceAlias "Ethernet fixture"
+          if ($duplicateMode.state -ne "ambiguous" -or $duplicateMode.sourceMode -ne "Unknown") { throw "Duplicate source statements must remain Unknown." }
+          $malformedEvidence = ConvertFrom-NetshInterfaceDnsDump -AddressFamily IPv4 -Lines @('set dnsservers name="Ethernet fixture" source=manual')
+          $malformedMode = Get-NetshInterfaceDnsSourceForAdapter -ParsedEvidence $malformedEvidence -InterfaceAlias "Ethernet fixture"
+          if ($malformedMode.state -ne "unknown" -or $malformedMode.sourceMode -ne "Unknown") { throw "An unrecognized source token must remain Unknown." }
+
           $scriptText = Get-Content -LiteralPath $scriptPath -Raw
           $forbiddenRegistryWrites = @('\.SetValue\s*\(', '\.CreateSubKey\s*\(', '\.DeleteValue\s*\(', '\.DeleteSubKey', '\b(New|Set|Remove)-ItemProperty\b')
           foreach ($pattern in $forbiddenRegistryWrites) { if ($scriptText -match $pattern) { throw "The DNS observation script contains a forbidden registry mutation pattern: $pattern" } }
@@ -51,7 +70,7 @@ jobs:
           & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $scriptPath -Mode Snapshot -OutputPath $snapshotPath
           if ($LASTEXITCODE -ne 0) { throw "The read-only DNS observer snapshot command failed with exit code $LASTEXITCODE." }
           $observation = Get-Content -LiteralPath $snapshotPath -Raw | ConvertFrom-Json
-          if ($observation.schemaVersion -ne 2) { throw "The DNS observer wrote an unsupported schema version." }
+          if ($observation.schemaVersion -ne 3) { throw "The DNS observer wrote an unsupported schema version." }
           if (-not $observation.collection.getNetAdapter.succeeded) { throw "Get-NetAdapter did not produce a usable observer snapshot." }
           if (-not $observation.collection.getDnsClientServerAddress.succeeded) { throw "Get-DnsClientServerAddress did not produce a usable observer snapshot." }
           & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $scriptPath -Mode Compare -BaselinePath $snapshotPath -OutputPath $comparisonPath
@@ -68,9 +87,9 @@ jobs:
           # Deterministic fixture coverage exercises all three comparison outcomes without relying on runner NIC configuration.
           $fixtureRoot = Join-Path $env:RUNNER_TEMP "dns-observer-fixtures"
           New-Item -ItemType Directory -Path $fixtureRoot -Force | Out-Null
-          $fixtureCollectors = @("getNetAdapter", "getDnsClientServerAddress", "getDnsClient", "getDnsClientGlobalSetting", "getDnsClientDohServerAddress", "getDnsClientNrptRule", "registryDoh", "netshDnsClientDump")
+          $fixtureCollectors = @("getNetAdapter", "getDnsClientServerAddress", "getDnsClient", "getDnsClientGlobalSetting", "getDnsClientDohServerAddress", "getDnsClientNrptRule", "registryDoh", "netshDnsClientDump", "netshInterfaceIpv4Dump", "netshInterfaceIpv6Dump")
           function New-DnsObservationFixture {
-            param([string]$Ipv4DnsServer = "192.0.2.53", [switch]$OmitIPv6)
+            param([string]$Ipv4DnsServer = "192.0.2.53", [switch]$OmitIPv6, [switch]$SourceModeChanged, [switch]$OmitSourceMode)
             $collection = [ordered]@{}
             foreach ($collector in $fixtureCollectors) {
               $collection[$collector] = [pscustomobject]@{ available = $true; succeeded = $true; error = $null }
@@ -80,7 +99,7 @@ jobs:
               $addressRecords += [pscustomobject]@{ addressFamily = "IPv6"; addressFamilyRaw = "23"; serverAddresses = @("2001:db8::53") }
             }
             return [pscustomobject]@{
-              schemaVersion = 2
+              schemaVersion = 3
               capturedAtUtc = "2026-01-01T00:00:00.0000000Z"
               os = [pscustomobject]@{
                 values = [pscustomobject]@{ Caption = "Microsoft Windows 11 Pro"; Version = "10.0"; BuildNumber = "26100"; OSArchitecture = "64-bit" }
@@ -96,6 +115,10 @@ jobs:
                 status = "Up"
                 macAddress = "00-11-22-33-44-55"
                 dnsServerAddresses = @($addressRecords)
+                dnsSourceMode = [pscustomobject]@{
+                  ipv4 = if ($OmitSourceMode) { [pscustomobject]@{ state = "unknown"; sourceMode = "Unknown"; sourceToken = $null; interfaceAlias = "Ethernet fixture"; reason = "fixture intentionally omits evidence" } } elseif ($SourceModeChanged) { [pscustomobject]@{ state = "observed"; sourceMode = "Static"; sourceToken = "static"; interfaceAlias = "Ethernet fixture"; reason = $null } } else { [pscustomobject]@{ state = "observed"; sourceMode = "Automatic"; sourceToken = "dhcp"; interfaceAlias = "Ethernet fixture"; reason = $null } }
+                  ipv6 = if ($OmitSourceMode) { [pscustomobject]@{ state = "unknown"; sourceMode = "Unknown"; sourceToken = $null; interfaceAlias = "Ethernet fixture"; reason = "fixture intentionally omits evidence" } } else { [pscustomobject]@{ state = "observed"; sourceMode = "Static"; sourceToken = "static"; interfaceAlias = "Ethernet fixture"; reason = $null } }
+                }
                 dnsClientSettings = @([pscustomobject]@{
                   values = [pscustomobject]@{ ConnectionSpecificSuffix = "example.test"; ConnectionSpecificSuffixSearchList = @("example.test", "corp.example.test"); RegisterThisConnectionsAddress = $true; UseSuffixWhenRegistering = $false }
                   availableProperties = @("ConnectionSpecificSuffix", "ConnectionSpecificSuffixSearchList", "RegisterThisConnectionsAddress", "UseSuffixWhenRegistering")
@@ -122,14 +145,20 @@ jobs:
           $fixturePassPath = Join-Path $fixtureRoot "pass.json"
           $fixtureFailPath = Join-Path $fixtureRoot "fail.json"
           $fixtureUnknownPath = Join-Path $fixtureRoot "unknown.json"
+          $fixtureSourceFailPath = Join-Path $fixtureRoot "source-fail.json"
+          $fixtureSourceUnknownPath = Join-Path $fixtureRoot "source-unknown.json"
           $fixtureBaseline = New-DnsObservationFixture
           $fixturePass = New-DnsObservationFixture
           $fixtureFail = New-DnsObservationFixture -Ipv4DnsServer "192.0.2.54"
           $fixtureUnknown = New-DnsObservationFixture -OmitIPv6
+          $fixtureSourceFail = New-DnsObservationFixture -SourceModeChanged
+          $fixtureSourceUnknown = New-DnsObservationFixture -OmitSourceMode
           $fixtureBaseline | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $fixtureBaselinePath -Encoding UTF8
           $fixturePass | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $fixturePassPath -Encoding UTF8
           $fixtureFail | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $fixtureFailPath -Encoding UTF8
           $fixtureUnknown | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $fixtureUnknownPath -Encoding UTF8
+          $fixtureSourceFail | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $fixtureSourceFailPath -Encoding UTF8
+          $fixtureSourceUnknown | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $fixtureSourceUnknownPath -Encoding UTF8
 
           $fixturePassOutput = Join-Path $fixtureRoot "pass-result.json"
           & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $scriptPath -Mode Compare -BaselinePath $fixtureBaselinePath -CurrentSnapshotPath $fixturePassPath -OutputPath $fixturePassOutput
@@ -150,6 +179,20 @@ jobs:
           $fixtureUnknownExit = $LASTEXITCODE
           $fixtureUnknownResult = Get-Content -LiteralPath $fixtureUnknownOutput -Raw | ConvertFrom-Json
           if ($fixtureUnknownExit -ne 2 -or $fixtureUnknownResult.status -ne "UNKNOWN") { throw "A fixture missing the IPv6 DNS row must return UNKNOWN/2." }
+          $global:LASTEXITCODE = 0
+
+          $fixtureSourceFailOutput = Join-Path $fixtureRoot "source-fail-result.json"
+          & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $scriptPath -Mode Compare -BaselinePath $fixtureBaselinePath -CurrentSnapshotPath $fixtureSourceFailPath -OutputPath $fixtureSourceFailOutput
+          $fixtureSourceFailExit = $LASTEXITCODE
+          $fixtureSourceFailResult = Get-Content -LiteralPath $fixtureSourceFailOutput -Raw | ConvertFrom-Json
+          if ($fixtureSourceFailExit -ne 1 -or $fixtureSourceFailResult.status -ne "FAIL") { throw "A changed per-family DNS source mode must return FAIL/1." }
+          $global:LASTEXITCODE = 0
+
+          $fixtureSourceUnknownOutput = Join-Path $fixtureRoot "source-unknown-result.json"
+          & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $scriptPath -Mode Compare -BaselinePath $fixtureBaselinePath -CurrentSnapshotPath $fixtureSourceUnknownPath -OutputPath $fixtureSourceUnknownOutput
+          $fixtureSourceUnknownExit = $LASTEXITCODE
+          $fixtureSourceUnknownResult = Get-Content -LiteralPath $fixtureSourceUnknownOutput -Raw | ConvertFrom-Json
+          if ($fixtureSourceUnknownExit -ne 2 -or $fixtureSourceUnknownResult.status -ne "UNKNOWN") { throw "Missing per-family DNS source evidence must return UNKNOWN/2." }
           $global:LASTEXITCODE = 0
 
       - name: Install frontend dependencies

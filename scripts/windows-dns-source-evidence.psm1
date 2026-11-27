@@ -1,5 +1,22 @@
 Set-StrictMode -Version Latest
 
+function ConvertTo-DnsAddressFamilyLabel {
+    [CmdletBinding()]
+    param([AllowNull()][object]$Value)
+
+    if ($null -eq $Value) { return "Unknown" }
+    $familyText = ([string]$Value).Trim()
+    switch -Exact ($familyText) {
+        "2" { return "IPv4" }
+        "23" { return "IPv6" }
+        "IPv4" { return "IPv4" }
+        "IPv6" { return "IPv6" }
+        "InterNetwork" { return "IPv4" }
+        "InterNetworkV6" { return "IPv6" }
+        default { return "Unknown:$familyText" }
+    }
+}
+
 function ConvertFrom-NetshInterfaceDnsDump {
     [CmdletBinding()]
     param(
@@ -304,4 +321,4 @@ function Get-NetshIPv6InterfaceDnsPolicyForAdapter {
     }
 }
 
-Export-ModuleMember -Function ConvertFrom-NetshInterfaceDnsDump, Get-NetshInterfaceDnsSourceForAdapter, ConvertFrom-NetshIPv6InterfaceDump, Get-NetshIPv6InterfaceDnsPolicyForAdapter
+Export-ModuleMember -Function ConvertTo-DnsAddressFamilyLabel, ConvertFrom-NetshInterfaceDnsDump, Get-NetshInterfaceDnsSourceForAdapter, ConvertFrom-NetshIPv6InterfaceDump, Get-NetshIPv6InterfaceDnsPolicyForAdapter

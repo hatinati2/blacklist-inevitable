@@ -66,6 +66,10 @@ jobs:
       - name: Run Rust tests
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc
 
+      - name: Verify preflight ACL denies a second local standard user
+        shell: pwsh
+        run: ./scripts/windows-preflight-acl-acceptance.ps1
+
       - name: Check Rust
         run: cargo check --locked --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc
 

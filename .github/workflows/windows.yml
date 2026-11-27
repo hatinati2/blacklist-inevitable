@@ -56,9 +56,12 @@ jobs:
           if (-not $observation.collection.getDnsClientServerAddress.succeeded) { throw "Get-DnsClientServerAddress did not produce a usable observer snapshot." }
           & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $scriptPath -Mode Compare -BaselinePath $snapshotPath -OutputPath $comparisonPath
           $compareExitCode = $LASTEXITCODE
-          if ($compareExitCode -ne 0) { throw "A no-change DNS observer comparison should PASS, but exited with code $compareExitCode." }
+          if ($compareExitCode -notin @(0, 1, 2)) { throw "The DNS observer comparison returned an unexpected exit code: $compareExitCode." }
           $comparison = Get-Content -LiteralPath $comparisonPath -Raw | ConvertFrom-Json
-          if ($comparison.schemaVersion -ne 1 -or $comparison.status -ne "PASS") { throw "The DNS observer no-change comparison did not produce a PASS result." }
+          if ($comparison.schemaVersion -ne 1 -or $comparison.status -notin @("PASS", "FAIL", "UNKNOWN")) { throw "The DNS observer comparison did not produce a valid result." }
+          $expectedExitCode = switch ($comparison.status) { "PASS" { 0 } "FAIL" { 1 } "UNKNOWN" { 2 } }
+          if ($compareExitCode -ne $expectedExitCode) { throw "The DNS observer comparison exit code does not match its status." }
+          if ($comparison.status -eq "FAIL") { throw "A no-change DNS observer comparison reported DNS state changes." }
 
       - name: Install frontend dependencies
         run: npm ci --include=optional

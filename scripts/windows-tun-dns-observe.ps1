@@ -396,6 +396,7 @@ function Get-DnsObservation {
                         Sort-Object -Property AddressFamily |
                         ForEach-Object {
                             $selected = Get-SelectedProperties -InputObject $_ -PropertyNames @(
+                                "InterfaceAlias",
                                 "AddressFamily",
                                 "Dhcp",
                                 "RouterDiscovery",

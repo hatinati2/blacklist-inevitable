@@ -742,7 +742,12 @@ foreach ($id in $baselineIds) {
             continue
         }
         foreach ($family in @("IPv4", "IPv6")) {
-            $familyRows = @($ipRows | Where-Object { [string]$_.values.AddressFamily -ieq $family })
+            $familyRows = @(
+                $ipRows | Where-Object {
+                    $addressFamilyProperty = $_.values.PSObject.Properties["AddressFamily"]
+                    $null -ne $addressFamilyProperty -and [string]$addressFamilyProperty.Value -ieq $family
+                }
+            )
             if ($familyRows.Count -ne 1) {
                 $unknown += "Get-NetIPInterface returned $($familyRows.Count) $family rows for physical adapter $id in the $($adapterObservation.label) observation."
                 continue

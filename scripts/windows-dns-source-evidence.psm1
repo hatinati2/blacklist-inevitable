@@ -488,8 +488,123 @@ function ConvertFrom-NetshDnsClientDump {
                         if (-not [System.Net.IPAddress]::TryParse([string]$tokens["server"], [ref]$parsedAddress)) {
                             $reason = "The encryption server is not a valid IP address."
                         }
-                        elseif (-not $tokens.Contains("dohtemplate") -and -not $tokens.Contains("dothost")) {
-                            $reason = "The encryption command has neither a DoH template nor a DoT host."
+                        elseif (-not $tokens.Contains("dohtemplate") -or -not $tokens.Contains("dothost")) {
+                            $reason = "The encryption command must include both a DoH template and a DoT host."
+                        }
+                        else {
+                            $dotHostValue = [string]$tokens["dothost"]
+                            if ($dotHostValue -ne ":") {
+                                $dotHostMatch = [regex]::Match($dotHostValue, '^(?<host>[^:\s]+):(?<port>[0-9]{1,5})
+                    }
+                    foreach ($booleanOption in @("autoupgrade", "udpfallback")) {
+                        if ($null -eq $reason -and $tokens.Contains($booleanOption) -and $tokens[$booleanOption].ToLowerInvariant() -notin @("yes", "no")) {
+                            $reason = "The encryption command contains an unsupported Boolean option."
+                        }
+                    }
+                    if ($null -eq $reason) {
+                        $encryptionCommands += [pscustomobject]@{
+                            lineNumber = $lineNumber
+                            verb = $verb
+                            server = [string]$tokens["server"]
+                            dohTemplate = if ($tokens.Contains("dohtemplate")) { [string]$tokens["dohtemplate"] } else { $null }
+                            dotHost = if ($tokens.Contains("dothost")) { [string]$tokens["dothost"] } else { $null }
+                            autoUpgrade = if ($tokens.Contains("autoupgrade")) { $tokens["autoupgrade"].ToLowerInvariant() } else { $null }
+                            udpFallback = if ($tokens.Contains("udpfallback")) { $tokens["udpfallback"].ToLowerInvariant() } else { $null }
+                        }
+                    }
+                }
+                "global" {
+                    if ($tokens.Count -eq 0) {
+                        $reason = "The global command contains no supported settings."
+                    }
+                    elseif ($tokens.Contains("doh") -and $tokens["doh"].ToLowerInvariant() -notin @("yes", "no", "auto")) {
+                        $reason = "The global DoH value is unsupported."
+                    }
+                    elseif (($tokens.Contains("dot") -and $tokens["dot"].ToLowerInvariant() -notin @("yes", "no")) -or
+                        ($tokens.Contains("ddr") -and $tokens["ddr"].ToLowerInvariant() -notin @("yes", "no"))) {
+                        $reason = "The global DoT or DDR value is unsupported."
+                    }
+                    if ($null -eq $reason) {
+                        $globalCommands += [pscustomobject]@{
+                            lineNumber = $lineNumber
+                            verb = $verb
+                            doh = if ($tokens.Contains("doh")) { $tokens["doh"].ToLowerInvariant() } else { $null }
+                            dot = if ($tokens.Contains("dot")) { $tokens["dot"].ToLowerInvariant() } else { $null }
+                            ddr = if ($tokens.Contains("ddr")) { $tokens["ddr"].ToLowerInvariant() } else { $null }
+                        }
+                    }
+                }
+                "interface" {
+                    if ([string]::IsNullOrWhiteSpace($alias)) {
+                        $reason = "The interface command is missing its interface name."
+                    }
+                    elseif (-not $tokens.Contains("ddr") -and -not $tokens.Contains("ddrfallback")) {
+                        $reason = "The interface command contains no supported DDR settings."
+                    }
+                    elseif (($tokens.Contains("ddr") -and $tokens["ddr"].ToLowerInvariant() -notin @("yes", "no")) -or
+                        ($tokens.Contains("ddrfallback") -and $tokens["ddrfallback"].ToLowerInvariant() -notin @("yes", "no"))) {
+                        $reason = "The interface DDR setting is unsupported."
+                    }
+                    if ($null -eq $reason) {
+                        $interfaceCommands += [pscustomobject]@{
+                            lineNumber = $lineNumber
+                            verb = $verb
+                            interfaceAlias = $alias
+                            ddr = if ($tokens.Contains("ddr")) { $tokens["ddr"].ToLowerInvariant() } else { $null }
+                            ddrFallback = if ($tokens.Contains("ddrfallback")) { $tokens["ddrfallback"].ToLowerInvariant() } else { $null }
+                        }
+                    }
+                }
+            }
+        }
+
+        if ($null -ne $reason) {
+            $malformedStatements += [pscustomobject]@{
+                lineNumber = $lineNumber
+                verb = $verb
+                section = $section
+                interfaceAlias = $alias
+                reason = $reason
+            }
+        }
+        else {
+            $recognizedCommandCount++
+        }
+    }
+
+    $parseState = "unknown"
+    if ($recognizedCommandCount -gt 0 -and $malformedStatements.Count -eq 0 -and $unsupportedStatements.Count -eq 0) {
+        $parseState = "parsed"
+    }
+    elseif ($recognizedCommandCount -gt 0 -or $malformedStatements.Count -gt 0 -or $unsupportedStatements.Count -gt 0) {
+        $parseState = "incomplete"
+    }
+
+    return [pscustomobject]@{
+        parserSchemaVersion = 1
+        parseState = $parseState
+        recognizedCommandCount = $recognizedCommandCount
+        malformedCommandCount = $malformedStatements.Count
+        unsupportedCommandCount = $unsupportedStatements.Count
+        dnsServerCommands = @($dnsServerCommands)
+        encryptionCommands = @($encryptionCommands)
+        globalCommands = @($globalCommands)
+        interfaceCommands = @($interfaceCommands)
+        malformedStatements = @($malformedStatements)
+        unsupportedStatements = @($unsupportedStatements)
+        limitation = "Only documented set/add command forms are parsed. A parsed result does not prove complete per-interface/profile/family state, stable adapter identity, or a supported DNS restore contract; absent statement families are not inferred to be default."
+    }
+}
+
+Export-ModuleMember -Function ConvertTo-DnsAddressFamilyLabel, ConvertFrom-NetshInterfaceDnsDump, Get-NetshInterfaceDnsSourceForAdapter, ConvertFrom-NetshIPv6InterfaceDump, Get-NetshIPv6InterfaceDnsPolicyForAdapter, ConvertFrom-NetshDnsClientDump
+)
+                                $dotPort = 0
+                                if (-not $dotHostMatch.Success -or
+                                    -not [int]::TryParse([string]$dotHostMatch.Groups["port"].Value, [ref]$dotPort) -or
+                                    $dotPort -lt 1 -or $dotPort -gt 65535) {
+                                    $reason = "The DoT host must be a hostname and valid port, or the documented default ':' value."
+                                }
+                            }
                         }
                     }
                     foreach ($booleanOption in @("autoupgrade", "udpfallback")) {

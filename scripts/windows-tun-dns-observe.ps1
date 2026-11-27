@@ -685,15 +685,15 @@ foreach ($id in $baselineIds) {
         $unknown += "Baseline physical adapter $id is absent from the current observation."
         continue
     }
-    if (@($before.dnsClientSettings).Count -eq 0 -or @($after.dnsClientSettings).Count -eq 0) {
-        $unknown += "Per-interface DNS Client settings were not returned for physical adapter $id."
-    }
+
+    $dnsServerListsComparable = $true
     foreach ($adapterObservation in @(
         [pscustomobject]@{ label = "baseline"; adapter = $before },
         [pscustomobject]@{ label = "current"; adapter = $after }
     )) {
         $addressRecords = @($adapterObservation.adapter.dnsServerAddresses)
         if ($addressRecords.Count -eq 0) {
+            $dnsServerListsComparable = $false
             $unknown += "No DNS server address-family records were returned for physical adapter $id in the $($adapterObservation.label) observation."
             continue
         }
@@ -706,35 +706,48 @@ foreach ($id in $baselineIds) {
         )
         $unrecognizedFamilies = @($observedFamilies | Where-Object { $_ -notin @("IPv4", "IPv6") })
         if ($unrecognizedFamilies.Count -gt 0) {
+            $dnsServerListsComparable = $false
             $unknown += "One or more DNS address-family records are unrecognized for physical adapter $id in the $($adapterObservation.label) observation: $($unrecognizedFamilies -join ', ')."
         }
         foreach ($family in @("IPv4", "IPv6")) {
-            if ($observedFamilies -notcontains $family) {
-                $unknown += "The $family DNS server address record is missing for physical adapter $id in the $($adapterObservation.label) observation."
+            $familyCount = @($observedFamilies | Where-Object { $_ -eq $family }).Count
+            if ($familyCount -ne 1) {
+                $dnsServerListsComparable = $false
+                $unknown += "The $family DNS server address record count is $familyCount for physical adapter $id in the $($adapterObservation.label) observation; exactly one is required."
             }
         }
     }
+
     $requiredClientFields = @("ConnectionSpecificSuffix", "ConnectionSpecificSuffixSearchList", "RegisterThisConnectionsAddress", "UseSuffixWhenRegistering")
+    $dnsClientSettingsComparable = (@($before.dnsClientSettings).Count -gt 0 -and @($after.dnsClientSettings).Count -gt 0)
+    if (-not $dnsClientSettingsComparable) {
+        $unknown += "Per-interface DNS Client settings were not returned for physical adapter $id in both observations."
+    }
     foreach ($record in @($before.dnsClientSettings) + @($after.dnsClientSettings)) {
         $missingClientFields = @($requiredClientFields | Where-Object { $record.availableProperties -notcontains $_ })
         if ($missingClientFields.Count -gt 0) {
+            $dnsClientSettingsComparable = $false
             $unknown += "Physical adapter $id is missing DNS Client properties: $($missingClientFields -join ", ")."
         }
     }
 
-    if ((ConvertTo-ComparableJson $before.dnsServerAddresses) -ne (ConvertTo-ComparableJson $after.dnsServerAddresses)) {
+    if ($dnsServerListsComparable -and
+        (ConvertTo-ComparableJson $before.dnsServerAddresses) -ne (ConvertTo-ComparableJson $after.dnsServerAddresses)) {
         $changes += "DNS server address list changed on physical adapter $id."
     }
-    if ((ConvertTo-ComparableJson $before.dnsClientSettings) -ne (ConvertTo-ComparableJson $after.dnsClientSettings)) {
+    if ($dnsClientSettingsComparable -and
+        (ConvertTo-ComparableJson $before.dnsClientSettings) -ne (ConvertTo-ComparableJson $after.dnsClientSettings)) {
         $changes += "Per-interface DNS Client settings changed on physical adapter $id."
     }
 
+    $ipInterfaceSettingsComparable = $true
     foreach ($adapterObservation in @(
         [pscustomobject]@{ label = "baseline"; adapter = $before },
         [pscustomobject]@{ label = "current"; adapter = $after }
     )) {
         $ipRows = @($adapterObservation.adapter.ipInterfaceSettings)
         if ($ipRows.Count -eq 0) {
+            $ipInterfaceSettingsComparable = $false
             $unknown += "Get-NetIPInterface returned no per-family interface settings for physical adapter $id in the $($adapterObservation.label) observation."
             continue
         }
@@ -746,42 +759,51 @@ foreach ($id in $baselineIds) {
                 }
             )
             if ($familyRows.Count -ne 1) {
+                $ipInterfaceSettingsComparable = $false
                 $unknown += "Get-NetIPInterface returned $($familyRows.Count) $family rows for physical adapter $id in the $($adapterObservation.label) observation."
                 continue
             }
             $requiredIpProperties = if ($family -eq "IPv4") {
-                @("AddressFamily", "Dhcp")
+                @("InterfaceAlias", "AddressFamily", "Dhcp")
             }
             else {
-                @("AddressFamily", "Dhcp", "RouterDiscovery", "ManagedAddressConfiguration", "OtherStatefulConfiguration")
+                @("InterfaceAlias", "AddressFamily", "Dhcp", "RouterDiscovery", "ManagedAddressConfiguration", "OtherStatefulConfiguration")
             }
             $missingIpProperties = @($requiredIpProperties | Where-Object { $familyRows[0].availableProperties -notcontains $_ })
             if ($missingIpProperties.Count -gt 0) {
+                $ipInterfaceSettingsComparable = $false
                 $unknown += "Get-NetIPInterface is missing $family properties for physical adapter $id in the $($adapterObservation.label) observation: $($missingIpProperties -join ', ')."
+            }
+            elseif ([string]$familyRows[0].values.InterfaceAlias -ine [string]$adapterObservation.adapter.name) {
+                $ipInterfaceSettingsComparable = $false
+                $unknown += "Get-NetIPInterface $family alias does not match the contemporaneous adapter alias for physical adapter $id in the $($adapterObservation.label) observation."
             }
         }
     }
-
-    if ((ConvertTo-ComparableJson $before.ipInterfaceSettings) -ne (ConvertTo-ComparableJson $after.ipInterfaceSettings)) {
+    if ($ipInterfaceSettingsComparable -and
+        (ConvertTo-ComparableJson $before.ipInterfaceSettings) -ne (ConvertTo-ComparableJson $after.ipInterfaceSettings)) {
         $changes += "Per-family IP interface DHCP/router-discovery configuration changed on physical adapter $id."
     }
 
+    $ipv6DnsPolicyComparable = $true
     foreach ($adapterObservation in @(
         [pscustomobject]@{ label = "baseline"; adapter = $before },
         [pscustomobject]@{ label = "current"; adapter = $after }
     )) {
         $policy = $adapterObservation.adapter.ipv6DnsPolicy
         if ($null -eq $policy -or $policy.state -ne "observed") {
+            $ipv6DnsPolicyComparable = $false
             $unknown += "IPv6 router-discovery/RDNSS/DHCP policy evidence is incomplete for physical adapter $id in the $($adapterObservation.label) observation."
             continue
         }
         $requiredPolicyProperties = @("routerDiscovery", "managedAddress", "otherStateful", "raBasedDnsConfig", "dhcpStaticIpCoexistence")
         $missingPolicyProperties = @($requiredPolicyProperties | Where-Object { $policy.availableProperties -notcontains $_ })
         if ($missingPolicyProperties.Count -gt 0) {
+            $ipv6DnsPolicyComparable = $false
             $unknown += "IPv6 DNS policy is missing properties for physical adapter $id in the $($adapterObservation.label) observation: $($missingPolicyProperties -join ', ')."
         }
     }
-    if ($before.ipv6DnsPolicy.state -eq "observed" -and $after.ipv6DnsPolicy.state -eq "observed" -and
+    if ($ipv6DnsPolicyComparable -and
         (ConvertTo-ComparableJson $before.ipv6DnsPolicy.settings) -ne (ConvertTo-ComparableJson $after.ipv6DnsPolicy.settings)) {
         $changes += "IPv6 router-discovery/RDNSS/DHCP policy changed on physical adapter $id."
     }

@@ -65,6 +65,93 @@ jobs:
           $global:LASTEXITCODE = 0
           if ($comparison.status -eq "FAIL") { throw "A no-change DNS observer comparison reported DNS state changes." }
 
+          # Deterministic fixture coverage exercises all three comparison outcomes without relying on runner NIC configuration.
+          $fixtureRoot = Join-Path $env:RUNNER_TEMP "dns-observer-fixtures"
+          New-Item -ItemType Directory -Path $fixtureRoot -Force | Out-Null
+          $fixtureCollectors = @("getNetAdapter", "getDnsClientServerAddress", "getDnsClient", "getDnsClientGlobalSetting", "getDnsClientDohServerAddress", "getDnsClientNrptRule", "registryDoh", "netshDnsClientDump")
+          function New-DnsObservationFixture {
+            param([string]$Ipv4DnsServer = "192.0.2.53", [switch]$OmitIPv6)
+            $collection = [ordered]@{}
+            foreach ($collector in $fixtureCollectors) {
+              $collection[$collector] = [pscustomobject]@{ available = $true; succeeded = $true; error = $null }
+            }
+            $addressRecords = @([pscustomobject]@{ addressFamily = "IPv4"; serverAddresses = @($Ipv4DnsServer) })
+            if (-not $OmitIPv6) {
+              $addressRecords += [pscustomobject]@{ addressFamily = "IPv6"; serverAddresses = @("2001:db8::53") }
+            }
+            return [pscustomobject]@{
+              schemaVersion = 2
+              capturedAtUtc = "2026-01-01T00:00:00.0000000Z"
+              os = [pscustomobject]@{
+                values = [pscustomobject]@{ Caption = "Microsoft Windows 11 Pro"; Version = "10.0"; BuildNumber = "26100"; OSArchitecture = "64-bit" }
+                availableProperties = @("Caption", "Version", "BuildNumber", "OSArchitecture")
+              }
+              collection = [pscustomobject]$collection
+              adapters = @([pscustomobject]@{
+                interfaceGuid = "00000000-0000-0000-0000-000000000001"
+                interfaceIndex = 7
+                name = "Ethernet fixture"
+                interfaceDescription = "Synthetic physical NIC"
+                hardwareInterface = $true
+                status = "Up"
+                macAddress = "00-11-22-33-44-55"
+                dnsServerAddresses = @($addressRecords)
+                dnsClientSettings = @([pscustomobject]@{
+                  values = [pscustomobject]@{ ConnectionSpecificSuffix = "example.test"; RegisterThisConnectionsAddress = $true; UseSuffixWhenRegistering = $false }
+                  availableProperties = @("ConnectionSpecificSuffix", "RegisterThisConnectionsAddress", "UseSuffixWhenRegistering")
+                })
+                registryDohEvidence = [pscustomobject]@{
+                  state = "absent"
+                  error = $null
+                  families = @(
+                    [pscustomobject]@{ family = "IPv4"; branch = "Doh"; state = "absent"; servers = @() },
+                    [pscustomobject]@{ family = "IPv6"; branch = "Doh6"; state = "absent"; servers = @() }
+                  )
+                }
+              })
+              globalSettings = @([pscustomobject]@{
+                values = [pscustomobject]@{ SuffixSearchList = @(); UseDevolution = $true; DevolutionLevel = 2 }
+                availableProperties = @("SuffixSearchList", "UseDevolution", "DevolutionLevel")
+              })
+              dohServerInventory = @()
+              nrptRules = @()
+            }
+          }
+
+          $fixtureBaselinePath = Join-Path $fixtureRoot "baseline.json"
+          $fixturePassPath = Join-Path $fixtureRoot "pass.json"
+          $fixtureFailPath = Join-Path $fixtureRoot "fail.json"
+          $fixtureUnknownPath = Join-Path $fixtureRoot "unknown.json"
+          $fixtureBaseline = New-DnsObservationFixture
+          $fixturePass = New-DnsObservationFixture
+          $fixtureFail = New-DnsObservationFixture -Ipv4DnsServer "192.0.2.54"
+          $fixtureUnknown = New-DnsObservationFixture -OmitIPv6
+          $fixtureBaseline | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $fixtureBaselinePath -Encoding UTF8
+          $fixturePass | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $fixturePassPath -Encoding UTF8
+          $fixtureFail | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $fixtureFailPath -Encoding UTF8
+          $fixtureUnknown | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $fixtureUnknownPath -Encoding UTF8
+
+          $fixturePassOutput = Join-Path $fixtureRoot "pass-result.json"
+          & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $scriptPath -Mode Compare -BaselinePath $fixtureBaselinePath -CurrentSnapshotPath $fixturePassPath -OutputPath $fixturePassOutput
+          $fixturePassExit = $LASTEXITCODE
+          $fixturePassResult = Get-Content -LiteralPath $fixturePassOutput -Raw | ConvertFrom-Json
+          if ($fixturePassExit -ne 0 -or $fixturePassResult.status -ne "PASS") { throw "A complete unchanged fixture must return PASS/0." }
+          $global:LASTEXITCODE = 0
+
+          $fixtureFailOutput = Join-Path $fixtureRoot "fail-result.json"
+          & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $scriptPath -Mode Compare -BaselinePath $fixtureBaselinePath -CurrentSnapshotPath $fixtureFailPath -OutputPath $fixtureFailOutput
+          $fixtureFailExit = $LASTEXITCODE
+          $fixtureFailResult = Get-Content -LiteralPath $fixtureFailOutput -Raw | ConvertFrom-Json
+          if ($fixtureFailExit -ne 1 -or $fixtureFailResult.status -ne "FAIL") { throw "A changed DNS fixture must return FAIL/1." }
+          $global:LASTEXITCODE = 0
+
+          $fixtureUnknownOutput = Join-Path $fixtureRoot "unknown-result.json"
+          & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $scriptPath -Mode Compare -BaselinePath $fixtureUnknownPath -CurrentSnapshotPath $fixtureUnknownPath -OutputPath $fixtureUnknownOutput
+          $fixtureUnknownExit = $LASTEXITCODE
+          $fixtureUnknownResult = Get-Content -LiteralPath $fixtureUnknownOutput -Raw | ConvertFrom-Json
+          if ($fixtureUnknownExit -ne 2 -or $fixtureUnknownResult.status -ne "UNKNOWN") { throw "A fixture missing the IPv6 DNS row must return UNKNOWN/2." }
+          $global:LASTEXITCODE = 0
+
       - name: Install frontend dependencies
         run: npm ci --include=optional
 

@@ -425,6 +425,18 @@ mod platform {
         }
 
         #[test]
+        fn unique_probe_directory_creation_rejects_a_collision() {
+            let path = test_path("unique-directory");
+            create_private_directory(&path).expect("create private directory");
+            assert!(
+                create_private_directory(&path).is_err(),
+                "a unique run directory must never reuse an existing path"
+            );
+            verify_private_directory_if_exists(&path).expect("existing directory remains intact");
+            fs::remove_dir(path).expect("remove test directory");
+        }
+
+        #[test]
         fn config_creation_never_overwrites_an_existing_file() {
             let root = test_path("no-overwrite");
             ensure_private_directory(&root).expect("private root");

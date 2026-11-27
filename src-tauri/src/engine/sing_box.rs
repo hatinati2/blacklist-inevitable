@@ -1518,8 +1518,12 @@ pub async fn validate_profile_config(
     // Creation + write is synchronous and internally removes only the file it
     // successfully created on failure. Install the guard only after success so
     // a CREATE_NEW collision can never make Drop remove someone else's file.
-    super::preflight_acl::create_private_file(&config_path, &config_bytes)
-        .map_err(|_| "Could not securely write the temporary engine configuration.".to_string())?;
+    if super::preflight_acl::create_private_file(&config_path, &config_bytes).is_err() {
+        // The helper attempts to remove a partial file. Treat any uncertain
+        // create/write failure as unsafe until the next process start recovers it.
+        supervisor.mark_cleanup_unhealthy();
+        return Err("Could not securely write the temporary engine configuration; preflight is blocked.".to_string());
+    }
     let _config_guard = ProbeConfigFile {
         path: config_path.clone(),
         supervisor: supervisor.clone(),
@@ -1710,7 +1714,13 @@ pub async fn measure_real_delay(
         }
     };
     if super::preflight_acl::create_private_file(&config_path, &config_bytes).is_err() {
-        cleanup_probe_dir(&run_dir).await?;
+        if cleanup_probe_dir(&run_dir).await.is_err() {
+            operation.mark_cleanup_unhealthy();
+            return Err(
+                "A failed private config write left temporary preflight cleanup uncertain; engine operations are blocked."
+                    .to_string(),
+            );
+        }
         return Err("Could not securely write the isolated sing-box configuration.".to_string());
     }
 

@@ -748,4 +748,126 @@ mod tests {
         let error = parse_import_text(&input).unwrap_err();
         assert_eq!(error, "Import text is larger than 2 MiB.");
     }
+
+    #[test]
+    fn parses_hy2_alias_and_keeps_obfuscation_password_out_of_options() {
+        let parsed = parse_share_uri(
+            "hy2://hy2%3Asecret@hy2.example.net:8443?sni=edge.example.net&obfs=salamander&obfs-password=obfs%3Asecret#HY2%20Alias",
+        )
+        .expect("valid hy2 alias");
+
+        assert_eq!(parsed.profile.protocol, "hysteria2");
+        assert_eq!(parsed.profile.name, "HY2 Alias");
+        assert_eq!(parsed.profile.port, 8443);
+        assert_eq!(parsed.profile.options.get("obfs").map(String::as_str), Some("salamander"));
+        assert!(!parsed.profile.options.contains_key("obfs-password"));
+        assert_eq!(
+            parsed.credentials.get("password").map(String::as_str),
+            Some("hy2:secret")
+        );
+        assert_eq!(
+            parsed.credentials.get("obfsPassword").map(String::as_str),
+            Some("obfs:secret")
+        );
+
+        let metadata = serde_json::to_string(&parsed.profile).expect("serialize metadata");
+        assert!(!metadata.contains("hy2:secret"));
+        assert!(!metadata.contains("obfs:secret"));
+    }
+
+    #[test]
+    fn parses_vless_ipv6_literal_and_percent_encoded_fragment() {
+        let parsed = parse_share_uri(
+            "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@[2001:db8::10]:443?security=tls&type=grpc&serviceName=edge#IPv6%20Gateway",
+        )
+        .expect("valid VLESS IPv6 URI");
+
+        assert_eq!(parsed.profile.protocol, "vless");
+        assert!(parsed.profile.server.contains("2001:db8::10"));
+        assert_eq!(parsed.profile.port, 443);
+        assert_eq!(parsed.profile.name, "IPv6 Gateway");
+        assert_eq!(parsed.profile.options.get("serviceName").map(String::as_str), Some("edge"));
+    }
+
+    #[test]
+    fn legacy_shadowsocks_base64_encodes_the_entire_authority() {
+        let legacy = "aes-256-gcm:legacy-password@legacy.ss.example.org:8388";
+        let encoded = STANDARD.encode(legacy.as_bytes());
+        let parsed = parse_share_uri(&format!("ss://{encoded}#Legacy%20SS"))
+            .expect("valid legacy Shadowsocks URI");
+
+        assert_eq!(parsed.profile.protocol, "shadowsocks");
+        assert_eq!(parsed.profile.server, "legacy.ss.example.org");
+        assert_eq!(parsed.profile.port, 8388);
+        assert_eq!(parsed.profile.name, "Legacy SS");
+        assert_eq!(parsed.profile.options.get("method").map(String::as_str), Some("aes-256-gcm"));
+        assert_eq!(
+            parsed.credentials.get("password").map(String::as_str),
+            Some("legacy-password")
+        );
+    }
+
+    #[test]
+    fn vmess_accepts_url_safe_unpadded_base64_and_reports_unknown_field_names_only() {
+        let payload = r#"{"v":"2","ps":"URL-safe VMess","add":"vmess.example.net","port":443,"id":"12345678-1234-1234-1234-123456789012","aid":0,"net":"ws","path":"/edge","tls":"tls","x_custom_auth":"do-not-copy-this-value"}"#;
+        let encoded = URL_SAFE_NO_PAD.encode(payload.as_bytes());
+        let parsed = parse_share_uri(&format!("vmess://{encoded}"))
+            .expect("valid URL-safe unpadded VMess URI");
+
+        assert_eq!(parsed.profile.protocol, "vmess");
+        assert_eq!(parsed.profile.server, "vmess.example.net");
+        assert_eq!(parsed.profile.port, 443);
+        assert_eq!(parsed.profile.options.get("transport").map(String::as_str), Some("ws"));
+        assert_eq!(
+            parsed.profile.unsupported_options,
+            vec!["x_custom_auth".to_string()]
+        );
+        assert_eq!(
+            parsed.credentials.get("uuid").map(String::as_str),
+            Some("12345678-1234-1234-1234-123456789012")
+        );
+
+        let metadata = serde_json::to_string(&parsed.profile).expect("serialize metadata");
+        assert!(metadata.contains("x_custom_auth"));
+        assert!(!metadata.contains("do-not-copy-this-value"));
+    }
+
+    #[test]
+    fn unsupported_query_keys_are_sorted_deduplicated_and_never_copy_values() {
+        let parsed = parse_share_uri(
+            "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@example.net:443?security=tls&xhttp=secret-one&foo=secret-two&bar=secret-three&foo=secret-four",
+        )
+        .expect("valid URI with unsupported adapter options");
+
+        assert_eq!(
+            parsed.profile.unsupported_options,
+            vec!["bar".to_string(), "foo".to_string(), "xhttp".to_string()]
+        );
+        assert!(parsed.profile.options.contains_key("security"));
+        assert!(!parsed.profile.options.contains_key("foo"));
+        assert!(!parsed.profile.options.contains_key("bar"));
+
+        let metadata = serde_json::to_string(&parsed.profile).expect("serialize metadata");
+        assert!(metadata.contains("bar"));
+        assert!(metadata.contains("foo"));
+        assert!(metadata.contains("xhttp"));
+        assert!(!metadata.contains("secret-one"));
+        assert!(!metadata.contains("secret-two"));
+        assert!(!metadata.contains("secret-three"));
+        assert!(!metadata.contains("secret-four"));
+    }
+
+    #[test]
+    fn batch_import_trims_lines_and_ignores_comments_without_losing_line_numbers() {
+        let batch = parse_import_text(
+            "  # exported from a client\r\n  vless://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@example.net:443#First  \r\n\r\nnot-a-link\r\n",
+        )
+        .expect("valid mixed batch");
+
+        assert_eq!(batch.profiles.len(), 1);
+        assert_eq!(batch.profiles[0].name, "First");
+        assert_eq!(batch.rejected.len(), 1);
+        assert_eq!(batch.rejected[0].line, 4);
+    }
+
 }

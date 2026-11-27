@@ -8,10 +8,34 @@ use crate::profiles::ProfileSummary;
 
 const OUTBOUND_TAG: &str = "blacklist-profile";
 
+struct ProbeSocksCredentials {
+    username: String,
+    password: String,
+}
+
+impl ProbeSocksCredentials {
+    fn generate() -> Self {
+        Self {
+            username: Uuid::new_v4().simple().to_string(),
+            password: Uuid::new_v4().simple().to_string(),
+        }
+    }
+}
+
 pub fn build_probe_config(
     profile: &ProfileSummary,
     credentials: &BTreeMap<String, String>,
     listen_port: u16,
+) -> Result<Value, String> {
+    let socks_credentials = ProbeSocksCredentials::generate();
+    build_probe_config_with_socks_auth(profile, credentials, listen_port, &socks_credentials)
+}
+
+fn build_probe_config_with_socks_auth(
+    profile: &ProfileSummary,
+    credentials: &BTreeMap<String, String>,
+    listen_port: u16,
+    socks_credentials: &ProbeSocksCredentials,
 ) -> Result<Value, String> {
     if listen_port == 0 {
         return Err("The temporary local proxy port is invalid.".to_string());
@@ -159,7 +183,11 @@ pub fn build_probe_config(
             "type": "socks",
             "tag": "preflight-in",
             "listen": "127.0.0.1",
-            "listen_port": listen_port
+            "listen_port": listen_port,
+            "users": [{
+                "username": socks_credentials.username.as_str(),
+                "password": socks_credentials.password.as_str()
+            }]
         }],
         "outbounds": [Value::Object(outbound)],
         "route": {"final": OUTBOUND_TAG}
@@ -1064,6 +1092,14 @@ mod tests {
         assert_eq!(config["inbounds"][0]["type"], "socks");
         assert_eq!(config["inbounds"][0]["listen"], "127.0.0.1");
         assert_eq!(config["inbounds"][0]["listen_port"], 12345);
+        let users = config["inbounds"][0]["users"].as_array().expect("SOCKS users");
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0]["username"].as_str().unwrap().len(), 32);
+        assert_eq!(users[0]["password"].as_str().unwrap().len(), 32);
+        assert_ne!(users[0]["username"], users[0]["password"]);
+        let second_config = build_probe_config(&profile, &credentials, 12346).unwrap();
+        assert_ne!(users[0]["username"], second_config["inbounds"][0]["users"][0]["username"]);
+        assert_ne!(users[0]["password"], second_config["inbounds"][0]["users"][0]["password"]);
         assert_eq!(config["outbounds"][0]["type"], "trojan");
         assert_eq!(config["outbounds"][0]["password"], "secret");
         assert!(config.get("tun").is_none());
@@ -1618,7 +1654,13 @@ pub async fn validate_profile_config(
         return Err("The sing-box engine or its required Windows runtime libraries are missing; reinstall the engine.".to_string());
     }
 
-    let config = build_probe_config(profile, credentials, 17381)?;
+    let socks_credentials = ProbeSocksCredentials::generate();
+    let config = build_probe_config_with_socks_auth(
+        profile,
+        credentials,
+        17381,
+        &socks_credentials,
+    )?;
     let cache = app
         .path()
         .app_cache_dir()
@@ -1665,7 +1707,7 @@ pub async fn validate_profile_config(
         Ok(output) if output.status.success() => Ok(()),
         Ok(output) => {
             let diagnostic = String::from_utf8_lossy(&output.stderr);
-            Err(redact_diagnostic(&diagnostic, credentials))
+            Err(redact_probe_diagnostic(&diagnostic, credentials, &socks_credentials))
         }
     }
 }
@@ -1686,6 +1728,22 @@ fn redact_diagnostic(
     }
 }
 
+fn redact_probe_diagnostic(
+    diagnostic: &str,
+    profile_credentials: &BTreeMap<String, String>,
+    socks_credentials: &ProbeSocksCredentials,
+) -> String {
+    let mut all_credentials = profile_credentials.clone();
+    all_credentials.insert(
+        "probe_socks_username".to_string(),
+        socks_credentials.username.clone(),
+    );
+    all_credentials.insert(
+        "probe_socks_password".to_string(),
+        socks_credentials.password.clone(),
+    );
+    redact_diagnostic(diagnostic, &all_credentials)
+}
 
 #[derive(Debug, Clone)]
 pub struct ProbeOutcome {
@@ -1775,7 +1833,13 @@ pub async fn measure_real_delay(
     }
 
     let port = pick_loopback_port()?;
-    let config = match build_probe_config(profile, credentials, port) {
+    let socks_credentials = ProbeSocksCredentials::generate();
+    let config = match build_probe_config_with_socks_auth(
+        profile,
+        credentials,
+        port,
+        &socks_credentials,
+    ) {
         Ok(config) => config,
         Err(detail) => {
             return Ok(ProbeOutcome {
@@ -1851,7 +1915,7 @@ pub async fn measure_real_delay(
         Ok(output) if output.status.success() => output,
         Ok(output) => {
             let diagnostic = String::from_utf8_lossy(&output.stderr);
-            let detail = redact_diagnostic(&diagnostic, credentials);
+            let detail = redact_probe_diagnostic(&diagnostic, credentials, &socks_credentials);
             cleanup_probe_dir(&run_dir).await?;
             return Ok(ProbeOutcome {
                 config_status: "invalid".to_string(),
@@ -1902,7 +1966,7 @@ pub async fn measure_real_delay(
         }
         result = async {
             wait_for_local_socks(&mut child, port).await?;
-            measure_request_through_socks(port, settings).await
+            measure_request_through_socks(port, &socks_credentials, settings).await
         } => result,
     };
 
@@ -1992,10 +2056,12 @@ async fn wait_for_local_socks_with_timeout(
 
 async fn measure_request_through_socks(
     port: u16,
+    socks_credentials: &ProbeSocksCredentials,
     settings: &crate::real_delay_settings::RealDelaySettings,
 ) -> Result<(u64, String), String> {
     let client = build_probe_http_client(
         port,
+        socks_credentials,
         Duration::from_secs(settings.timeout_seconds),
     )?;
     measure_request_with_client(
@@ -2007,9 +2073,15 @@ async fn measure_request_through_socks(
 
 fn build_probe_http_client(
     port: u16,
+    socks_credentials: &ProbeSocksCredentials,
     request_timeout: Duration,
 ) -> Result<reqwest::Client, String> {
-    let proxy = reqwest::Proxy::all(format!("socks5h://127.0.0.1:{port}"))
+    // UUID hex characters are URL-safe in the SOCKS proxy URI.
+    let proxy = reqwest::Proxy::all(format!(
+        "socks5h://{}:{}@127.0.0.1:{port}",
+        socks_credentials.username,
+        socks_credentials.password
+    ))
         .map_err(|_| "Could not configure the isolated SOCKS5 probe proxy.".to_string())?;
     reqwest::Client::builder()
         .proxy(proxy)
@@ -2940,9 +3012,27 @@ mod runtime_guard_tests {
     fn diagnostics_redact_short_credentials() {
         let credentials = BTreeMap::from([("password".to_string(), "s3!".to_string())]);
         let diagnostic = redact_diagnostic("invalid password value: s3!", &credentials);
-
         assert!(!diagnostic.contains("s3!"));
         assert!(diagnostic.contains("[redacted]"));
+    }
+
+    #[test]
+    fn diagnostics_redact_ephemeral_socks_credentials() {
+        let profile_credentials =
+            BTreeMap::from([("password".to_string(), "profile-secret".to_string())]);
+        let socks_credentials = ProbeSocksCredentials {
+            username: "temporary-user".to_string(),
+            password: "temporary-password".to_string(),
+        };
+        let diagnostic = redact_probe_diagnostic(
+            "temporary-user temporary-password profile-secret",
+            &profile_credentials,
+            &socks_credentials,
+        );
+        assert!(!diagnostic.contains("temporary-user"));
+        assert!(!diagnostic.contains("temporary-password"));
+        assert!(!diagnostic.contains("profile-secret"));
+        assert_eq!(diagnostic.matches("[redacted]").count(), 3);
     }
 }
 
@@ -2952,6 +3042,84 @@ mod socks_probe_cancellation_tests {
     use super::*;
     use std::io::{Read, Write};
     use std::sync::mpsc::{self, Receiver};
+
+    fn test_socks_credentials() -> ProbeSocksCredentials {
+        ProbeSocksCredentials {
+            username: "test-probe-user".to_string(),
+            password: "test-probe-password".to_string(),
+        }
+    }
+
+    // Minimal SOCKS5 username/password (RFC 1929) server-side handshake.
+    fn authenticate_socks5_client(stream: &mut std::net::TcpStream) -> bool {
+        let mut greeting = [0_u8; 2];
+        if stream.read_exact(&mut greeting).is_err() || greeting[0] != 5 {
+            return false;
+        }
+        let mut methods = vec![0_u8; greeting[1] as usize];
+        if stream.read_exact(&mut methods).is_err() {
+            return false;
+        }
+        if !methods.contains(&2) {
+            let _ = stream.write_all(&[5, 0xff]);
+            return false;
+        }
+        if stream.write_all(&[5, 2]).is_err() {
+            return false;
+        }
+
+        let mut auth_header = [0_u8; 2];
+        if stream.read_exact(&mut auth_header).is_err() || auth_header[0] != 1 {
+            return false;
+        }
+        let mut username = vec![0_u8; auth_header[1] as usize];
+        if stream.read_exact(&mut username).is_err() {
+            return false;
+        }
+        let mut password_length = [0_u8; 1];
+        if stream.read_exact(&mut password_length).is_err() {
+            return false;
+        }
+        let mut password = vec![0_u8; password_length[0] as usize];
+        if stream.read_exact(&mut password).is_err() {
+            return false;
+        }
+
+        let expected = test_socks_credentials();
+        let accepted = username == expected.username.as_bytes()
+            && password == expected.password.as_bytes();
+        let _ = stream.write_all(&[1, if accepted { 0 } else { 1 }]);
+        accepted
+    }
+
+    fn start_socks_auth_only_server() -> (
+        u16,
+        Receiver<bool>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
+            .expect("bind SOCKS5 auth-only test server");
+        let port = listener.local_addr().expect("read auth-only server port").port();
+        let (tx, rx) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept auth-only test client");
+            stream.set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set bounded auth-only timeout");
+            let accepted = authenticate_socks5_client(&mut stream);
+            tx.send(accepted).expect("publish auth-only result");
+        });
+        (port, rx, server)
+    }
+
+    fn build_unauthenticated_test_client(port: u16) -> reqwest::Client {
+        let proxy = reqwest::Proxy::all(format!("socks5h://127.0.0.1:{port}"))
+            .expect("build no-auth test proxy");
+        reqwest::Client::builder()
+            .proxy(proxy)
+            .timeout(Duration::from_secs(3))
+            .build()
+            .expect("build no-auth test client")
+    }
 
     fn start_stalled_socks_proxy() -> (
         u16,
@@ -2971,13 +3139,10 @@ mod socks_probe_cancellation_tests {
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .expect("set bounded proxy read timeout");
 
-            let mut greeting = [0_u8; 2];
-            stream.read_exact(&mut greeting).expect("read SOCKS5 greeting");
-            assert_eq!(greeting[0], 5, "client must negotiate SOCKS5");
-            let mut methods = vec![0_u8; greeting[1] as usize];
-            stream.read_exact(&mut methods).expect("read SOCKS5 methods");
-            assert!(methods.contains(&0), "client must offer no-auth SOCKS5");
-            stream.write_all(&[5, 0]).expect("accept no-auth SOCKS5");
+            assert!(
+                authenticate_socks5_client(&mut stream),
+                "probe client must authenticate with the expected one-time SOCKS5 credentials"
+            );
 
             let mut request = [0_u8; 4];
             stream.read_exact(&mut request).expect("read SOCKS5 CONNECT request");
@@ -3053,13 +3218,10 @@ mod socks_probe_cancellation_tests {
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .expect("set bounded response proxy read timeout");
 
-            let mut greeting = [0_u8; 2];
-            stream.read_exact(&mut greeting).expect("read SOCKS5 greeting");
-            assert_eq!(greeting[0], 5, "client must negotiate SOCKS5");
-            let mut methods = vec![0_u8; greeting[1] as usize];
-            stream.read_exact(&mut methods).expect("read SOCKS5 methods");
-            assert!(methods.contains(&0), "client must offer no-auth SOCKS5");
-            stream.write_all(&[5, 0]).expect("accept no-auth SOCKS5");
+            assert!(
+                authenticate_socks5_client(&mut stream),
+                "probe client must authenticate with the expected one-time SOCKS5 credentials"
+            );
 
             let mut request = [0_u8; 4];
             stream.read_exact(&mut request).expect("read SOCKS5 CONNECT request");
@@ -3123,13 +3285,48 @@ mod socks_probe_cancellation_tests {
     }
 
     #[tokio::test]
+    async fn rejects_missing_and_incorrect_socks5_credentials() {
+        const URL: &str = "http://probe.invalid/generate_204";
+
+        for use_incorrect_credentials in [false, true] {
+            let (port, auth_result, server) = start_socks_auth_only_server();
+            let client = if use_incorrect_credentials {
+                let invalid_credentials = ProbeSocksCredentials {
+                    username: "wrong-probe-user".to_string(),
+                    password: "wrong-probe-password".to_string(),
+                };
+                build_probe_http_client(port, &invalid_credentials, Duration::from_secs(3))
+                    .expect("build deliberately invalid SOCKS credentials client")
+            } else {
+                build_unauthenticated_test_client(port)
+            };
+
+            let error = measure_request_with_client(&client, &[URL])
+                .await
+                .expect_err("missing or incorrect SOCKS credentials must be rejected");
+            assert!(
+                error.contains("could not connect through the proxy")
+                    || error.contains("failed through the proxy"),
+                "authentication failure must not be reported as success: {error}"
+            );
+            assert!(
+                !receive_signal(auth_result).await,
+                "the SOCKS server must reject missing or incorrect credentials"
+            );
+            drop(client);
+            server.join().expect("join SOCKS auth-only test server");
+        }
+    }
+
+    #[tokio::test]
     async fn http_204_through_controlled_socks_proxy_returns_measured_delay() {
         const URL: &str = "http://probe.invalid/generate_204";
         const RESPONSE: &[u8] =
             b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 
+        let socks_credentials = test_socks_credentials();
         let (port, request_seen, server) = start_socks_proxy_with_http_response(RESPONSE);
-        let client = build_probe_http_client(port, Duration::from_secs(3))
+        let client = build_probe_http_client(port, &socks_credentials, Duration::from_secs(3))
             .expect("build controlled HTTP probe client");
 
         let (delay_ms, tested_url) = measure_request_with_client(&client, &[URL])
@@ -3157,8 +3354,9 @@ mod socks_probe_cancellation_tests {
         ];
 
         for (label, response) in RESPONSES {
+            let socks_credentials = test_socks_credentials();
             let (port, request_seen, server) = start_socks_proxy_with_http_response(response);
-            let client = build_probe_http_client(port, Duration::from_secs(3))
+            let client = build_probe_http_client(port, &socks_credentials, Duration::from_secs(3))
                 .expect("build controlled HTTP probe client");
 
             let error = measure_request_with_client(&client, &[URL])
@@ -3180,8 +3378,9 @@ mod socks_probe_cancellation_tests {
 
     #[tokio::test]
     async fn http_probe_request_times_out_inside_controlled_socks_proxy() {
+        let socks_credentials = test_socks_credentials();
         let (port, connected, disconnected, server) = start_stalled_socks_proxy();
-        let client = build_probe_http_client(port, Duration::from_secs(1))
+        let client = build_probe_http_client(port, &socks_credentials, Duration::from_secs(1))
             .expect("build test HTTP client");
         let request_client = client.clone();
         let request = tokio::spawn(async move {
@@ -3210,13 +3409,18 @@ mod socks_probe_cancellation_tests {
 
     #[tokio::test]
     async fn graceful_shutdown_cancels_http_probe_and_waits_for_socks_release() {
+        let socks_credentials = test_socks_credentials();
         let (port, connected, disconnected, server) = start_stalled_socks_proxy();
         let supervisor = ProcessSupervisor::default();
         let mut operation = supervisor
             .begin_operation()
             .expect("register active Real Delay operation");
-        let client = build_probe_http_client(port, Duration::from_secs(30))
-            .expect("build test HTTP client");
+        let client = build_probe_http_client(
+            port,
+            &socks_credentials,
+            Duration::from_secs(30),
+        )
+        .expect("build authenticated test HTTP client");
         let request_client = client.clone();
         let worker = tokio::spawn(async move {
             let cancelled = tokio::select! {
@@ -3267,9 +3471,14 @@ mod socks_probe_cancellation_tests {
 
     #[tokio::test]
     async fn cancelling_http_probe_future_releases_controlled_socks_proxy() {
+        let socks_credentials = test_socks_credentials();
         let (port, connected, disconnected, server) = start_stalled_socks_proxy();
-        let client = build_probe_http_client(port, Duration::from_secs(30))
-            .expect("build test HTTP client");
+        let client = build_probe_http_client(
+            port,
+            &socks_credentials,
+            Duration::from_secs(30),
+        )
+        .expect("build authenticated test HTTP client");
         let request_client = client.clone();
         let request = tokio::spawn(async move {
             measure_request_with_client(
@@ -3339,6 +3548,249 @@ mod engine_archive_tests {
         fs::remove_dir_all(directory).expect("remove temp directory");
     }
 }
+
+#[cfg(test)]
+mod pinned_sing_box_socks_auth_integration_tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::process::Stdio;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::process::{Child, Command};
+    use tokio::time::{sleep, timeout};
+
+    struct TemporaryDirectory(PathBuf);
+
+    impl TemporaryDirectory {
+        fn create() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "blacklist-inevitable-socks-auth-{}",
+                Uuid::new_v4()
+            ));
+            fs::create_dir_all(&path).expect("create real sing-box SOCKS auth test directory");
+            Self(path)
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TemporaryDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    struct ManagedSingBox(Child);
+
+    impl ManagedSingBox {
+        fn spawn(binary: &str, config: &std::path::Path) -> Self {
+            let child = Command::new(binary)
+                .arg("run")
+                .arg("-c")
+                .arg(config)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("start pinned sing-box SOCKS test process");
+            Self(child)
+        }
+
+        async fn stop(&mut self) {
+            match self.0.try_wait().expect("inspect pinned sing-box test process") {
+                Some(status) => assert!(
+                    status.success(),
+                    "pinned sing-box test process exited unexpectedly: {status}"
+                ),
+                None => {
+                    self.0.start_kill().expect("stop pinned sing-box test process");
+                    timeout(Duration::from_secs(5), self.0.wait())
+                        .await
+                        .expect("pinned sing-box test process did not stop")
+                        .expect("wait for pinned sing-box test process");
+                }
+            }
+        }
+    }
+
+    impl Drop for ManagedSingBox {
+        fn drop(&mut self) {
+            if self.0.try_wait().ok().flatten().is_none() {
+                let _ = self.0.start_kill();
+            }
+        }
+    }
+
+    async fn wait_for_socks(child: &mut Child, port: u16) {
+        timeout(Duration::from_secs(10), async {
+            loop {
+                if let Some(status) = child.try_wait().expect("inspect SOCKS server process") {
+                    panic!("sing-box exited before opening its SOCKS listener: {status}");
+                }
+                if let Ok(Ok(stream)) = timeout(
+                    Duration::from_millis(150),
+                    TcpStream::connect(("127.0.0.1", port)),
+                )
+                .await
+                {
+                    drop(stream);
+                    return;
+                }
+                sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("sing-box SOCKS listener did not become ready");
+    }
+
+    fn unauthenticated_client(port: u16) -> reqwest::Client {
+        let proxy = reqwest::Proxy::all(format!("socks5h://127.0.0.1:{port}"))
+            .expect("configure unauthenticated SOCKS client");
+        reqwest::Client::builder()
+            .proxy(proxy)
+            .timeout(Duration::from_secs(4))
+            .build()
+            .expect("build unauthenticated SOCKS client")
+    }
+
+    fn wrong_credentials_client(port: u16) -> reqwest::Client {
+        let proxy = reqwest::Proxy::all(format!(
+            "socks5h://wrong-probe-user:wrong-probe-password@127.0.0.1:{port}"
+        ))
+        .expect("configure wrong-credentials SOCKS client");
+        reqwest::Client::builder()
+            .proxy(proxy)
+            .timeout(Duration::from_secs(4))
+            .build()
+            .expect("build wrong-credentials SOCKS client")
+    }
+
+    #[tokio::test]
+    async fn pinned_sing_box_rejects_missing_and_wrong_credentials_but_accepts_the_one_time_pair() {
+        let Ok(binary) = std::env::var("SING_BOX_VALIDATOR") else {
+            // The Windows workflow supplies the pinned and hash-verified executable.
+            return;
+        };
+
+        let expected = ProbeSocksCredentials {
+            username: "controlled-probe-user".to_string(),
+            password: "controlled-probe-password".to_string(),
+        };
+        let port = pick_loopback_port().expect("reserve local SOCKS test port");
+        let directory = TemporaryDirectory::create();
+        let config_path = directory.path().join("sing-box-socks-auth.json");
+        let config = json!({
+            "log": {"level": "warn"},
+            "inbounds": [{
+                "type": "socks",
+                "tag": "authenticated-probe-in",
+                "listen": "127.0.0.1",
+                "listen_port": port,
+                "users": [{
+                    "username": expected.username,
+                    "password": expected.password
+                }]
+            }],
+            "outbounds": [{"type": "direct", "tag": "direct"}],
+            "route": {"final": "direct"}
+        });
+        fs::write(
+            &config_path,
+            serde_json::to_vec(&config).expect("serialize real sing-box auth config"),
+        )
+        .expect("write real sing-box auth config");
+
+        let checked = std::process::Command::new(&binary)
+            .arg("check")
+            .arg("-c")
+            .arg(&config_path)
+            .output()
+            .expect("run pinned sing-box config validation");
+        assert!(
+            checked.status.success(),
+            "pinned sing-box rejected the authenticated SOCKS inbound: {}",
+            String::from_utf8_lossy(&checked.stderr)
+        );
+
+        let origin = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind local HTTP 204 origin");
+        let origin_port = origin.local_addr().expect("read local origin port").port();
+        let origin_task = tokio::spawn(async move {
+            let (mut stream, _) = timeout(Duration::from_secs(10), origin.accept())
+                .await
+                .expect("authenticated SOCKS request did not reach local origin")
+                .expect("accept local HTTP request");
+            let mut request = [0_u8; 2048];
+            let count = timeout(Duration::from_secs(3), stream.read(&mut request))
+                .await
+                .expect("local origin request read timed out")
+                .expect("read local HTTP request");
+            assert!(count > 0, "local origin must receive an HTTP request");
+            assert!(
+                request[..count].starts_with(b"GET "),
+                "local origin must receive the probe GET request"
+            );
+            stream
+                .write_all(
+                    b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .expect("send local HTTP 204 response");
+        });
+        let url = format!("http://127.0.0.1:{origin_port}/generate_204");
+
+        let mut server = ManagedSingBox::spawn(&binary, &config_path);
+        wait_for_socks(&mut server.0, port).await;
+
+        let missing = unauthenticated_client(port)
+            .get(&url)
+            .send()
+            .await;
+        assert!(
+            missing.is_err(),
+            "the real sing-box SOCKS inbound must reject a client without credentials"
+        );
+        assert!(
+            server.0.try_wait().expect("inspect sing-box after missing auth").is_none(),
+            "sing-box must remain alive after rejecting missing credentials"
+        );
+
+        let wrong = wrong_credentials_client(port).get(&url).send().await;
+        assert!(
+            wrong.is_err(),
+            "the real sing-box SOCKS inbound must reject incorrect credentials"
+        );
+        assert!(
+            server.0.try_wait().expect("inspect sing-box after wrong auth").is_none(),
+            "sing-box must remain alive after rejecting incorrect credentials"
+        );
+
+        let authenticated = build_probe_http_client(port, &expected, Duration::from_secs(4))
+            .expect("build application SOCKS client with the one-time pair");
+        let response = authenticated
+            .get(&url)
+            .send()
+            .await
+            .expect("sing-box must accept the matching one-time SOCKS credentials");
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::NO_CONTENT,
+            "the authenticated request must reach the controlled local HTTP origin"
+        );
+        drop(response);
+        drop(authenticated);
+
+        timeout(Duration::from_secs(5), origin_task)
+            .await
+            .expect("local HTTP origin task did not finish")
+            .expect("local HTTP origin task panicked");
+        server.stop().await;
+    }
+}
+
 
 
 #[cfg(test)]

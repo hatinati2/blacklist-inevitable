@@ -464,6 +464,7 @@ mod platform {
     }
 
     pub fn create_private_file(path: &Path, contents: &[u8]) -> Result<(), String> {
+        let mut created = false;
         let result = (|| {
             let mut file = fs::OpenOptions::new()
                 .write(true)
@@ -471,11 +472,14 @@ mod platform {
                 .mode(0o600)
                 .open(path)
                 .map_err(|_| "A private preflight configuration file could not be created.".to_string())?;
+            created = true;
             file.write_all(contents)
                 .and_then(|_| file.sync_all())
                 .map_err(|_| "The private preflight configuration could not be written.".to_string())
         })();
-        if result.is_err() {
+        // Never unlink a path that we failed to create: it may belong to another
+        // operation and CREATE_NEW is specifically intended to preserve it.
+        if result.is_err() && created {
             let _ = fs::remove_file(path);
         }
         result

@@ -344,8 +344,7 @@ function ConvertFrom-NetshDnsClientDump {
         $text = [string]$line
         $commandMatch = [regex]::Match(
             $text,
-            '^\s*(?:(?:netsh)\s+)?(?:dnsclient\s+)?(?<verb>set|add|delete)\s+(?<section>dnsserver|encryption|global|interface)\b(?<arguments>.*)
-,
+            '^\s*(?:(?:netsh)\s+)?(?:dnsclient\s+)?(?<verb>set|add|delete)\s+(?<section>dnsserver|encryption|global|interface)\b(?<arguments>.*)',
             [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
         )
         if (-not $commandMatch.Success) {

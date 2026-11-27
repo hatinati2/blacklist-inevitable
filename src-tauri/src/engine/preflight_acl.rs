@@ -12,14 +12,13 @@ use std::path::Path;
 #[cfg(windows)]
 mod platform {
     use super::*;
-    use std::ffi::OsStr;
-    use std::iter::once;
+        use std::iter::once;
     use std::mem::zeroed;
     use std::os::windows::ffi::OsStrExt;
     use std::ptr::{null, null_mut};
     use windows_sys::Win32::Foundation::{
         CloseHandle, GetLastError, LocalFree, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND,
-        ERROR_PATH_NOT_FOUND, HANDLE, INVALID_HANDLE_VALUE,
+        ERROR_PATH_NOT_FOUND, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
     };
     use windows_sys::Win32::Security::{
         GetTokenInformation, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser,
@@ -36,7 +35,7 @@ mod platform {
         WriteFile, BY_HANDLE_FILE_INFORMATION, CREATE_NEW, FILE_ATTRIBUTE_DIRECTORY,
         FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
         FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
-        FILE_SHARE_READ, FILE_SHARE_WRITE, GENERIC_WRITE, OPEN_EXISTING,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, READ_CONTROL,
     };
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
@@ -131,7 +130,7 @@ mod platform {
     }
 
     fn wide_path(path: &Path) -> Vec<u16> {
-        OsStr::new(path)
+        path.as_os_str()
             .encode_wide()
             .chain(once(0))
             .collect()
@@ -157,7 +156,9 @@ mod platform {
                 return Err("The current Windows user SID could not be read.".into());
             }
 
-            let mut buffer = vec![0u8; required as usize];
+            // TOKEN_USER contains pointer-aligned fields; a byte Vec is not guaranteed
+            // to meet the alignment requirement on every allocator/platform.
+            let mut buffer = vec![0u64; (required as usize + 7) / 8];
             if GetTokenInformation(
                 token.0,
                 TokenUser,
@@ -248,7 +249,7 @@ mod platform {
         let handle = unsafe {
             CreateFileW(
                 path_wide.as_ptr(),
-                FILE_READ_ATTRIBUTES | windows_sys::Win32::Security::READ_CONTROL,
+                FILE_READ_ATTRIBUTES | READ_CONTROL,
                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                 null(),
                 OPEN_EXISTING,
@@ -310,7 +311,7 @@ mod platform {
         let raw_handle = unsafe {
             CreateFileW(
                 path_wide.as_ptr(),
-                GENERIC_WRITE | windows_sys::Win32::Security::READ_CONTROL,
+                GENERIC_WRITE | READ_CONTROL,
                 0,
                 &attributes,
                 CREATE_NEW,

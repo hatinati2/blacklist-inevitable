@@ -225,7 +225,7 @@ fn make_cases(certificate: &Path, private_key: &Path) -> Vec<ProtocolCase> {
         network: Network::Tcp,
     });
 
-    let port = tcp_port();
+    let port = tcp_port(&mut used_tcp_ports);
     let tls = inbound_tls(certificate, private_key, &[]);
     cases.push(ProtocolCase {
         label: "vmess-websocket-tls",
@@ -242,7 +242,7 @@ fn make_cases(certificate: &Path, private_key: &Path) -> Vec<ProtocolCase> {
         network: Network::Tcp,
     });
 
-    let port = tcp_port();
+    let port = tcp_port(&mut used_tcp_ports);
     let tls = inbound_tls(certificate, private_key, &[]);
     cases.push(ProtocolCase {
         label: "trojan-tls",
@@ -256,7 +256,7 @@ fn make_cases(certificate: &Path, private_key: &Path) -> Vec<ProtocolCase> {
         network: Network::Tcp,
     });
 
-    let port = tcp_port();
+    let port = tcp_port(&mut used_tcp_ports);
     cases.push(ProtocolCase {
         label: "shadowsocks-aes-256-gcm",
         profile: profile("shadowsocks", port, &[("method", "aes-256-gcm")]),
@@ -289,7 +289,7 @@ fn make_cases(certificate: &Path, private_key: &Path) -> Vec<ProtocolCase> {
         network: Network::Udp,
     });
 
-    let port = udp_port();
+    let port = udp_port(&mut used_udp_ports);
     let tls = inbound_tls(certificate, private_key, &["h3"]);
     cases.push(ProtocolCase {
         label: "tuic",
@@ -309,7 +309,7 @@ fn make_cases(certificate: &Path, private_key: &Path) -> Vec<ProtocolCase> {
         network: Network::Udp,
     });
 
-    let port = tcp_port();
+    let port = tcp_port(&mut used_tcp_ports);
     let tls = inbound_tls(certificate, private_key, &["h2"]);
     cases.push(ProtocolCase {
         label: "naive-https",
@@ -330,7 +330,7 @@ fn make_cases(certificate: &Path, private_key: &Path) -> Vec<ProtocolCase> {
         network: Network::Tcp,
     });
 
-    let port = udp_port();
+    let port = udp_port(&mut used_udp_ports);
     let tls = inbound_tls(certificate, private_key, &["h3"]);
     cases.push(ProtocolCase {
         label: "naive-quic",

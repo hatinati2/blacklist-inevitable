@@ -12,7 +12,9 @@ function ConvertFrom-NetshInterfaceDnsDump {
     )
 
     $records = @()
+    $unrecognizedRecords = @()
     $unrecognizedLineCount = 0
+    $identityPattern = '^\s*set\s+dnsservers\s+(?:name=)?(?:"(?<quotedName>[^"]*)"|(?<bareName>[^\s]+))(?:\s+source=(?<source>[^\s]+))?'
     $pattern = '^\s*set\s+dnsservers\s+(?:name=)?(?:"(?<quotedName>[^"]*)"|(?<bareName>[^\s]+))\s+source=(?<source>dhcp|static)(?:\s|$)'
 
     foreach ($line in $Lines) {
@@ -27,7 +29,27 @@ function ConvertFrom-NetshInterfaceDnsDump {
             [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
         )
         if (-not $match.Success) {
-            $unrecognizedLineCount++
+            $identityMatch = [regex]::Match(
+                $text,
+                $identityPattern,
+                [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+            )
+            if (-not $identityMatch.Success) {
+                # The malformed set command cannot be attributed to an adapter;
+                # fail closed for this family rather than risk a wrong mapping.
+                $unrecognizedLineCount++
+                continue
+            }
+            $invalidAlias = if ($identityMatch.Groups["quotedName"].Success) {
+                $identityMatch.Groups["quotedName"].Value
+            }
+            else {
+                $identityMatch.Groups["bareName"].Value
+            }
+            $unrecognizedRecords += [pscustomobject]@{
+                interfaceAlias = $invalidAlias
+                sourceToken = if ($identityMatch.Groups["source"].Success) { $identityMatch.Groups["source"].Value } else { $null }
+            }
             continue
         }
 
@@ -56,6 +78,7 @@ function ConvertFrom-NetshInterfaceDnsDump {
     return [pscustomobject]@{
         addressFamily = $AddressFamily
         records = @($records)
+        unrecognizedRecords = @($unrecognizedRecords)
         unrecognizedLineCount = $unrecognizedLineCount
     }
 }
@@ -76,7 +99,21 @@ function Get-NetshInterfaceDnsSourceForAdapter {
             sourceMode = "Unknown"
             sourceToken = $null
             interfaceAlias = $InterfaceAlias
-            reason = "One or more DNS source statements in the dump could not be parsed."
+            reason = "One or more DNS source statements could not be attributed to a specific adapter."
+        }
+    }
+
+    $invalidMatches = @(
+        $ParsedEvidence.unrecognizedRecords |
+            Where-Object { [string]$_.interfaceAlias -ieq $InterfaceAlias }
+    )
+    if ($invalidMatches.Count -gt 0) {
+        return [pscustomobject]@{
+            state = "unknown"
+            sourceMode = "Unknown"
+            sourceToken = $null
+            interfaceAlias = $InterfaceAlias
+            reason = "The source statement for this adapter is malformed or uses an unsupported source token."
         }
     }
 

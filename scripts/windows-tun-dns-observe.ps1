@@ -140,6 +140,149 @@ function Get-SelectedProperties {
     }
 }
 
+
+function Convert-RegistryValueForEvidence {
+    param([AllowNull()][object]$Value)
+
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [byte[]]) {
+        return [Convert]::ToBase64String($Value)
+    }
+    if ($Value -is [string[]]) {
+        return ,@($Value)
+    }
+    if ($Value -is [string] -or $Value -is [bool] -or $Value -is [ValueType]) {
+        return $Value
+    }
+    return [string]$Value
+}
+
+function Get-InterfaceRegistryDohEvidence {
+    param([AllowNull()][string]$InterfaceGuid)
+
+    if ([string]::IsNullOrWhiteSpace($InterfaceGuid)) {
+        return [pscustomobject]@{
+            state = "unknown"
+            error = "InterfaceGuid is unavailable; the per-interface registry path cannot be derived."
+            families = @()
+        }
+    }
+
+    $parsedGuid = [guid]::Empty
+    if (-not [guid]::TryParse($InterfaceGuid, [ref]$parsedGuid)) {
+        return [pscustomobject]@{
+            state = "unknown"
+            error = "InterfaceGuid is malformed; the per-interface registry path cannot be derived."
+            families = @()
+        }
+    }
+
+    $interfaceKey = $null
+    $baseKey = $null
+    try {
+        $guidKey = "{" + $parsedGuid.ToString() + "}"
+        $registryPath = "SYSTEM\CurrentControlSet\Services\Dnscache\InterfaceSpecificParameters\$guidKey\DohInterfaceSettings"
+        $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+            [Microsoft.Win32.RegistryHive]::LocalMachine,
+            [Microsoft.Win32.RegistryView]::Default
+        )
+        $interfaceKey = $baseKey.OpenSubKey($registryPath, $false)
+
+        if ($null -eq $interfaceKey) {
+            return [pscustomobject]@{
+                state = "absent"
+                error = $null
+                families = @(
+                    [pscustomobject]@{ family = "IPv4"; branch = "Doh"; state = "absent"; servers = @() },
+                    [pscustomobject]@{ family = "IPv6"; branch = "Doh6"; state = "absent"; servers = @() }
+                )
+            }
+        }
+
+        $families = @()
+        foreach ($family in @(
+            [pscustomobject]@{ name = "IPv4"; branch = "Doh" },
+            [pscustomobject]@{ name = "IPv6"; branch = "Doh6" }
+        )) {
+            $familyKey = $null
+            try {
+                $familyKey = $interfaceKey.OpenSubKey($family.branch, $false)
+                if ($null -eq $familyKey) {
+                    $families += [pscustomobject]@{
+                        family = $family.name
+                        branch = $family.branch
+                        state = "absent"
+                        servers = @()
+                    }
+                    continue
+                }
+
+                $servers = @()
+                foreach ($serverAddress in @($familyKey.GetSubKeyNames() | Sort-Object)) {
+                    $serverKey = $null
+                    try {
+                        $serverKey = $familyKey.OpenSubKey($serverAddress, $false)
+                        if ($null -eq $serverKey) {
+                            throw "The DoH registry subkey disappeared during observation."
+                        }
+
+                        $values = @()
+                        foreach ($valueName in @($serverKey.GetValueNames() | Sort-Object)) {
+                            $rawValue = $serverKey.GetValue(
+                                $valueName,
+                                $null,
+                                [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
+                            )
+                            $valueKind = $serverKey.GetValueKind($valueName)
+                            $values += [pscustomobject]@{
+                                name = $valueName
+                                kind = [string]$valueKind
+                                value = Convert-RegistryValueForEvidence -Value $rawValue
+                            }
+                        }
+
+                        $servers += [pscustomobject]@{
+                            serverAddress = $serverAddress
+                            values = @($values)
+                        }
+                    }
+                    finally {
+                        if ($null -ne $serverKey) { $serverKey.Dispose() }
+                    }
+                }
+
+                $families += [pscustomobject]@{
+                    family = $family.name
+                    branch = $family.branch
+                    state = "present"
+                    servers = @($servers)
+                }
+            }
+            finally {
+                if ($null -ne $familyKey) { $familyKey.Dispose() }
+            }
+        }
+
+        $anyPresent = @($families | Where-Object { $_.state -eq "present" }).Count -gt 0
+        return [pscustomobject]@{
+            state = if ($anyPresent) { "present" } else { "absent" }
+            error = $null
+            families = @($families)
+        }
+    }
+    catch {
+        return [pscustomobject]@{
+            state = "error"
+            error = $_.Exception.Message
+            families = @()
+        }
+    }
+    finally {
+        if ($null -ne $interfaceKey) { $interfaceKey.Dispose() }
+        if ($null -ne $baseKey) { $baseKey.Dispose() }
+    }
+}
+
 function Get-DnsObservation {
     $osCapture = Invoke-ReadOnlyCapture -CommandName "Get-CimInstance" -Action {
         Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
@@ -231,10 +374,14 @@ function Get-DnsObservation {
                 macAddress = [string]$adapter.MacAddress
                 dnsServerAddresses = @($serverRecords)
                 dnsClientSettings = @($clientRecords)
+                # This is a version-sensitive, read-only registry cross-check.
+                # It is not an authoritative or supported DNS restore contract.
+                registryDohEvidence = Get-InterfaceRegistryDohEvidence -InterfaceGuid $guid
             }
         }
     }
 
+    $registryDohErrors = @($adapters | Where-Object { $_.registryDohEvidence.state -in @("error", "unknown") })
     $globalSettings = @()
     if ($globalCapture.succeeded) {
         $globalSettings = @(
@@ -302,6 +449,11 @@ function Get-DnsObservation {
             getDnsClientGlobalSetting = [pscustomobject]@{ available = $globalCapture.available; succeeded = $globalCapture.succeeded; error = $globalCapture.error }
             getDnsClientDohServerAddress = [pscustomobject]@{ available = $dohCapture.available; succeeded = $dohCapture.succeeded; error = $dohCapture.error }
             getDnsClientNrptRule = [pscustomobject]@{ available = $nrptCapture.available; succeeded = $nrptCapture.succeeded; error = $nrptCapture.error }
+            registryDoh = [pscustomobject]@{
+                available = $adapterCapture.succeeded
+                succeeded = ($adapterCapture.succeeded -and $registryDohErrors.Count -eq 0)
+                error = if ($registryDohErrors.Count -gt 0) { "One or more adapters returned incomplete or inaccessible per-interface DoH registry evidence." } else { $null }
+            }
             netshDnsClientDump = [pscustomobject]@{ available = $netshDump.available; succeeded = $netshDump.succeeded; exitCode = $netshDump.exitCode; error = $netshDump.error }
             netshDnsClientShowGlobal = [pscustomobject]@{ available = $netshGlobal.available; succeeded = $netshGlobal.succeeded; exitCode = $netshGlobal.exitCode; error = $netshGlobal.error }
             netshDnsClientShowState = [pscustomobject]@{ available = $netshState.available; succeeded = $netshState.succeeded; exitCode = $netshState.exitCode; error = $netshState.error }
@@ -322,6 +474,7 @@ function Get-DnsObservation {
             "Get-DnsClientDohServerAddress is a system known-server inventory, not the adapter/profile DoH property arrays in DNS_INTERFACE_SETTINGS3.",
             "Get-DnsClientServerAddress reports configured address lists, not a complete adapter/profile recovery snapshot.",
             "The DHCP-versus-static DNS source mode is retained in raw netsh output for manual review and is not automatically compared by this probe.",
+            "Per-interface registry Doh/Doh6 keys are read-only diagnostic evidence; their presence, absence, and value layout are not treated as a supported complete DoH snapshot or restore contract.",
             "This observation does not prove DNS packet containment or absence of leaks; packet capture and live Windows acceptance are separate gates.",
             "netsh dnsclient dump output is evidence only. It is not executed or accepted as a canonical restorable snapshot by this script."
         )
@@ -390,6 +543,7 @@ $requiredCollectors = @(
     "getDnsClientGlobalSetting",
     "getDnsClientDohServerAddress",
     "getDnsClientNrptRule",
+    "registryDoh",
     "netshDnsClientDump"
 )
 
@@ -451,6 +605,12 @@ foreach ($id in $baselineIds) {
     }
     if ((ConvertTo-ComparableJson $before.dnsClientSettings) -ne (ConvertTo-ComparableJson $after.dnsClientSettings)) {
         $changes += "Per-interface DNS Client settings changed on physical adapter $id."
+    }
+    if ($before.registryDohEvidence.state -in @("error", "unknown") -or $after.registryDohEvidence.state -in @("error", "unknown")) {
+        $unknown += "Per-interface registry DoH evidence is incomplete for physical adapter $id."
+    }
+    elseif ((ConvertTo-ComparableJson $before.registryDohEvidence) -ne (ConvertTo-ComparableJson $after.registryDohEvidence)) {
+        $changes += "Read-only registry DoH evidence changed on physical adapter $id."
     }
 }
 
@@ -545,7 +705,7 @@ $result = [pscustomobject]@{
     schemaVersion = 1
     comparedAtUtc = [DateTime]::UtcNow.ToString("o")
     status = $status
-    meaning = "PASS means only that the observed physical-adapter DNS server lists, selected DNS Client fields, and selected global DNS evidence were unchanged. DHCP/static source mode is not automatically compared. This is not proof of DNS leak freedom or a complete restorable DNS snapshot."
+    meaning = "PASS means only that the observed physical-adapter DNS server lists, selected DNS Client fields, selected read-only registry DoH evidence, and selected global DNS evidence were unchanged. DHCP/static source mode is not automatically compared. Registry DoH data is diagnostic only. This is not proof of DNS leak freedom or a complete restorable DNS snapshot."
     baselinePath = [System.IO.Path]::GetFullPath($BaselinePath)
     changes = @($changes)
     unknown = @($unknown)

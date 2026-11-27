@@ -506,7 +506,13 @@ function ConvertFrom-NetshDnsClientDump {
                         else {
                             $dotHostValue = [string]$tokens["dothost"]
                             if ($dotHostValue -ne ":") {
-                                $dotHostMatch = [regex]::Match($dotHostValue, '^(?<host>[^:\s]+):(?<port>[0-9]{1,5})
+                                $dotHostMatch = [regex]::Match($dotHostValue, '^(?<host>[^:\s]+):(?<port>[0-9]{1,5})')
+                                $dotPort = 0
+                                if (-not $dotHostMatch.Success -or $dotHostMatch.Length -ne $dotHostValue.Length -or
+                                    -not [int]::TryParse([string]$dotHostMatch.Groups["port"].Value, [ref]$dotPort) -or
+                                    $dotPort -lt 1 -or $dotPort -gt 65535) {
+                                    $reason = "The DoT host must be a hostname and valid port, or the documented default ':' value."
+                                }
                     }
                     foreach ($booleanOption in @("autoupgrade", "udpfallback")) {
                         if ($null -eq $reason -and $tokens.Contains($booleanOption) -and $tokens[$booleanOption].ToLowerInvariant() -notin @("yes", "no")) {

@@ -791,6 +791,124 @@ mod tests {
     }
 
     #[test]
+    fn validates_all_supported_profile_outbounds_with_pinned_sing_box_binary() {
+        let Ok(binary) = std::env::var("SING_BOX_VALIDATOR") else {
+            // Local test runs may omit the pinned Windows engine; CI always sets it.
+            return;
+        };
+
+        struct TemporaryConfigDirectory(std::path::PathBuf);
+        impl Drop for TemporaryConfigDirectory {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+
+        let directory = std::env::temp_dir().join(format!(
+            "blacklist-profile-outbound-validation-{}",
+            Uuid::new_v4()
+        ));
+        fs::create_dir_all(&directory).expect("create temporary validation directory");
+        let _directory_guard = TemporaryConfigDirectory(directory.clone());
+
+        let cases: Vec<(&str, ProfileSummary, BTreeMap<String, String>)> = {
+            let mut vless = sample_profile("vless");
+            vless.options = BTreeMap::from([
+                ("security".to_string(), "tls".to_string()),
+                ("sni".to_string(), "vless.example.org".to_string()),
+            ]);
+
+            let mut vmess = sample_profile("vmess");
+            vmess.options = BTreeMap::from([
+                ("tls".to_string(), "tls".to_string()),
+                ("sni".to_string(), "vmess.example.org".to_string()),
+                ("transport".to_string(), "ws".to_string()),
+                ("host".to_string(), "cdn.example.org".to_string()),
+                ("path".to_string(), "/edge".to_string()),
+                ("security".to_string(), "auto".to_string()),
+            ]);
+
+            let mut trojan = sample_profile("trojan");
+            trojan.options = BTreeMap::from([
+                ("sni".to_string(), "trojan.example.org".to_string()),
+            ]);
+
+            let mut shadowsocks = sample_profile("shadowsocks");
+            shadowsocks.options = BTreeMap::from([
+                ("method".to_string(), "aes-256-gcm".to_string()),
+            ]);
+
+            let mut hysteria2 = sample_profile("hysteria2");
+            hysteria2.options = BTreeMap::from([
+                ("sni".to_string(), "hysteria.example.org".to_string()),
+                ("obfs".to_string(), "salamander".to_string()),
+            ]);
+
+            let mut tuic = sample_profile("tuic");
+            tuic.options = BTreeMap::from([
+                ("sni".to_string(), "tuic.example.org".to_string()),
+                ("alpn".to_string(), "h3".to_string()),
+                ("congestion_control".to_string(), "cubic".to_string()),
+                ("udp_relay_mode".to_string(), "native".to_string()),
+            ]);
+
+            let mut naive_https = sample_profile("naive");
+            naive_https.options = BTreeMap::from([
+                ("sni".to_string(), "naive.example.org".to_string()),
+                ("insecureConcurrency".to_string(), "2".to_string()),
+            ]);
+
+            let mut naive_quic = sample_profile("naive");
+            naive_quic.options = BTreeMap::from([
+                ("sni".to_string(), "naive-quic.example.org".to_string()),
+                ("quic".to_string(), "true".to_string()),
+            ]);
+
+            vec![
+                ("vless-tls", vless, BTreeMap::from([("uuid".to_string(), "12345678-1234-1234-1234-123456789012".to_string())])),
+                ("vmess-websocket-tls", vmess, BTreeMap::from([("uuid".to_string(), "12345678-1234-1234-1234-123456789012".to_string())])),
+                ("trojan-tls", trojan, BTreeMap::from([("password".to_string(), "test-trojan-secret".to_string())])),
+                ("shadowsocks-aes-256-gcm", shadowsocks, BTreeMap::from([("password".to_string(), "test-shadowsocks-secret".to_string())])),
+                ("hysteria2-salamander", hysteria2, BTreeMap::from([
+                    ("password".to_string(), "test-hysteria-secret".to_string()),
+                    ("obfsPassword".to_string(), "test-obfs-secret".to_string()),
+                ])),
+                ("tuic", tuic, BTreeMap::from([
+                    ("uuid".to_string(), "12345678-1234-1234-1234-123456789012".to_string()),
+                    ("password".to_string(), "test-tuic-secret".to_string()),
+                ])),
+                ("naive-https", naive_https, BTreeMap::from([
+                    ("username".to_string(), "test-naive-user".to_string()),
+                    ("password".to_string(), "test-naive-secret".to_string()),
+                ])),
+                ("naive-quic", naive_quic, BTreeMap::from([("password".to_string(), "test-naive-quic-secret".to_string())])),
+            ]
+        };
+
+        for (label, profile, credentials) in cases {
+            let config = build_probe_config(&profile, &credentials, 12345)
+                .unwrap_or_else(|error| panic!("could not build {label} config: {error}"));
+            let config_path = directory.join(format!("{label}.json"));
+            fs::write(
+                &config_path,
+                serde_json::to_vec_pretty(&config).expect("serialize profile config"),
+            )
+            .unwrap_or_else(|error| panic!("could not write {label} config: {error}"));
+
+            let output = std::process::Command::new(&binary)
+                .arg("check")
+                .arg("-c")
+                .arg(&config_path)
+                .output()
+                .unwrap_or_else(|error| panic!("could not run pinned sing-box for {label}: {error}"));
+            assert!(
+                output.status.success(),
+                "pinned sing-box v{SING_BOX_VERSION} rejected {label} config: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+    #[test]
     fn validates_all_split_tunnel_modes_with_pinned_sing_box_binary() {
         use crate::split_tunnel::{
             ApplicationRoute, SplitTunnelApplication, SplitTunnelMode, SplitTunnelPolicy,

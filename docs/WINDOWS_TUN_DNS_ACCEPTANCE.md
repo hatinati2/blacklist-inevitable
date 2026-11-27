@@ -54,7 +54,7 @@ The helper uses `InterfaceGuid` to correlate physical adapters and does not use 
 
 ## Result interpretation
 
-- `PASS`: only the observed physical-adapter DNS server lists, selected per-interface DNS Client settings, and selected global DNS evidence were unchanged.
+- `PASS`: only the observed physical-adapter DNS server lists, selected per-interface DNS Client settings, read-only per-interface registry DoH evidence, and selected global DNS evidence were unchanged.
 - `FAIL`: one or more observed physical-adapter/global DNS values changed.
 - `UNKNOWN`: a required collector failed, physical-adapter identity could not be correlated, or the requested virtual TUN adapter could not be identified.
 

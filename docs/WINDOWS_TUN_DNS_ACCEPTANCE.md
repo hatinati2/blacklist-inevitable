@@ -81,17 +81,32 @@ The JSON also records:
 - per-family `Get-NetIPInterface` DHCP/router-discovery/managed-address/other-stateful properties. The native CIM `AddressFamily` value is normalized (`2` = IPv4, `23` = IPv6) while its raw value is preserved;
 - IPv6 `routerdiscovery`, `managedaddress`, `otherstateful`, `rabaseddnsconfig`, and `dhcpstaticipcoexistence` configuration policy parsed from the read-only IPv6 interface dump;
 - global suffix-search settings, the system DoH known-server inventory, and NRPT rules where available;
-- raw `netsh dnsclient dump`, `show global`, `show state`, and `show encryption` output as review-only evidence;
+- raw `netsh dnsclient dump`, `show global`, `show state`, and `show encryption` output as review-only evidence; the DNS Client dump is also parsed into supplemental structured statements where its syntax is documented;
 - raw `netsh interface ipv4/ipv6 dump` output as review-only evidence; the helper parses only the `set dnsservers ... source=dhcp|static` token and never executes dump output;
 - per-interface registry `Doh` (IPv4) and `Doh6` (IPv6) subkeys and each value's registry type as read-only forensic evidence.
 
+## Supplemental DNS Client dump parser
+
+Snapshot schema version 5 adds evidence.netshDnsClientDumpParsed while continuing to retain the raw netsh dnsclient dump lines. The parser is read-only and accepts only documented command forms:
+- set / add dnsserver: interface alias, DHCP/static source, server IP address, optional order index, dynamic-registration mode, and validation flag;
+- set / add encryption: server IP, DoH template and/or DoT host, automatic-upgrade flag, and UDP fallback flag;
+- set / add global: global DoH, DoT, and DDR settings;
+- set / add interface: per-interface DDR and DDR-fallback settings.
+
+The parser keeps commands in source order rather than inventing a normalized effective resolver list. It records parsed IP address family where an address is present. It does not replay, evaluate, or otherwise execute the emitted script. Unsupported delete statements and malformed/duplicate/unknown options are explicit incomplete evidence. A dump with no recognized configuration statements is unknown, not an inferred default configuration.
+
+This data is supplemental only: the parser does not resolve interface aliases to stable GUID/NET_LUID identities, does not compare the parsed output as authoritative state, and does not establish profile DNS, separate complete IPv4/IPv6 interface state, complete per-server DoH associations, or a supported restore contract. It cannot change a comparison to PASS and must not be used to authorize DNS recovery. The parser grammar is fixture-tested in Windows CI; capture and field-by-field comparison against real Windows 10 and Windows 11 disposable-VM output remains required by issue #163.
+
+Microsoft's documented command syntax is the parser's scope, not a guarantee that every setting required by issue #87 is serialized in the dump:
+- [netsh dnsclient](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/netsh-dnsclient)
+- [netsh interface](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/netsh-interface)
 ## Important limits
 
 1. `Get-DnsClientDohServerAddress` is a system known-server inventory. It is not the per-adapter/per-profile DoH property arrays in `DNS_INTERFACE_SETTINGS3`.
 2. `Get-DnsClientServerAddress` reports server-address lists; it is not a full previous-state snapshot. The observer also parses the per-family `set dnsservers source=dhcp|static` record from read-only IPv4/IPv6 interface dumps. Missing, duplicate, or unrecognized statements remain UNKNOWN. A `dhcp` token is represented as `Automatic`, not as proof of the actual upstream resolver mechanism.
 3. For IPv6, the source token is not sufficient to characterize dynamic DNS policy. The observer separately records `Get-NetIPInterface` family settings and the netsh IPv6 `RouterDiscovery`, `ManagedAddress`, `OtherStateful`, `RABasedDnsConfig`, and `DHCPStaticIPCoexistence` flags. These settings describe interface policy (including whether RA-based DNS or DHCPv6 stateful configuration is enabled); they do not prove which mechanism supplied each effective resolver address. Missing or unsupported values remain UNKNOWN.
 3. The `Doh`/`Doh6` registry paths are included as diagnostic evidence because community tooling uses them to configure DoH. Microsoft does not document these paths as a stable complete read/restore contract; registry values are never written or deleted by this helper, and their presence alone is not accepted as proof that a server is actively using DoH.
-4. `netsh dnsclient dump` is retained as text only. It is not parsed, replayed, or accepted as a canonical restore file. The separate IPv4/IPv6 interface dumps are parsed only for documented source tokens; no generated command is executed.
+4. `netsh dnsclient dump` is retained raw and additionally parsed into diagnostic records for documented `set`/`add dnsserver`, `set`/`add encryption`, `set`/`add global`, and `set`/`add interface` statements. The parser preserves DNS server address/order tokens, source/register/validate options, secure-resolver template/host and fallback flags, global DoH/DoT/DDR options, and per-interface DDR options. Duplicate keys, unsupported values, unrecognized options, delete statements, and malformed commands remain `incomplete`; a dump with no recognized statements remains `unknown`. A `parsed` result only means all recognized statements fit this limited grammar. It does not prove that every relevant Windows setting is emitted, that omitted sections mean defaults, that aliases map to stable adapter GUIDs, or that profile/family-specific DNS and DoH state are complete. No generated command is replayed or accepted as a canonical restore file. The separate IPv4/IPv6 interface dumps continue to be parsed only for documented DNS-source and IPv6-policy tokens; no generated command is executed.
 5. A physical adapter DNS configuration that remains unchanged does not prove that every DNS query stayed inside the tunnel. Validate with packet capture on both physical and TUN interfaces, including UDP/TCP 53, PTR, SVCB/HTTPS record types, IPv4 and IPv6, reconnect, engine exit, and network changes.
 6. This probe does not test DoH/DoT application traffic, WFP crash behavior, full egress protection, or DNS profile restoration.
 7. Do not share observation JSON without reviewing it; DNS server addresses, search suffixes, NRPT namespaces, and adapter metadata can disclose local network details.

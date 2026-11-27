@@ -23,6 +23,9 @@ Current implementation:
 - The request client connects through that local SOCKS proxy using remote DNS.
 - The preflight path does not enable TUN / Wintun, packet interception, Windows system proxy settings, or device-wide traffic routing.
 - Temporary probe configurations are created in unique per-run directories and removed in the normal cleanup path.
+- The preflight root and each per-run directory are created with a protected, explicit owner/DACL. Existing roots are accepted only when their effective owner and complete DACL match the expected descriptor; reparse-point directories and unexpected ACLs fail closed.
+- Credential-bearing config files are created with `CREATE_NEW` and an explicit protected DACL in the same `CreateFileW` call. The handle's owner/DACL is verified before the first credential byte is written. A failed ACL check blocks config creation and engine startup.
+- On Windows, the protected DACL grants full control only to the current user SID, LocalSystem, and Builtin Administrators; directory ACEs are inheritable by children. The DACL is protected from inheriting broad parent permissions. The same primitive uses owner-only POSIX directory/file modes on Unix test hosts.
 - The normal request path asks the temporary child to stop and waits for its exit with a bounded timeout.
 - Child processes use kill-on-drop, and a temporary-directory Drop guard attempts fallback file cleanup if the command future is dropped.
 
@@ -43,7 +46,7 @@ Remaining requirements:
 - Keep the Windows app-process Job Object inheritance and per-instance isolation regression tests enabled (issue #24).
 - Verify child termination, listener release, and file cleanup on success, failure, timeout, user cancellation, graceful app shutdown, and app-level forced termination on Windows.
 - Production engine operations start blocked and are enabled only after Tauri setup confirms that the application joined its kill-on-close Job Object. If attachment fails, keep runtime cleanup unhealthy and block every engine operation; do not fall back to an uncontained spawn.
-- Add explicit access-control hardening for credential-bearing temporary files where needed.
+- Complete real Windows 10/11 acceptance with a second standard-user SID: verify it cannot list/read the preflight root, per-run directories, or live config files while the app identity can. Hosted CI and same-user unit tests do not prove this cross-account boundary.
 - Keep preflight isolated from all normal connection and device-routing state.
 
 ## Process supervision
@@ -61,7 +64,7 @@ Before normal connection functionality is implemented:
 - Redact passwords, tokens, UUIDs, private keys, and authentication headers.
 - Never write credential-bearing JSON into ordinary application settings or logs.
 - Profile secrets are currently stored through Windows Credential Manager.
-- Engine configuration files contain credentials during preflight; they are temporary and removed by the probe cleanup path. Explicit per-file ACL hardening is not yet implemented.
+- Engine configuration files contain credentials during preflight. Their parent directories and files now receive protected ACLs at creation, and the file ACL is verified before credentials are written. Cleanup remains necessary but is no longer the only protection while a probe is active. The real second-user SID denial test on supported Windows 10/11 remains a release acceptance requirement.
 - Engine validation diagnostics are sanitized before being returned to the UI.
 
 ## Supply chain and third-party code

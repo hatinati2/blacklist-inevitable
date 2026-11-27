@@ -28,6 +28,16 @@ On Windows, during Tauri setup the application joins its own Job Object configur
 
 The preflight code path does not enable TUN or change Windows system proxy settings. That is not a claim that normal VPN connection functionality exists.
 
+## Experimental Windows internals (not supported product features)
+
+The repository also contains prototype foundations for a future privileged Windows Agent, named-pipe IPC, WFP policy validation, and DNS / route observation and recovery. Some of this code is present on `main`; additional work remains in open Draft PRs. These foundations are not a working VPN connection path and are not part of the supported preflight workflow.
+
+- The current Agent pipe exposes status and diagnostics only. It explicitly rejects Connect, Disconnect, and Recover requests.
+- The WFP helpers are not an active traffic-enforcement or kill-switch implementation. The validation path aborts its filter-write transaction and checks that the test filters are absent, but its namespace setup can create persistent WFP provider and sublayer objects. Do not describe the entire WFP subsystem as read-only or assume it protects traffic.
+- The DNS, route, and recovery foundations are not wired into a supported Connect / Disconnect lifecycle and must not be relied on to restore operating-system network state.
+
+Treat these components as incomplete engineering prototypes. They require independent security review and real Windows 10 / 11 acceptance before they can be enabled or represented as supported functionality.
+
 ## Windows build and verification
 
 The GitHub Actions workflow on `main` runs Rust formatting checks, Rust tests, Rust compilation checks, the frontend build, and the Windows NSIS installer build. The CI workflow also performs a silent install, launches the app and checks that its process stays alive, then silently uninstalls it on an ephemeral GitHub Windows runner. This catches basic packaging and lifecycle failures, but does **not** replace upgrade testing, clean-machine verification on a user-controlled Windows device, or network smoke tests.
@@ -58,6 +68,7 @@ npm run tauri -- build
 - `docs/ROADMAP.md` — staged delivery and release gates
 - `docs/REFERENCE_CLIENTS.md` — lessons and license boundaries from Karing, v2rayN, v2rayNG, and Hiddify
 - `docs/SECURITY.md` — security invariants and current limitations
+- `docs/WINDOWS_AGENT_RECOVERY_JOURNAL.md` — prototype recovery journal format and its security / integration gates
 
 ## Third-party engine
 

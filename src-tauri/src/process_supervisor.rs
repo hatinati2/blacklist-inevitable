@@ -1252,10 +1252,10 @@ mod windows_instance_lease_tests {
         let first = WindowsInstanceMutex::acquire(&name)
             .expect("first app-like process must acquire the instance lease");
 
-        let second = WindowsInstanceMutex::acquire(&name)
-            .expect_err("a second app-like process must not acquire the same lease");
+        let second = WindowsInstanceMutex::acquire(&name);
+        assert!(second.is_err(), "a second app-like process must not acquire the same lease");
         assert!(
-            second.contains("already running"),
+            second.err().unwrap_or_default().contains("already running"),
             "duplicate instance should be rejected with a clear diagnostic"
         );
 

@@ -513,14 +513,10 @@ async fn every_supported_outbound_completes_an_authenticated_controlled_http_rou
             measure_request_with_client(&http_client, &[url.as_str()]),
         )
         .await;
-        let failure = match measured {
-            Ok(Ok(result)) => {
-                assert_eq!(result.1, url, "{} must return the controlled HTTP 204 URL", case.label);
-                assert!(result.0 < 15_000, "{} response must remain bounded", case.label);
-                None
-            }
-            Ok(Err(error)) => Some(error),
-            Err(_) => Some("end-to-end request timed out".to_string()),
+        let (result, failure) = match measured {
+            Ok(Ok(result)) => (Some(result), None),
+            Ok(Err(error)) => (None, Some(error)),
+            Err(_) => (None, Some("end-to-end request timed out".to_string())),
         };
         if let Some(error) = failure {
             let _ = client.0.start_kill();
@@ -532,12 +528,11 @@ async fn every_supported_outbound_completes_an_authenticated_controlled_http_rou
                 "No controlled server diagnostics were written.".to_string()
             });
             panic!(
-                "{} authenticated tunnel failed: {error}\\nclient sing-box diagnostics:\\n{}\\nserver sing-box diagnostics:\\n{}",
+                "{} authenticated tunnel failed: {error}\nclient sing-box diagnostics:\n{}\nserver sing-box diagnostics:\n{}",
                 case.label, client_logs, server_logs
             );
         }
-        let result = measured.expect("successful request has a completed timeout").expect("successful HTTP 204 result");
-
+        let result = result.expect("successful HTTP 204 result");
         assert_eq!(result.1, url, "{} must return the controlled HTTP 204 URL", case.label);
         assert!(result.0 < 15_000, "{} response must remain bounded", case.label);
         client.stop(case.label).await;

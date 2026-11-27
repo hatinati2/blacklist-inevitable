@@ -97,8 +97,8 @@ jobs:
                 macAddress = "00-11-22-33-44-55"
                 dnsServerAddresses = @($addressRecords)
                 dnsClientSettings = @([pscustomobject]@{
-                  values = [pscustomobject]@{ ConnectionSpecificSuffix = "example.test"; RegisterThisConnectionsAddress = $true; UseSuffixWhenRegistering = $false }
-                  availableProperties = @("ConnectionSpecificSuffix", "RegisterThisConnectionsAddress", "UseSuffixWhenRegistering")
+                  values = [pscustomobject]@{ ConnectionSpecificSuffix = "example.test"; ConnectionSpecificSuffixSearchList = @("example.test", "corp.example.test"); RegisterThisConnectionsAddress = $true; UseSuffixWhenRegistering = $false }
+                  availableProperties = @("ConnectionSpecificSuffix", "ConnectionSpecificSuffixSearchList", "RegisterThisConnectionsAddress", "UseSuffixWhenRegistering")
                 })
                 registryDohEvidence = [pscustomobject]@{
                   state = "absent"
@@ -110,8 +110,8 @@ jobs:
                 }
               })
               globalSettings = @([pscustomobject]@{
-                values = [pscustomobject]@{ SuffixSearchList = @(); UseDevolution = $true; DevolutionLevel = 2 }
-                availableProperties = @("SuffixSearchList", "UseDevolution", "DevolutionLevel")
+                values = [pscustomobject]@{ UseSuffixSearchList = $true; SuffixSearchList = @("example.test", "corp.example.test"); UseDevolution = $true; DevolutionLevel = 2 }
+                availableProperties = @("UseSuffixSearchList", "SuffixSearchList", "UseDevolution", "DevolutionLevel")
               })
               dohServerInventory = @()
               nrptRules = @()

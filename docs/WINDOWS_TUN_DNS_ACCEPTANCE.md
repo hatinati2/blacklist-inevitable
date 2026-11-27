@@ -50,13 +50,19 @@ Use a disposable Windows 10 or Windows 11 VM with a controlled test profile and 
    .\scripts\windows-tun-dns-observe.ps1 -Mode Compare -BaselinePath "$env:TEMP\dns-before.json" -OutputPath "$env:TEMP\dns-after.json"
    ```
 
+For an offline comparison of two previously captured observations (also useful for reviewing evidence after leaving the VM), pass `-CurrentSnapshotPath`. This reads both JSON files and does not query or change DNS:
+
+```powershell
+.\\scripts\\windows-tun-dns-observe.ps1 -Mode Compare -BaselinePath "$env:TEMP\\dns-before.json" -CurrentSnapshotPath "$env:TEMP\\dns-during.json" -OutputPath "$env:TEMP\\dns-review.json"
+```
+
 The helper uses `InterfaceGuid` to correlate physical adapters and does not use a potentially reused interface index as its identity. The index is used only to associate same-snapshot PowerShell observations with the adapter object.
 
 ## Result interpretation
 
 - `PASS`: only the observed physical-adapter DNS server lists, selected per-interface DNS Client settings, read-only per-interface registry DoH evidence, and selected global DNS evidence were unchanged.
 - `FAIL`: one or more observed physical-adapter/global DNS values changed.
-- `UNKNOWN`: a required collector failed, physical-adapter identity could not be correlated, or the requested virtual TUN adapter could not be identified.
+- `UNKNOWN`: a required collector failed, physical-adapter identity or physical/virtual classification is incomplete, per-interface DNS settings are missing, an IPv4/IPv6 DNS-family record is absent, or the requested virtual TUN adapter could not be identified.
 
 The JSON also records:
 

@@ -2,16 +2,16 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $manifest = Join-Path $repoRoot "src-tauri/Cargo.toml"
-$tempBase = if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) { $env:TEMP } else { $env:RUNNER_TEMP }
-if ([string]::IsNullOrWhiteSpace($tempBase)) {
-    throw "A writable temporary directory could not be resolved."
+$sharedParent = $env:ProgramData
+if ([string]::IsNullOrWhiteSpace($sharedParent) -or -not (Test-Path -LiteralPath $sharedParent -PathType Container)) {
+    throw "The shared ProgramData parent directory could not be resolved."
 }
 $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = [System.Security.Principal.WindowsPrincipal]::new($identity)
 if (-not $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw "Run this acceptance script from an elevated PowerShell session so it can create a temporary standard user."
 }
-$root = Join-Path $tempBase ("preflight-acl-" + [Guid]::NewGuid().ToString("N"))
+$root = Join-Path $sharedParent ("blacklist-inevitable-preflight-acl-" + [Guid]::NewGuid().ToString("N"))
 $runDir = Join-Path $root "run"
 $config = Join-Path $runDir "config.json"
 $userName = "aclprobe" + [Guid]::NewGuid().ToString("N").Substring(0, 10)
@@ -43,9 +43,12 @@ try {
     )
     $childScript = @'
 $ErrorActionPreference = 'Stop'
+$parent = '__PARENT__'
 $root = '__ROOT__'
 $runDir = '__RUNDIR__'
 $config = '__CONFIG__'
+# Positive control: the test account can traverse and list the common parent.
+Get-ChildItem -LiteralPath $parent -Force -ErrorAction Stop | Out-Null
 $checks = @(
     @{ Name = 'list preflight root'; Action = { Get-ChildItem -LiteralPath $root -Force -ErrorAction Stop | Out-Null } },
     @{ Name = 'list per-run directory'; Action = { Get-ChildItem -LiteralPath $runDir -Force -ErrorAction Stop | Out-Null } },
@@ -67,6 +70,7 @@ foreach ($check in $checks) {
 }
 exit 0
 '@
+    $childScript = $childScript.Replace("__PARENT__", $sharedParent.Replace("'", "''"))
     $childScript = $childScript.Replace("__ROOT__", $root.Replace("'", "''"))
     $childScript = $childScript.Replace("__RUNDIR__", $runDir.Replace("'", "''"))
     $childScript = $childScript.Replace("__CONFIG__", $config.Replace("'", "''"))

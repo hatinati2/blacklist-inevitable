@@ -16,7 +16,7 @@ mod platform {
     use std::os::windows::ffi::OsStrExt;
     use std::ptr::{null, null_mut};
     use windows_sys::Win32::Foundation::{
-        CloseHandle, GetLastError, LocalFree, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND,
+        CloseHandle, GetLastError, LocalFree, ERROR_FILE_NOT_FOUND,
         ERROR_PATH_NOT_FOUND, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
     };
     use windows_sys::Win32::Security::{

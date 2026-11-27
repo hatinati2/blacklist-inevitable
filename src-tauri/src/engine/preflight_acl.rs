@@ -6,7 +6,6 @@
 //! before any profile credentials are written.
 
 use std::fs;
-use std::io::Write;
 use std::path::Path;
 
 #[cfg(windows)]
@@ -433,7 +432,8 @@ mod platform {
 mod platform {
     use super::*;
     use std::fs::DirBuilder;
-    use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+    use std::io::Write;
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 
     fn verify_private_directory(path: &Path) -> Result<(), String> {
         let metadata = fs::symlink_metadata(path)

@@ -1513,16 +1513,17 @@ pub async fn validate_profile_config(
     super::preflight_acl::ensure_private_directory(&cache)
         .map_err(|_| "The temporary test directory does not have a verified private ACL.".to_string())?;
     let config_path = cache.join(format!("config-{}.json", Uuid::new_v4()));
-    // Install the guard before the write so a cancelled/failed write cannot leave
-    // a partial credential-bearing configuration behind.
+    let config_bytes = serde_json::to_vec(&config)
+        .map_err(|_| "Could not encode the temporary engine configuration.".to_string())?;
+    // Creation + write is synchronous and internally removes only the file it
+    // successfully created on failure. Install the guard only after success so
+    // a CREATE_NEW collision can never make Drop remove someone else's file.
+    super::preflight_acl::create_private_file(&config_path, &config_bytes)
+        .map_err(|_| "Could not securely write the temporary engine configuration.".to_string())?;
     let _config_guard = ProbeConfigFile {
         path: config_path.clone(),
         supervisor: supervisor.clone(),
     };
-    let config_bytes = serde_json::to_vec(&config)
-        .map_err(|_| "Could not encode the temporary engine configuration.".to_string())?;
-    super::preflight_acl::create_private_file(&config_path, &config_bytes)
-        .map_err(|_| "Could not securely write the temporary engine configuration.".to_string())?;
 
     let command_result = run_engine_command_output(
         Command::new(&binary)
@@ -1693,8 +1694,8 @@ pub async fn measure_real_delay(
         .map_err(|_| "The temporary preflight directory does not have a verified private ACL.".to_string())?;
 
     let run_dir = cache.join(format!("probe-{}", Uuid::new_v4()));
-    super::preflight_acl::ensure_private_directory(&run_dir)
-        .map_err(|_| "Could not create a private directory for this node test.".to_string())?;
+    super::preflight_acl::create_private_directory(&run_dir)
+        .map_err(|_| "Could not create a new private directory for this node test.".to_string())?;
     let _directory_guard = ProbeDirectory {
         path: run_dir.clone(),
         supervisor: supervisor.clone(),

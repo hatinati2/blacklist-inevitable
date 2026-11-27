@@ -19,8 +19,10 @@ Credential deletion failures are reported. If the OS credential store refuses de
 
 Current implementation:
 
-- The preflight sing-box SOCKS inbound binds to `127.0.0.1`.
-- The request client connects through that local SOCKS proxy using remote DNS.
+- The preflight sing-box SOCKS inbound binds to `127.0.0.1` and requires a fresh random SOCKS5 username/password pair for each validation or Real Delay invocation.
+- The request client authenticates to that local SOCKS proxy and uses remote DNS.
+- The one-time pair is not saved as profile metadata or Windows Credential Manager material, is never derived from/reused as the remote proxy credentials, and is redacted from engine diagnostics.
+- sing-box requires those inbound credentials in its runtime JSON configuration, so they are present briefly in the unique per-run temporary config file on disk. Existing config-file / per-run directory Drop guards and startup stale-data recovery remove the file; this is transient disk presence, not a memory-only guarantee.
 - The preflight path does not enable TUN / Wintun, packet interception, Windows system proxy settings, or device-wide traffic routing.
 - Temporary probe configurations are created in unique per-run directories and removed in the normal cleanup path.
 - The normal request path asks the temporary child to stop and waits for its exit with a bounded timeout.

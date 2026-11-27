@@ -53,7 +53,7 @@ Use a disposable Windows 10 or Windows 11 VM with a controlled test profile and 
 For an offline comparison of two previously captured observations (also useful for reviewing evidence after leaving the VM), pass `-CurrentSnapshotPath`. This reads both JSON files and does not query or change DNS:
 
 ```powershell
-.\\scripts\\windows-tun-dns-observe.ps1 -Mode Compare -BaselinePath "$env:TEMP\\dns-before.json" -CurrentSnapshotPath "$env:TEMP\\dns-during.json" -OutputPath "$env:TEMP\\dns-review.json"
+.\scripts\windows-tun-dns-observe.ps1 -Mode Compare -BaselinePath "$env:TEMP\dns-before.json" -CurrentSnapshotPath "$env:TEMP\dns-during.json" -OutputPath "$env:TEMP\dns-review.json"
 ```
 
 The helper uses `InterfaceGuid` to correlate physical adapters and does not use a potentially reused interface index as its identity. The index is used only to associate same-snapshot PowerShell observations with the adapter object.

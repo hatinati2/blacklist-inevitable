@@ -21,7 +21,10 @@ The request timeout defaults to nine seconds per endpoint attempt, and the batch
 ## Current isolation and cleanup behavior
 
 - Each probe creates a unique temporary directory and configuration.
-- Each temporary SOCKS inbound is configured to listen on `127.0.0.1` only.
+- Each temporary SOCKS inbound listens on `127.0.0.1` only and requires a fresh random SOCKS5 username/password pair for that invocation.
+- The request client uses the matching one-time pair; missing or incorrect credentials are rejected.
+- sing-box needs the inbound pair in its runtime JSON configuration. It is therefore briefly present in the per-run config file on disk, but is not persisted in profile metadata or Windows Credential Manager, is not reused from remote proxy credentials, and is redacted from engine diagnostics.
+- Existing temporary-file / per-run directory Drop guards plus startup stale-data recovery remove credential-bearing probe files. Do not describe this as memory-only storage.
 - The preflight path does not enable TUN, Wintun, packet capture, Windows system proxy, or normal device traffic routing.
 - Temporary configuration-validation files and per-probe directories have synchronous Drop guards, so cancellation of a Tauri command still attempts to remove credential-bearing JSON files.
 - The normal request path explicitly asks the child process to stop and waits up to four seconds for process exit.

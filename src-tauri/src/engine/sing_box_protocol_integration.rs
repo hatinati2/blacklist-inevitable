@@ -449,8 +449,13 @@ async fn every_supported_outbound_completes_an_authenticated_controlled_http_rou
     fs::write(&private_key_path, TEST_PRIVATE_KEY).expect("write local test private key");
 
     let cases = make_cases(&certificate_path, &private_key_path);
+    let server_log_path = directory.path().join("controlled-server.log");
     let server_config = json!({
-        "log": {"disabled": true},
+        "log": {
+            "level": "debug",
+            "output": server_log_path.to_string_lossy(),
+            "timestamp": true
+        },
         "inbounds": cases.iter().map(|case| case.inbound.clone()).collect::<Vec<_>>(),
         "outbounds": [{"type": "direct", "tag": "direct"}],
         "route": {"final": "direct"}
@@ -488,6 +493,12 @@ async fn every_supported_outbound_completes_an_authenticated_controlled_http_rou
             panic!("{} client config is missing its expected TLS object", case.label);
         }
 
+        let client_log_path = directory.path().join(format!("client-{}.log", case.label));
+        client_config["log"] = json!({
+            "level": "debug",
+            "output": client_log_path.to_string_lossy(),
+            "timestamp": true
+        });
         let client_config_path = directory.path().join(format!("client-{}.json", case.label));
         write_json(&client_config_path, &client_config);
         check_config(&binary, &client_config_path, case.label);
@@ -497,13 +508,35 @@ async fn every_supported_outbound_completes_an_authenticated_controlled_http_rou
 
         let http_client = build_probe_http_client(socks_port, Duration::from_secs(12))
             .expect("build controlled HTTP client");
-        let result = timeout(
+        let measured = timeout(
             Duration::from_secs(15),
             measure_request_with_client(&http_client, &[url.as_str()]),
         )
-        .await
-        .unwrap_or_else(|_| panic!("{} end-to-end request timed out", case.label))
-        .unwrap_or_else(|error| panic!("{} authenticated tunnel failed: {error}", case.label));
+        .await;
+        let failure = match measured {
+            Ok(Ok(result)) => {
+                assert_eq!(result.1, url, "{} must return the controlled HTTP 204 URL", case.label);
+                assert!(result.0 < 15_000, "{} response must remain bounded", case.label);
+                None
+            }
+            Ok(Err(error)) => Some(error),
+            Err(_) => Some("end-to-end request timed out".to_string()),
+        };
+        if let Some(error) = failure {
+            let _ = client.0.start_kill();
+            let _ = timeout(Duration::from_secs(5), client.0.wait()).await;
+            let client_logs = fs::read_to_string(&client_log_path).unwrap_or_else(|_| {
+                "No client diagnostics were written.".to_string()
+            });
+            let server_logs = fs::read_to_string(&server_log_path).unwrap_or_else(|_| {
+                "No controlled server diagnostics were written.".to_string()
+            });
+            panic!(
+                "{} authenticated tunnel failed: {error}\\nclient sing-box diagnostics:\\n{}\\nserver sing-box diagnostics:\\n{}",
+                case.label, client_logs, server_logs
+            );
+        }
+        let result = measured.expect("successful request has a completed timeout").expect("successful HTTP 204 result");
 
         assert_eq!(result.1, url, "{} must return the controlled HTTP 204 URL", case.label);
         assert!(result.0 < 15_000, "{} response must remain bounded", case.label);

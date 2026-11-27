@@ -210,3 +210,41 @@ pub fn get_credentials(profile_id: &str) -> Result<BTreeMap<String, String>, Str
 pub fn get_credentials(_profile_id: &str) -> Result<BTreeMap<String, String>, String> {
     Err("Secure profile storage is currently supported on Windows only.".to_string())
 }
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    struct CredentialCleanup(String);
+
+    impl Drop for CredentialCleanup {
+        fn drop(&mut self) {
+            let _ = delete_credentials(&self.0);
+        }
+    }
+
+    #[test]
+    fn windows_credential_store_round_trips_and_deletes_entries() {
+        let profile_id = format!("credential-store-test-{}", uuid::Uuid::new_v4());
+        delete_credentials(&profile_id).expect("pre-clean test credential entry");
+        let _cleanup = CredentialCleanup(profile_id.clone());
+
+        let mut expected = BTreeMap::new();
+        expected.insert("username".to_string(), "ci-test-user".to_string());
+        expected.insert(
+            "password".to_string(),
+            "ci-test-secret-never-used-for-network-access".to_string(),
+        );
+
+        store_credentials(&profile_id, &expected).expect("store credentials in Windows Credential Manager");
+        let loaded = get_credentials(&profile_id).expect("read credentials from Windows Credential Manager");
+        assert_eq!(loaded, expected);
+
+        delete_credentials(&profile_id).expect("delete Windows Credential Manager entry");
+        assert!(
+            get_credentials(&profile_id).is_err(),
+            "deleted credentials must no longer be readable"
+        );
+        delete_credentials(&profile_id).expect("deleting a missing entry should be idempotent");
+    }
+}

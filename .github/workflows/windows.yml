@@ -48,6 +48,8 @@ jobs:
           [System.Management.Automation.Language.Parser]::ParseFile($sourceModulePath, [ref]$moduleTokens, [ref]$moduleParseErrors) | Out-Null
           if ($moduleParseErrors.Count -gt 0) { throw ($moduleParseErrors | Out-String) }
           Import-Module $sourceModulePath -Force
+          if ((ConvertTo-DnsAddressFamilyLabel -Value 2) -ne "IPv4" -or (ConvertTo-DnsAddressFamilyLabel -Value 23) -ne "IPv6") { throw "Numeric IP interface AddressFamily values must normalize to IPv4/IPv6." }
+          if ((ConvertTo-DnsAddressFamilyLabel -Value "IPv4") -ne "IPv4" -or (ConvertTo-DnsAddressFamilyLabel -Value "IPv6") -ne "IPv6") { throw "Text IP interface AddressFamily labels must remain supported." }
           $ipv4DhcpEvidence = ConvertFrom-NetshInterfaceDnsDump -AddressFamily IPv4 -Lines @('pushd interface ipv4', 'set dnsservers name="Ethernet fixture" source=dhcp', 'popd')
           $ipv4DhcpMode = Get-NetshInterfaceDnsSourceForAdapter -ParsedEvidence $ipv4DhcpEvidence -InterfaceAlias "Ethernet fixture"
           if ($ipv4DhcpMode.state -ne "observed" -or $ipv4DhcpMode.sourceMode -ne "Automatic" -or $ipv4DhcpMode.sourceToken -ne "dhcp") { throw "The IPv4 DHCP source fixture was not recognized." }

@@ -92,15 +92,20 @@ fn parse_share_uri(input: &str) -> Result<ParsedProfile, String> {
     let scheme = url.scheme().to_ascii_lowercase();
 
     if scheme == "ss" && (url.host_str().is_none() || url.port().is_none()) {
-        let payload = input
-            .strip_prefix("ss://")
-            .unwrap_or(input)
+        let legacy_link = input.strip_prefix("ss://").unwrap_or(input);
+        // Legacy links Base64-encode the complete authority, but keep the display
+        // name as a normal URL fragment outside the encoded payload.
+        let fragment = legacy_link
+            .split_once('#')
+            .map(|(_, fragment)| format!("#{fragment}"))
+            .unwrap_or_default();
+        let payload = legacy_link
             .split(['?', '#'])
             .next()
             .unwrap_or_default();
         let decoded = decode_base64(payload)
             .and_then(|bytes| String::from_utf8(bytes).map_err(|_| "Invalid Shadowsocks link.".to_string()))?;
-        url = Url::parse(&format!("ss://{decoded}"))
+        url = Url::parse(&format!("ss://{decoded}{fragment}"))
             .map_err(|_| "Malformed legacy Shadowsocks link.".to_string())?;
     }
 

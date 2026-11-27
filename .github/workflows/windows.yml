@@ -75,9 +75,9 @@ jobs:
             foreach ($collector in $fixtureCollectors) {
               $collection[$collector] = [pscustomobject]@{ available = $true; succeeded = $true; error = $null }
             }
-            $addressRecords = @([pscustomobject]@{ addressFamily = "IPv4"; serverAddresses = @($Ipv4DnsServer) })
+            $addressRecords = @([pscustomobject]@{ addressFamily = "IPv4"; addressFamilyRaw = "2"; serverAddresses = @($Ipv4DnsServer) })
             if (-not $OmitIPv6) {
-              $addressRecords += [pscustomobject]@{ addressFamily = "IPv6"; serverAddresses = @("2001:db8::53") }
+              $addressRecords += [pscustomobject]@{ addressFamily = "IPv6"; addressFamilyRaw = "23"; serverAddresses = @("2001:db8::53") }
             }
             return [pscustomobject]@{
               schemaVersion = 2

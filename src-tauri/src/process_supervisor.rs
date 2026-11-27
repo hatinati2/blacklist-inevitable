@@ -456,6 +456,26 @@ impl Default for ProcessSupervisor {
 }
 
 impl ProcessSupervisor {
+    /// Deliberately omit the Windows Job Object to exercise containment failures
+    /// in engine integration tests. Never available in production builds.
+    #[cfg(all(test, windows))]
+    pub(crate) fn without_job_for_test() -> Self {
+        Self {
+            inner: Arc::new(Inner {
+                state: Mutex::new(State {
+                    shutting_down: false,
+                    shutdown_complete: false,
+                    cleanup_healthy: false,
+                    next_operation_id: 1,
+                    active: HashMap::new(),
+                }),
+                idle: Notify::new(),
+                job: None,
+                instance_mutex: Mutex::new(None),
+            }),
+        }
+    }
+
     /// Construct the production app supervisor in a blocked state. Engine work
     /// stays disabled until Tauri setup has attached this application process to
     /// its kill-on-close Job Object.
@@ -812,20 +832,7 @@ mod tests {
 
     #[cfg(windows)]
     fn supervisor_without_job_for_test() -> ProcessSupervisor {
-        ProcessSupervisor {
-            inner: Arc::new(Inner {
-                state: Mutex::new(State {
-                    shutting_down: false,
-                    shutdown_complete: false,
-                    cleanup_healthy: false,
-                    next_operation_id: 1,
-                    active: HashMap::new(),
-                }),
-                idle: Notify::new(),
-                job: None,
-                instance_mutex: Mutex::new(None),
-            }),
-        }
+        ProcessSupervisor::without_job_for_test()
     }
 
 

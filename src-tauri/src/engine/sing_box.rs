@@ -1352,6 +1352,37 @@ async fn run_engine_command_output(
     }
 }
 
+/// Run the native config check and always remove the credential-bearing config
+/// file, including when process creation or Job Object assignment fails.
+async fn run_config_check_and_cleanup(
+    binary: &Path,
+    config_path: &Path,
+    supervisor: &ProcessSupervisor,
+) -> Result<std::process::Output, String> {
+    let command_result = run_engine_command_output(
+        Command::new(binary)
+            .arg("check")
+            .arg("-c")
+            .arg(config_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped()),
+        supervisor,
+        CONFIG_CHECK_TIMEOUT,
+    )
+    .await;
+
+    if tokio::fs::remove_file(config_path).await.is_err() {
+        supervisor.mark_cleanup_unhealthy();
+        return Err(
+            "The temporary configuration could not be removed; preflight cleanup needs attention."
+                .to_string(),
+        );
+    }
+
+    command_result.map_err(|error| error.message("sing-box config validation"))
+}
+
 
 pub const SING_BOX_VERSION: &str = "1.14.4";
 const WINDOWS_AMD64_ARCHIVE_URL: &str =
@@ -1639,34 +1670,12 @@ pub async fn validate_profile_config(
         .await
         .map_err(|_| "Could not write the temporary engine configuration.".to_string())?;
 
-    let command_result = run_engine_command_output(
-        Command::new(&binary)
-            .arg("check")
-            .arg("-c")
-            .arg(&config_path)
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped()),
-        supervisor,
-        CONFIG_CHECK_TIMEOUT,
-    )
-    .await;
-
-    let cleanup_result = tokio::fs::remove_file(&config_path).await;
-    if cleanup_result.is_err() {
-        supervisor.mark_cleanup_unhealthy();
-        return Err(
-            "The temporary configuration could not be removed; preflight cleanup needs attention."
-                .to_string(),
-        );
-    }
-
-    match command_result {
-        Err(error) => Err(error.message("sing-box config validation")),
-        Ok(output) if output.status.success() => Ok(()),
-        Ok(output) => {
-            let diagnostic = String::from_utf8_lossy(&output.stderr);
-            Err(redact_diagnostic(&diagnostic, credentials))
-        }
+    let output = run_config_check_and_cleanup(&binary, &config_path, supervisor).await?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let diagnostic = String::from_utf8_lossy(&output.stderr);
+        Err(redact_diagnostic(&diagnostic, credentials))
     }
 }
 
@@ -2121,6 +2130,127 @@ mod runtime_guard_tests {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         command
+    }
+
+    #[tokio::test]
+    async fn config_check_spawn_failure_removes_credential_bearing_file() {
+        let supervisor = ProcessSupervisor::default();
+        let root = std::env::temp_dir().join(format!(
+            "blacklist-inevitable-config-spawn-failure-{}",
+            Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).expect("create config-check test directory");
+        let config_path = root.join("config.json");
+        std::fs::write(&config_path, br#"{"password":"spawn-failure-secret"}"#)
+            .expect("write credential-bearing test config");
+        let _config_guard = ProbeConfigFile {
+            path: config_path.clone(),
+            supervisor: supervisor.clone(),
+        };
+        let missing_binary = root.join("sing-box-that-does-not-exist.exe");
+
+        let error = run_config_check_and_cleanup(&missing_binary, &config_path, &supervisor)
+            .await
+            .expect_err("missing executable must fail config validation");
+
+        assert!(
+            error.contains("Could not start sing-box config validation"),
+            "spawn failure should be surfaced without leaking command details: {error}"
+        );
+        assert!(
+            !config_path.exists(),
+            "a spawn failure must still remove the credential-bearing config"
+        );
+        assert!(
+            supervisor.cleanup_healthy(),
+            "a confirmed spawn failure with successful file removal is safe to recover from"
+        );
+        std::fs::remove_dir_all(root).expect("remove config-check test directory");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn config_check_containment_failure_kills_child_and_removes_credential_file() {
+        let supervisor = ProcessSupervisor::without_job_for_test();
+        let root = std::env::temp_dir().join(format!(
+            "blacklist-inevitable-config-containment-failure-{}",
+            Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).expect("create config-check test directory");
+        let config_path = root.join("config.json");
+        std::fs::write(&config_path, br#"{"password":"containment-failure-secret"}"#)
+            .expect("write credential-bearing test config");
+        let _config_guard = ProbeConfigFile {
+            path: config_path.clone(),
+            supervisor: supervisor.clone(),
+        };
+        let test_executable = std::env::current_exe()
+            .expect("resolve suspended test child executable");
+
+        let error = run_config_check_and_cleanup(&test_executable, &config_path, &supervisor)
+            .await
+            .expect_err("missing Job Object must reject the suspended config-check child");
+
+        assert!(
+            error.contains("Job Object ownership") && error.contains("child was stopped"),
+            "containment failure must confirm child termination: {error}"
+        );
+        assert!(
+            !config_path.exists(),
+            "a containment failure must still remove the credential-bearing config"
+        );
+        assert!(
+            !supervisor.cleanup_healthy(),
+            "a containment failure must disable further engine work"
+        );
+        std::fs::remove_dir_all(root).expect("remove config-check test directory");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn rejected_pinned_sing_box_config_removes_credential_bearing_file() {
+        let Ok(binary) = std::env::var("SING_BOX_VALIDATOR") else {
+            // The Windows workflow supplies the pinned and hash-verified executable.
+            return;
+        };
+        let supervisor = ProcessSupervisor::default();
+        let root = std::env::temp_dir().join(format!(
+            "blacklist-inevitable-invalid-config-{}",
+            Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).expect("create config-check test directory");
+        let config_path = root.join("invalid-config.json");
+        std::fs::write(
+            &config_path,
+            br#"{"inbounds":[{"type":"not-a-real-inbound"}],"outbounds":[{"type":"direct","tag":"direct"}]}"#,
+        )
+        .expect("write invalid sing-box config");
+        let _config_guard = ProbeConfigFile {
+            path: config_path.clone(),
+            supervisor: supervisor.clone(),
+        };
+
+        let output = run_config_check_and_cleanup(
+            Path::new(&binary),
+            &config_path,
+            &supervisor,
+        )
+        .await
+        .expect("validator process should run even though config is invalid");
+
+        assert!(
+            !output.status.success(),
+            "the pinned sing-box validator must reject the deliberately invalid config"
+        );
+        assert!(
+            !config_path.exists(),
+            "a rejected config must not leave the credential-bearing file behind"
+        );
+        assert!(
+            supervisor.cleanup_healthy(),
+            "a rejected config with confirmed process and file cleanup is safe"
+        );
+        std::fs::remove_dir_all(root).expect("remove config-check test directory");
     }
 
     #[tokio::test]

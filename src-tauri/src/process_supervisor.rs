@@ -477,6 +477,20 @@ impl ProcessSupervisor {
         supervisor
     }
 
+    /// Acquire a uniquely named process lease for isolated Windows integration tests.
+    /// Production uses the single application-wide name in `for_app`.
+    #[cfg(all(test, windows))]
+    pub(crate) fn acquire_test_instance_lease(&self, name: &str) -> Result<(), String> {
+        let lease = WindowsInstanceMutex::acquire(name)?;
+        let mut slot = self
+            .inner
+            .instance_mutex
+            .lock()
+            .map_err(|_| "The Windows test instance lease state is unavailable.".to_string())?;
+        *slot = Some(Ok(lease));
+        Ok(())
+    }
+
     /// Attach the application process to its kill-on-close Job Object during
     /// Tauri setup, before the app event loop can invoke engine commands. Existing
     /// Tauri/WebView helper processes remain outside this engine-child job; later
@@ -894,6 +908,9 @@ mod tests {
     const JOB_HELPER_MARKER_ENV: &str = "BLACKLIST_INEVITABLE_TEST_JOB_HELPER_MARKER";
     #[cfg(windows)]
     const JOB_HELPER_RELEASE_ENV: &str = "BLACKLIST_INEVITABLE_TEST_JOB_HELPER_RELEASE";
+    #[cfg(windows)]
+    const JOB_HELPER_INSTANCE_LEASE_ENV: &str =
+        "BLACKLIST_INEVITABLE_TEST_JOB_HELPER_INSTANCE_LEASE";
 
     // Launched as an isolated test-binary process. Joining the Job Object makes
     // this helper and its suspended child members; the parent test releases it
@@ -916,8 +933,13 @@ mod tests {
             .map(std::path::PathBuf::from)
             .expect("helper release path");
 
+        let lease_name = std::env::var(JOB_HELPER_INSTANCE_LEASE_ENV)
+            .expect("unique helper process lease name");
         let supervisor = ProcessSupervisor::default();
-        if let Err(error) = supervisor.attach_current_process_to_job() {
+        if let Err(error) = supervisor
+            .acquire_test_instance_lease(&lease_name)
+            .and_then(|()| supervisor.attach_current_process_to_job())
+        {
             std::fs::write(&status_path, format!("application-could-not-join-job:{error}"))
                 .expect("write failed job status");
             return;
@@ -1050,6 +1072,13 @@ mod tests {
                 .env(JOB_HELPER_STATUS_ENV, &status_path)
                 .env(JOB_HELPER_MARKER_ENV, &marker_path)
                 .env(JOB_HELPER_RELEASE_ENV, &release_path)
+                .env(
+                    JOB_HELPER_INSTANCE_LEASE_ENV,
+                    format!(
+                        "Local\\BlacklistInevitable.JobTest.{}",
+                        uuid::Uuid::new_v4()
+                    ),
+                )
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());

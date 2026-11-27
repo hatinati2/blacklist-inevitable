@@ -18,7 +18,7 @@ The script:
 4. Runs a separate PowerShell process under that second identity and expects access denied for listing the preflight root, listing the per-run directory, and reading the config file.
 5. Removes the temporary local account and fixture directory in a `finally` block.
 
-The fixture contains only the literal test marker `ACL-ACCEPTANCE-SENTINEL`; it does not use real profile credentials. The account password is generated for the test and is not written to the repository or printed.
+The fixture contains only the literal test marker `ACL-ACCEPTANCE-SENTINEL`; it does not use real profile credentials. The account password is generated for the test and is not written to the repository or printed. The second-user check uses thread impersonation and native file opens rather than starting an interactive desktop process, so the check can run on non-interactive CI agents.
 
 ## Acceptance record
 

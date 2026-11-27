@@ -348,6 +348,18 @@ function ConvertFrom-NetshDnsClientDump {
             [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
         )
         if (-not $commandMatch.Success) {
+            $unsupportedMatch = [regex]::Match(
+                $text,
+                '^\s*(?:(?:netsh)\s+)?(?:dnsclient\s+)?(?<verb>set|add|delete)\s+(?<section>[A-Za-z][A-Za-z0-9]*)\b',
+                [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+            )
+            if ($unsupportedMatch.Success) {
+                $unsupportedStatements += [pscustomobject]@{
+                    lineNumber = $lineNumber
+                    verb = $unsupportedMatch.Groups["verb"].Value.ToLowerInvariant()
+                    section = $unsupportedMatch.Groups["section"].Value.ToLowerInvariant()
+                }
+            }
             continue
         }
 

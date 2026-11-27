@@ -63,15 +63,17 @@ The JSON also records:
 - adapter identity, hardware/virtual classification, and IPv4/IPv6 DNS server lists;
 - selected per-interface DNS Client settings;
 - global suffix-search settings, the system DoH known-server inventory, and NRPT rules where available;
-- raw `netsh dnsclient dump`, `show global`, `show state`, and `show encryption` output as review-only evidence.
+- raw `netsh dnsclient dump`, `show global`, `show state`, and `show encryption` output as review-only evidence;
+- per-interface registry `Doh` (IPv4) and `Doh6` (IPv6) subkeys and each value's registry type as read-only forensic evidence.
 
 ## Important limits
 
 1. `Get-DnsClientDohServerAddress` is a system known-server inventory. It is not the per-adapter/per-profile DoH property arrays in `DNS_INTERFACE_SETTINGS3`.
 2. `Get-DnsClientServerAddress` reports server-address lists; it is not a full previous-state snapshot. The DHCP-versus-static DNS source mode appears only in the raw `netsh dnsclient dump` evidence and is not automatically compared by this probe.
-3. `netsh dnsclient dump` is retained as text only. It is not parsed as an authoritative schema, replayed, or accepted as a canonical restore file.
-4. A physical adapter DNS configuration that remains unchanged does not prove that every DNS query stayed inside the tunnel. Validate with packet capture on both physical and TUN interfaces, including UDP/TCP 53, PTR, SVCB/HTTPS record types, IPv4 and IPv6, reconnect, engine exit, and network changes.
-5. This probe does not test DoH/DoT application traffic, WFP crash behavior, full egress protection, or DNS profile restoration.
-6. Do not share observation JSON without reviewing it; DNS server addresses, search suffixes, NRPT namespaces, and adapter metadata can disclose local network details.
+3. The `Doh`/`Doh6` registry paths are included as diagnostic evidence because community tooling uses them to configure DoH. Microsoft does not document these paths as a stable complete read/restore contract; registry values are never written or deleted by this helper, and their presence alone is not accepted as proof that a server is actively using DoH.
+4. `netsh dnsclient dump` is retained as text only. It is not parsed as an authoritative schema, replayed, or accepted as a canonical restore file.
+5. A physical adapter DNS configuration that remains unchanged does not prove that every DNS query stayed inside the tunnel. Validate with packet capture on both physical and TUN interfaces, including UDP/TCP 53, PTR, SVCB/HTTPS record types, IPv4 and IPv6, reconnect, engine exit, and network changes.
+6. This probe does not test DoH/DoT application traffic, WFP crash behavior, full egress protection, or DNS profile restoration.
+7. Do not share observation JSON without reviewing it; DNS server addresses, search suffixes, NRPT namespaces, and adapter metadata can disclose local network details.
 
 A `PASS` from this probe is one piece of TUN architecture evidence only. It does not close DNS issue #87 and does not enable Connect, Disconnect, Recover, DNS restore, or journal deletion.

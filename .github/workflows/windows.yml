@@ -70,6 +70,19 @@ jobs:
           if ($caseInsensitiveMode.state -ne "observed" -or $caseInsensitiveMode.sourceToken -ne "dhcp") { throw "Source parsing must be case-insensitive and ignore add-server lines." }
           $missingAdapterMode = Get-NetshInterfaceDnsSourceForAdapter -ParsedEvidence $ipv4DhcpEvidence -InterfaceAlias "Wi-Fi"
           if ($missingAdapterMode.state -ne "unknown" -or $missingAdapterMode.sourceMode -ne "Unknown") { throw "A missing adapter source row must remain Unknown." }
+          $ipv6PolicyLines = @('pushd interface ipv6', 'set interface interface="Ethernet fixture" routerdiscovery=enabled managedaddress=enabled otherstateful=enabled rabaseddnsconfig=enabled dhcpstaticipcoexistence=disabled', 'popd')
+          $ipv6PolicyEvidence = ConvertFrom-NetshIPv6InterfaceDump -Lines $ipv6PolicyLines
+          $ipv6Policy = Get-NetshIPv6InterfaceDnsPolicyForAdapter -ParsedEvidence $ipv6PolicyEvidence -InterfaceAlias "Ethernet fixture"
+          if ($ipv6Policy.state -ne "observed" -or $ipv6Policy.settings.raBasedDnsConfig -ne "enabled" -or $ipv6Policy.settings.otherStateful -ne "enabled") { throw "Complete IPv6 RA/DHCP policy fixture was not recognized." }
+          $ipv6PolicyMissingLines = @('set interface interface="Ethernet fixture" routerdiscovery=enabled managedaddress=enabled otherstateful=enabled dhcpstaticipcoexistence=disabled')
+          $ipv6PolicyMissingEvidence = ConvertFrom-NetshIPv6InterfaceDump -Lines $ipv6PolicyMissingLines
+          $ipv6PolicyMissing = Get-NetshIPv6InterfaceDnsPolicyForAdapter -ParsedEvidence $ipv6PolicyMissingEvidence -InterfaceAlias "Ethernet fixture"
+          if ($ipv6PolicyMissing.state -ne "unknown" -or $ipv6PolicyMissing.availableProperties -contains "raBasedDnsConfig") { throw "Missing RDNSS policy evidence must remain Unknown." }
+          $ipv6PolicyBadLines = @('set interface interface="Ethernet fixture" routerdiscovery=enabled managedaddress=enabled otherstateful=enabled rabaseddnsconfig=maybe dhcpstaticipcoexistence=disabled', 'set interface interface="Wi-Fi fixture" routerdiscovery=enabled managedaddress=enabled otherstateful=enabled rabaseddnsconfig=enabled dhcpstaticipcoexistence=disabled')
+          $ipv6PolicyBadEvidence = ConvertFrom-NetshIPv6InterfaceDump -Lines $ipv6PolicyBadLines
+          $ipv6PolicyBad = Get-NetshIPv6InterfaceDnsPolicyForAdapter -ParsedEvidence $ipv6PolicyBadEvidence -InterfaceAlias "Ethernet fixture"
+          $ipv6PolicyUnaffected = Get-NetshIPv6InterfaceDnsPolicyForAdapter -ParsedEvidence $ipv6PolicyBadEvidence -InterfaceAlias "Wi-Fi fixture"
+          if ($ipv6PolicyBad.state -ne "unknown" -or $ipv6PolicyUnaffected.state -ne "observed") { throw "Malformed IPv6 policy must be scoped to its adapter." }
 
           $scriptText = Get-Content -LiteralPath $scriptPath -Raw
           $sourceModuleText = Get-Content -LiteralPath $sourceModulePath -Raw
@@ -83,9 +96,10 @@ jobs:
           & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $scriptPath -Mode Snapshot -OutputPath $snapshotPath
           if ($LASTEXITCODE -ne 0) { throw "The read-only DNS observer snapshot command failed with exit code $LASTEXITCODE." }
           $observation = Get-Content -LiteralPath $snapshotPath -Raw | ConvertFrom-Json
-          if ($observation.schemaVersion -ne 3) { throw "The DNS observer wrote an unsupported schema version." }
+          if ($observation.schemaVersion -ne 4) { throw "The DNS observer wrote an unsupported schema version." }
           if (-not $observation.collection.getNetAdapter.succeeded) { throw "Get-NetAdapter did not produce a usable observer snapshot." }
           if (-not $observation.collection.getDnsClientServerAddress.succeeded) { throw "Get-DnsClientServerAddress did not produce a usable observer snapshot." }
+          if (-not $observation.collection.getNetIPInterface.succeeded) { throw "Get-NetIPInterface did not produce a usable observer snapshot." }
 
           # Emit privacy-safe live-host evidence counts; never print adapter aliases,
           # GUIDs, DNS addresses, suffixes, registry contents, or raw netsh output.
@@ -100,6 +114,7 @@ jobs:
               Static = @($observed | Where-Object { $_.sourceToken -eq "static" }).Count
               Automatic = @($observed | Where-Object { $_.sourceToken -eq "dhcp" }).Count
               UnknownOrAmbiguous = @($familyEvidence | Where-Object { $_.state -ne "observed" }).Count
+              IPv6PolicyObserved = if ($family -eq "ipv6") { @($physicalAdapters | Where-Object { $_.ipv6DnsPolicy.state -eq "observed" }).Count } else { $null }
             }
           }
           $runnerOs = [string]$observation.os.values.Caption
@@ -115,11 +130,11 @@ jobs:
             "|---|---:|---:|",
             "| $runnerOs | $runnerBuild | $($physicalAdapters.Count) |",
             "",
-            "| Family | Observed | Static | Automatic | Unknown / ambiguous |",
-            "|---|---:|---:|---:|---:|"
+            "| Family | Observed | Static | Automatic | Unknown / ambiguous | IPv6 interface policy observed |",
+            "|---|---:|---:|---:|---:|---:|"
           )
           foreach ($summary in $sourceEvidenceSummary) {
-            $summaryLines += "| $($summary.AddressFamily) | $($summary.Observed) | $($summary.Static) | $($summary.Automatic) | $($summary.UnknownOrAmbiguous) |"
+            $summaryLines += "| $($summary.AddressFamily) | $($summary.Observed) | $($summary.Static) | $($summary.Automatic) | $($summary.UnknownOrAmbiguous) | $($summary.IPv6PolicyObserved) |"
           }
           Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ($summaryLines -join [Environment]::NewLine)
 
@@ -127,7 +142,7 @@ jobs:
           $compareExitCode = $LASTEXITCODE
           if ($compareExitCode -notin @(0, 1, 2)) { throw "The DNS observer comparison returned an unexpected exit code: $compareExitCode." }
           $comparison = Get-Content -LiteralPath $comparisonPath -Raw | ConvertFrom-Json
-          if ($comparison.schemaVersion -ne 2 -or $comparison.status -notin @("PASS", "FAIL", "UNKNOWN")) { throw "The DNS observer comparison did not produce a valid result." }
+          if ($comparison.schemaVersion -ne 3 -or $comparison.status -notin @("PASS", "FAIL", "UNKNOWN")) { throw "The DNS observer comparison did not produce a valid result." }
           $expectedExitCode = switch ($comparison.status) { "PASS" { 0 } "FAIL" { 1 } "UNKNOWN" { 2 } }
           if ($compareExitCode -ne $expectedExitCode) { throw "The DNS observer comparison exit code does not match its status." }
           # The accepted UNKNOWN exit code belongs to the child observer process; do not leak it as the workflow step's exit code.
@@ -137,9 +152,9 @@ jobs:
           # Deterministic fixture coverage exercises all three comparison outcomes without relying on runner NIC configuration.
           $fixtureRoot = Join-Path $env:RUNNER_TEMP "dns-observer-fixtures"
           New-Item -ItemType Directory -Path $fixtureRoot -Force | Out-Null
-          $fixtureCollectors = @("getNetAdapter", "getDnsClientServerAddress", "getDnsClient", "getDnsClientGlobalSetting", "getDnsClientDohServerAddress", "getDnsClientNrptRule", "registryDoh", "netshDnsClientDump", "netshInterfaceIpv4Dump", "netshInterfaceIpv6Dump")
+          $fixtureCollectors = @("getNetAdapter", "getDnsClientServerAddress", "getDnsClient", "getDnsClientGlobalSetting", "getDnsClientDohServerAddress", "getDnsClientNrptRule", "registryDoh", "netshDnsClientDump", "netshInterfaceIpv4Dump", "netshInterfaceIpv6Dump", "getNetIPInterface")
           function New-DnsObservationFixture {
-            param([string]$Ipv4DnsServer = "192.0.2.53", [switch]$OmitIPv6, [switch]$SourceModeChanged, [switch]$OmitSourceMode)
+            param([string]$Ipv4DnsServer = "192.0.2.53", [switch]$OmitIPv6, [switch]$SourceModeChanged, [switch]$OmitSourceMode, [switch]$Ipv6PolicyChanged, [switch]$OmitIpv6Policy, [switch]$OmitIPv6OtherStateful)
             $collection = [ordered]@{}
             foreach ($collector in $fixtureCollectors) {
               $collection[$collector] = [pscustomobject]@{ available = $true; succeeded = $true; error = $null }
@@ -149,7 +164,7 @@ jobs:
               $addressRecords += [pscustomobject]@{ addressFamily = "IPv6"; addressFamilyRaw = "23"; serverAddresses = @("2001:db8::53") }
             }
             return [pscustomobject]@{
-              schemaVersion = 3
+              schemaVersion = 4
               capturedAtUtc = "2026-01-01T00:00:00.0000000Z"
               os = [pscustomobject]@{
                 values = [pscustomobject]@{ Caption = "Microsoft Windows 11 Pro"; Version = "10.0"; BuildNumber = "26100"; OSArchitecture = "64-bit" }
@@ -165,6 +180,34 @@ jobs:
                 status = "Up"
                 macAddress = "00-11-22-33-44-55"
                 dnsServerAddresses = @($addressRecords)
+                ipInterfaceSettings = @(
+                  [pscustomobject]@{
+                    values = [pscustomobject]@{ AddressFamily = "IPv4"; Dhcp = "Enabled"; RouterDiscovery = "ControlledByDHCP" }
+                    availableProperties = @("AddressFamily", "Dhcp", "RouterDiscovery")
+                  },
+                  [pscustomobject]@{
+                    values = [pscustomobject]@{ AddressFamily = "IPv6"; Dhcp = "Disabled"; RouterDiscovery = "Enabled"; ManagedAddressConfiguration = "Enabled"; OtherStatefulConfiguration = if ($OmitIPv6OtherStateful) { $null } else { "Enabled" } }
+                    availableProperties = if ($OmitIPv6OtherStateful) { @("AddressFamily", "Dhcp", "RouterDiscovery", "ManagedAddressConfiguration") } else { @("AddressFamily", "Dhcp", "RouterDiscovery", "ManagedAddressConfiguration", "OtherStatefulConfiguration") }
+                  }
+                )
+                ipv6DnsPolicy = if ($OmitIpv6Policy) {
+                  [pscustomobject]@{ state = "unknown"; interfaceAlias = "Ethernet fixture"; settings = [pscustomobject]@{}; availableProperties = @(); reason = "fixture intentionally omits IPv6 policy" }
+                }
+                else {
+                  [pscustomobject]@{
+                    state = "observed"
+                    interfaceAlias = "Ethernet fixture"
+                    settings = [pscustomobject]@{
+                      routerDiscovery = "enabled"
+                      managedAddress = "enabled"
+                      otherStateful = "enabled"
+                      raBasedDnsConfig = if ($Ipv6PolicyChanged) { "disabled" } else { "enabled" }
+                      dhcpStaticIpCoexistence = "disabled"
+                    }
+                    availableProperties = @("routerDiscovery", "managedAddress", "otherStateful", "raBasedDnsConfig", "dhcpStaticIpCoexistence")
+                    reason = $null
+                  }
+                }
                 dnsSourceMode = [pscustomobject]@{
                   ipv4 = if ($OmitSourceMode) { [pscustomobject]@{ state = "unknown"; sourceMode = "Unknown"; sourceToken = $null; interfaceAlias = "Ethernet fixture"; reason = "fixture intentionally omits evidence" } } elseif ($SourceModeChanged) { [pscustomobject]@{ state = "observed"; sourceMode = "Static"; sourceToken = "static"; interfaceAlias = "Ethernet fixture"; reason = $null } } else { [pscustomobject]@{ state = "observed"; sourceMode = "Automatic"; sourceToken = "dhcp"; interfaceAlias = "Ethernet fixture"; reason = $null } }
                   ipv6 = if ($OmitSourceMode) { [pscustomobject]@{ state = "unknown"; sourceMode = "Unknown"; sourceToken = $null; interfaceAlias = "Ethernet fixture"; reason = "fixture intentionally omits evidence" } } else { [pscustomobject]@{ state = "observed"; sourceMode = "Static"; sourceToken = "static"; interfaceAlias = "Ethernet fixture"; reason = $null } }
@@ -197,18 +240,27 @@ jobs:
           $fixtureUnknownPath = Join-Path $fixtureRoot "unknown.json"
           $fixtureSourceFailPath = Join-Path $fixtureRoot "source-fail.json"
           $fixtureSourceUnknownPath = Join-Path $fixtureRoot "source-unknown.json"
+          $fixtureIpv6PolicyFailPath = Join-Path $fixtureRoot "ipv6-policy-fail.json"
+          $fixtureIpv6PolicyUnknownPath = Join-Path $fixtureRoot "ipv6-policy-unknown.json"
+          $fixtureIpInterfaceUnknownPath = Join-Path $fixtureRoot "ipinterface-unknown.json"
           $fixtureBaseline = New-DnsObservationFixture
           $fixturePass = New-DnsObservationFixture
           $fixtureFail = New-DnsObservationFixture -Ipv4DnsServer "192.0.2.54"
           $fixtureUnknown = New-DnsObservationFixture -OmitIPv6
           $fixtureSourceFail = New-DnsObservationFixture -SourceModeChanged
           $fixtureSourceUnknown = New-DnsObservationFixture -OmitSourceMode
+          $fixtureIpv6PolicyFail = New-DnsObservationFixture -Ipv6PolicyChanged
+          $fixtureIpv6PolicyUnknown = New-DnsObservationFixture -OmitIpv6Policy
+          $fixtureIpInterfaceUnknown = New-DnsObservationFixture -OmitIPv6OtherStateful
           $fixtureBaseline | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $fixtureBaselinePath -Encoding UTF8
           $fixturePass | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $fixturePassPath -Encoding UTF8
           $fixtureFail | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $fixtureFailPath -Encoding UTF8
           $fixtureUnknown | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $fixtureUnknownPath -Encoding UTF8
           $fixtureSourceFail | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $fixtureSourceFailPath -Encoding UTF8
           $fixtureSourceUnknown | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $fixtureSourceUnknownPath -Encoding UTF8
+          $fixtureIpv6PolicyFail | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $fixtureIpv6PolicyFailPath -Encoding UTF8
+          $fixtureIpv6PolicyUnknown | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $fixtureIpv6PolicyUnknownPath -Encoding UTF8
+          $fixtureIpInterfaceUnknown | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $fixtureIpInterfaceUnknownPath -Encoding UTF8
 
           $fixturePassOutput = Join-Path $fixtureRoot "pass-result.json"
           & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $scriptPath -Mode Compare -BaselinePath $fixtureBaselinePath -CurrentSnapshotPath $fixturePassPath -OutputPath $fixturePassOutput
@@ -243,6 +295,27 @@ jobs:
           $fixtureSourceUnknownExit = $LASTEXITCODE
           $fixtureSourceUnknownResult = Get-Content -LiteralPath $fixtureSourceUnknownOutput -Raw | ConvertFrom-Json
           if ($fixtureSourceUnknownExit -ne 2 -or $fixtureSourceUnknownResult.status -ne "UNKNOWN") { throw "Missing per-family DNS source evidence must return UNKNOWN/2." }
+          $global:LASTEXITCODE = 0
+
+          $fixtureIpv6PolicyFailOutput = Join-Path $fixtureRoot "ipv6-policy-fail-result.json"
+          & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $scriptPath -Mode Compare -BaselinePath $fixtureBaselinePath -CurrentSnapshotPath $fixtureIpv6PolicyFailPath -OutputPath $fixtureIpv6PolicyFailOutput
+          $fixtureIpv6PolicyFailExit = $LASTEXITCODE
+          $fixtureIpv6PolicyFailResult = Get-Content -LiteralPath $fixtureIpv6PolicyFailOutput -Raw | ConvertFrom-Json
+          if ($fixtureIpv6PolicyFailExit -ne 1 -or $fixtureIpv6PolicyFailResult.status -ne "FAIL") { throw "A changed IPv6 RA/DHCP policy must return FAIL/1." }
+          $global:LASTEXITCODE = 0
+
+          $fixtureIpv6PolicyUnknownOutput = Join-Path $fixtureRoot "ipv6-policy-unknown-result.json"
+          & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $scriptPath -Mode Compare -BaselinePath $fixtureBaselinePath -CurrentSnapshotPath $fixtureIpv6PolicyUnknownPath -OutputPath $fixtureIpv6PolicyUnknownOutput
+          $fixtureIpv6PolicyUnknownExit = $LASTEXITCODE
+          $fixtureIpv6PolicyUnknownResult = Get-Content -LiteralPath $fixtureIpv6PolicyUnknownOutput -Raw | ConvertFrom-Json
+          if ($fixtureIpv6PolicyUnknownExit -ne 2 -or $fixtureIpv6PolicyUnknownResult.status -ne "UNKNOWN") { throw "Missing IPv6 RA/DHCP policy must return UNKNOWN/2." }
+          $global:LASTEXITCODE = 0
+
+          $fixtureIpInterfaceUnknownOutput = Join-Path $fixtureRoot "ipinterface-unknown-result.json"
+          & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $scriptPath -Mode Compare -BaselinePath $fixtureBaselinePath -CurrentSnapshotPath $fixtureIpInterfaceUnknownPath -OutputPath $fixtureIpInterfaceUnknownOutput
+          $fixtureIpInterfaceUnknownExit = $LASTEXITCODE
+          $fixtureIpInterfaceUnknownResult = Get-Content -LiteralPath $fixtureIpInterfaceUnknownOutput -Raw | ConvertFrom-Json
+          if ($fixtureIpInterfaceUnknownExit -ne 2 -or $fixtureIpInterfaceUnknownResult.status -ne "UNKNOWN") { throw "Missing Get-NetIPInterface IPv6 state must return UNKNOWN/2." }
           $global:LASTEXITCODE = 0
 
       - name: Install frontend dependencies

@@ -119,6 +119,29 @@ function Convert-PropertyValue {
     return [string]$Value
 }
 
+function Convert-DnsAddressFamily {
+    param([AllowNull()][object]$Value)
+
+    if ($null -eq $Value) {
+        return "Unknown"
+    }
+
+    # Get-DnsClientServerAddress exposes MSFT_DNSClientServerAddress.AddressFamily
+    # as the native Winsock numeric family: AF_INET=2 and AF_INET6=23.
+    # PowerShell's table formatting renders these as IPv4/IPv6, but casting the
+    # raw CIM property to string preserves the numeric values.
+    $familyText = ([string]$Value).Trim()
+    switch -Exact ($familyText) {
+        "2" { return "IPv4" }
+        "23" { return "IPv6" }
+        "IPv4" { return "IPv4" }
+        "IPv6" { return "IPv6" }
+        "InterNetwork" { return "IPv4" }
+        "InterNetworkV6" { return "IPv6" }
+        default { return "Unknown:$familyText" }
+    }
+}
+
 function Get-SelectedProperties {
     param(
         [Parameter(Mandatory = $true)][object]$InputObject,
@@ -335,7 +358,8 @@ function Get-DnsObservation {
                         Sort-Object -Property AddressFamily |
                         ForEach-Object {
                             [pscustomobject]@{
-                                addressFamily = [string]$_.AddressFamily
+                                addressFamily = Convert-DnsAddressFamily -Value $_.AddressFamily
+                                addressFamilyRaw = [string]$_.AddressFamily
                                 serverAddresses = @($_.ServerAddresses | ForEach-Object { [string]$_ })
                             }
                         }
@@ -626,7 +650,17 @@ foreach ($id in $baselineIds) {
             $unknown += "No DNS server address-family records were returned for physical adapter $id in the $($adapterObservation.label) observation."
             continue
         }
-        $observedFamilies = @($addressRecords | ForEach-Object { [string]$_.addressFamily })
+        $observedFamilies = @(
+            $addressRecords | ForEach-Object {
+                $rawFamilyProperty = $_.PSObject.Properties["addressFamilyRaw"]
+                $familyValue = if ($null -ne $rawFamilyProperty) { $rawFamilyProperty.Value } else { $_.addressFamily }
+                Convert-DnsAddressFamily -Value $familyValue
+            }
+        )
+        $unrecognizedFamilies = @($observedFamilies | Where-Object { $_ -notin @("IPv4", "IPv6") })
+        if ($unrecognizedFamilies.Count -gt 0) {
+            $unknown += "One or more DNS address-family records are unrecognized for physical adapter $id in the $($adapterObservation.label) observation: $($unrecognizedFamilies -join ', ')."
+        }
         foreach ($family in @("IPv4", "IPv6")) {
             if ($observedFamilies -notcontains $family) {
                 $unknown += "The $family DNS server address record is missing for physical adapter $id in the $($adapterObservation.label) observation."

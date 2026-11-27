@@ -71,7 +71,7 @@ Microsoft documents `ConnectionSpecificSuffixSearchList` on the `MSFT_DNSClient`
 
 The JSON also records:
 
-- adapter identity, hardware/virtual classification, and IPv4/IPv6 DNS server lists;
+- adapter identity, hardware/virtual classification, and IPv4/IPv6 DNS server lists; the native CIM family value is retained as `addressFamilyRaw` (`2` = IPv4, `23` = IPv6) while normalized labels are used for comparison;
 - selected per-interface DNS Client settings;
 - global suffix-search settings, the system DoH known-server inventory, and NRPT rules where available;
 - raw `netsh dnsclient dump`, `show global`, `show state`, and `show encryption` output as review-only evidence;

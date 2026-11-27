@@ -60,6 +60,11 @@ jobs:
           $malformedEvidence = ConvertFrom-NetshInterfaceDnsDump -AddressFamily IPv4 -Lines @('set dnsservers name="Ethernet fixture" source=manual')
           $malformedMode = Get-NetshInterfaceDnsSourceForAdapter -ParsedEvidence $malformedEvidence -InterfaceAlias "Ethernet fixture"
           if ($malformedMode.state -ne "unknown" -or $malformedMode.sourceMode -ne "Unknown") { throw "An unrecognized source token must remain Unknown." }
+          $caseInsensitiveEvidence = ConvertFrom-NetshInterfaceDnsDump -AddressFamily IPv4 -Lines @('SET DNSSERVERS name=Ethernet source=DHCP register=primary validate=no', 'add dnsservers name=Ethernet address=192.0.2.54 index=2')
+          $caseInsensitiveMode = Get-NetshInterfaceDnsSourceForAdapter -ParsedEvidence $caseInsensitiveEvidence -InterfaceAlias "ethernet"
+          if ($caseInsensitiveMode.state -ne "observed" -or $caseInsensitiveMode.sourceToken -ne "dhcp") { throw "Source parsing must be case-insensitive and ignore add-server lines." }
+          $missingAdapterMode = Get-NetshInterfaceDnsSourceForAdapter -ParsedEvidence $ipv4DhcpEvidence -InterfaceAlias "Wi-Fi"
+          if ($missingAdapterMode.state -ne "unknown" -or $missingAdapterMode.sourceMode -ne "Unknown") { throw "A missing adapter source row must remain Unknown." }
 
           $scriptText = Get-Content -LiteralPath $scriptPath -Raw
           $sourceModuleText = Get-Content -LiteralPath $sourceModulePath -Raw
@@ -76,6 +81,43 @@ jobs:
           if ($observation.schemaVersion -ne 3) { throw "The DNS observer wrote an unsupported schema version." }
           if (-not $observation.collection.getNetAdapter.succeeded) { throw "Get-NetAdapter did not produce a usable observer snapshot." }
           if (-not $observation.collection.getDnsClientServerAddress.succeeded) { throw "Get-DnsClientServerAddress did not produce a usable observer snapshot." }
+
+          # Emit privacy-safe live-host evidence counts; never print adapter aliases,
+          # GUIDs, DNS addresses, suffixes, registry contents, or raw netsh output.
+          $physicalAdapters = @($observation.adapters | Where-Object { $_.hardwareInterface -eq $true })
+          $sourceEvidenceSummary = foreach ($family in @("ipv4", "ipv6")) {
+            $familyEvidence = @($physicalAdapters | ForEach-Object { $_.dnsSourceMode.$family })
+            $observed = @($familyEvidence | Where-Object { $_.state -eq "observed" })
+            [pscustomobject]@{
+              AddressFamily = $family.ToUpperInvariant()
+              PhysicalAdapters = $physicalAdapters.Count
+              Observed = $observed.Count
+              Static = @($observed | Where-Object { $_.sourceToken -eq "static" }).Count
+              Automatic = @($observed | Where-Object { $_.sourceToken -eq "dhcp" }).Count
+              UnknownOrAmbiguous = @($familyEvidence | Where-Object { $_.state -ne "observed" }).Count
+            }
+          }
+          $runnerOs = [string]$observation.os.values.Caption
+          $runnerBuild = [string]$observation.os.values.BuildNumber
+          Write-Host ("Live runner OS: {0}; build {1}; physical adapters observed: {2}" -f $runnerOs, $runnerBuild, $physicalAdapters.Count)
+          foreach ($summary in $sourceEvidenceSummary) {
+            Write-Host ("Live {0} DNS source evidence: observed={1}, static={2}, automatic={3}, unknown_or_ambiguous={4}" -f $summary.AddressFamily, $summary.Observed, $summary.Static, $summary.Automatic, $summary.UnknownOrAmbiguous)
+          }
+          $summaryLines = @(
+            "### Read-only live DNS source evidence",
+            "",
+            "| Runner OS | Build | Physical adapters |",
+            "|---|---:|---:|",
+            "| $runnerOs | $runnerBuild | $($physicalAdapters.Count) |",
+            "",
+            "| Family | Observed | Static | Automatic | Unknown / ambiguous |",
+            "|---|---:|---:|---:|---:|"
+          )
+          foreach ($summary in $sourceEvidenceSummary) {
+            $summaryLines += "| $($summary.AddressFamily) | $($summary.Observed) | $($summary.Static) | $($summary.Automatic) | $($summary.UnknownOrAmbiguous) |"
+          }
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ($summaryLines -join [Environment]::NewLine)
+
           & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $scriptPath -Mode Compare -BaselinePath $snapshotPath -OutputPath $comparisonPath
           $compareExitCode = $LASTEXITCODE
           if ($compareExitCode -notin @(0, 1, 2)) { throw "The DNS observer comparison returned an unexpected exit code: $compareExitCode." }

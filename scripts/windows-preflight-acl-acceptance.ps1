@@ -1,0 +1,80 @@
+$ErrorActionPreference = "Stop"
+
+$repoRoot = Split-Path -Parent $PSScriptRoot
+$manifest = Join-Path $repoRoot "src-tauri/Cargo.toml"
+$root = Join-Path $env:RUNNER_TEMP ("preflight-acl-" + [Guid]::NewGuid().ToString("N"))
+$runDir = Join-Path $root "run"
+$config = Join-Path $runDir "config.json"
+$userName = "aclprobe" + [Guid]::NewGuid().ToString("N").Substring(0, 10)
+$passwordText = [Guid]::NewGuid().ToString("N") + "aA1!"
+$securePassword = ConvertTo-SecureString $passwordText -AsPlainText -Force
+$createdUser = $false
+
+try {
+    Import-Module Microsoft.PowerShell.LocalAccounts -ErrorAction Stop
+
+    Write-Host "Creating an ACL fixture with the production Rust primitive."
+    & cargo run --locked --manifest-path $manifest --target x86_64-pc-windows-msvc --bin preflight-acl-fixture -- $root
+    if ($LASTEXITCODE -ne 0) {
+        throw "The production ACL fixture binary failed."
+    }
+
+    $ownContents = Get-Content -LiteralPath $config -Raw -ErrorAction Stop
+    if ($ownContents -ne "ACL-ACCEPTANCE-SENTINEL") {
+        throw "The intended application identity could not read the ACL fixture."
+    }
+
+    $user = New-LocalUser -Name $userName -Password $securePassword -AccountNeverExpires -PasswordNeverExpires -UserMayNotChangePassword
+    $createdUser = $true
+    Add-LocalGroupMember -SID ([System.Security.Principal.SecurityIdentifier]::new("S-1-5-32-545")) -Member $user
+
+    $credential = [System.Management.Automation.PSCredential]::new(
+        "$env:COMPUTERNAME\$userName",
+        $securePassword
+    )
+    $childScript = @"
+$ErrorActionPreference = 'Stop'
+$root = '$($root.Replace("'", "''"))'
+$runDir = '$($runDir.Replace("'", "''"))'
+$config = '$($config.Replace("'", "''"))'
+$checks = @(
+    @{ Name = 'list preflight root'; Action = { Get-ChildItem -LiteralPath $root -Force -ErrorAction Stop | Out-Null } },
+    @{ Name = 'list per-run directory'; Action = { Get-ChildItem -LiteralPath $runDir -Force -ErrorAction Stop | Out-Null } },
+    @{ Name = 'read credential-bearing config'; Action = { Get-Content -LiteralPath $config -Raw -ErrorAction Stop | Out-Null } }
+)
+foreach ($check in $checks) {
+    try {
+        & $check.Action
+        Write-Error "Unexpectedly succeeded: $($check.Name)"
+        exit 41
+    } catch {
+        if ($_.Exception -is [System.UnauthorizedAccessException] -or $_.Exception.HResult -eq -2147024891) {
+            Write-Output "Denied as expected: $($check.Name)"
+        } else {
+            Write-Error "Unexpected error while checking $($check.Name): $($_.Exception.GetType().FullName) / $($_.Exception.Message)"
+            exit 42
+        }
+    }
+}
+exit 0
+"@
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childScript))
+    $pwsh = (Get-Process -Id $PID).Path
+    $process = Start-Process -FilePath $pwsh -Credential $credential -ArgumentList @(
+        "-NoProfile", "-NonInteractive", "-EncodedCommand", $encoded
+    ) -PassThru -Wait -WindowStyle Hidden
+
+    if ($process.ExitCode -ne 0) {
+        throw "The second standard-user ACL denial check failed with exit code $($process.ExitCode)."
+    }
+
+    Write-Host "PASS: the current user can read the fixture; a second local standard user cannot list/read it."
+}
+finally {
+    if ($createdUser) {
+        Remove-LocalUser -Name $userName -ErrorAction SilentlyContinue
+    }
+    if (Test-Path -LiteralPath $root) {
+        Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}

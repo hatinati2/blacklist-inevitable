@@ -35,7 +35,13 @@ try {
 
     $user = New-LocalUser -Name $userName -Password $securePassword -AccountNeverExpires -PasswordNeverExpires -UserMayNotChangePassword
     $createdUser = $true
-    Add-LocalGroupMember -SID ([System.Security.Principal.SecurityIdentifier]::new("S-1-5-32-545")) -Member "$env:COMPUTERNAME\$userName"
+    # Resolve the built-in Users SID in this PowerShell process and pass only
+    # its localized group name across the WinPS compatibility boundary.
+    $usersGroupAccount = ([System.Security.Principal.SecurityIdentifier]::new("S-1-5-32-545")).Translate(
+        [System.Security.Principal.NTAccount]
+    ).Value
+    $usersGroupName = $usersGroupAccount.Split('\')[-1]
+    Add-LocalGroupMember -Group $usersGroupName -Member "$env:COMPUTERNAME\$userName"
 
     $credential = [System.Management.Automation.PSCredential]::new(
         "$env:COMPUTERNAME\$userName",

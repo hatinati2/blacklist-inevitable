@@ -487,9 +487,14 @@ async fn every_supported_outbound_completes_an_authenticated_controlled_http_rou
 
     for case in &cases {
         let socks_port = tcp_port(&mut Vec::new());
-        let mut client_config =
-            build_probe_config(&case.profile, &case.credentials, socks_port)
-                .unwrap_or_else(|error| panic!("{} adapter rejected its test profile: {error}", case.label));
+        let socks_credentials = ProbeSocksCredentials::generate();
+        let mut client_config = build_probe_config_with_socks_auth(
+            &case.profile,
+            &case.credentials,
+            socks_port,
+            &socks_credentials,
+        )
+        .unwrap_or_else(|error| panic!("{} adapter rejected its test profile: {error}", case.label));
 
         // Trust only the ephemeral test certificate. Production adapters retain
         // their normal certificate validation behavior.
@@ -512,8 +517,12 @@ async fn every_supported_outbound_completes_an_authenticated_controlled_http_rou
         let mut client = ManagedChild::spawn(&binary, &client_config_path);
         wait_for_socks(&mut client.0, socks_port, case.label).await;
 
-        let http_client = build_probe_http_client(socks_port, Duration::from_secs(12))
-            .expect("build controlled HTTP client");
+        let http_client = build_probe_http_client(
+            socks_port,
+            &socks_credentials,
+            Duration::from_secs(12),
+        )
+        .expect("build authenticated controlled HTTP client");
         let measured = timeout(
             Duration::from_secs(15),
             measure_request_with_client(&http_client, &[url.as_str()]),

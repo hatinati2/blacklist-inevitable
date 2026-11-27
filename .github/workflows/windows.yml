@@ -184,12 +184,12 @@ jobs:
                 dnsServerAddresses = @($addressRecords)
                 ipInterfaceSettings = @(
                   [pscustomobject]@{
-                    values = [pscustomobject]@{ AddressFamily = "IPv4"; Dhcp = "Enabled"; RouterDiscovery = "ControlledByDHCP" }
-                    availableProperties = @("AddressFamily", "Dhcp", "RouterDiscovery")
+                    values = [pscustomobject]@{ InterfaceAlias = "Ethernet fixture"; AddressFamily = "IPv4"; Dhcp = "Enabled"; RouterDiscovery = "ControlledByDHCP" }
+                    availableProperties = @("InterfaceAlias", "AddressFamily", "Dhcp", "RouterDiscovery")
                   },
                   [pscustomobject]@{
-                    values = [pscustomobject]@{ AddressFamily = "IPv6"; Dhcp = "Disabled"; RouterDiscovery = "Enabled"; ManagedAddressConfiguration = "Enabled"; OtherStatefulConfiguration = if ($OmitIPv6OtherStateful) { $null } else { "Enabled" } }
-                    availableProperties = if ($OmitIPv6OtherStateful) { @("AddressFamily", "Dhcp", "RouterDiscovery", "ManagedAddressConfiguration") } else { @("AddressFamily", "Dhcp", "RouterDiscovery", "ManagedAddressConfiguration", "OtherStatefulConfiguration") }
+                    values = [pscustomobject]@{ InterfaceAlias = "Ethernet fixture"; AddressFamily = "IPv6"; Dhcp = "Disabled"; RouterDiscovery = "Enabled"; ManagedAddressConfiguration = "Enabled"; OtherStatefulConfiguration = if ($OmitIPv6OtherStateful) { $null } else { "Enabled" } }
+                    availableProperties = if ($OmitIPv6OtherStateful) { @("InterfaceAlias", "AddressFamily", "Dhcp", "RouterDiscovery", "ManagedAddressConfiguration") } else { @("InterfaceAlias", "AddressFamily", "Dhcp", "RouterDiscovery", "ManagedAddressConfiguration", "OtherStatefulConfiguration") }
                   }
                 )
                 ipv6DnsPolicy = if ($OmitIpv6Policy) {

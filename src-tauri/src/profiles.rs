@@ -866,7 +866,7 @@ mod tests {
         .expect("valid mixed batch");
 
         assert_eq!(batch.profiles.len(), 1);
-        assert_eq!(batch.profiles[0].name, "First");
+        assert_eq!(batch.profiles[0].profile.name, "First");
         assert_eq!(batch.rejected.len(), 1);
         assert_eq!(batch.rejected[0].line, 4);
     }

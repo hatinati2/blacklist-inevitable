@@ -13,6 +13,11 @@ struct Inner {
     idle: Notify,
     #[cfg(windows)]
     job: Option<WindowsJobObject>,
+    // The named kernel object is an OS-released process lease. Keeping its
+    // handle open prevents a second desktop process from running startup
+    // cleanup against the first process's active preflight files.
+    #[cfg(windows)]
+    instance_mutex: Mutex<Option<Result<WindowsInstanceMutex, String>>>,
 }
 
 fn lock_state(inner: &Inner) -> MutexGuard<'_, State> {
@@ -35,6 +40,58 @@ struct State {
     active: HashMap<u64, watch::Sender<bool>>,
 }
 
+
+#[cfg(windows)]
+struct WindowsInstanceMutex {
+    handle: windows_sys::Win32::Foundation::HANDLE,
+}
+
+// The handle is owned once by ProcessSupervisor and closed once in Drop.
+#[cfg(windows)]
+unsafe impl Send for WindowsInstanceMutex {}
+#[cfg(windows)]
+unsafe impl Sync for WindowsInstanceMutex {}
+
+#[cfg(windows)]
+impl WindowsInstanceMutex {
+    fn acquire(name: &str) -> Result<Self, String> {
+        use windows_sys::Win32::Foundation::{CloseHandle, GetLastError};
+        use windows_sys::Win32::System::Threading::CreateMutexW;
+
+        let name_wide = name.encode_utf16().chain(std::iter::once(0)).collect::<Vec<_>>();
+        let handle = unsafe {
+            CreateMutexW(std::ptr::null(), 0, name_wide.as_ptr())
+        };
+        if handle.is_null() {
+            return Err(format!(
+                "CreateMutexW for the desktop instance lease failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+
+        // ERROR_ALREADY_EXISTS means another process already owns the named
+        // object. Do not retain our additional handle or run startup recovery.
+        if unsafe { GetLastError() } == 183 {
+            unsafe { CloseHandle(handle) };
+            return Err(
+                "Another Blacklist Inevitable desktop instance is already running; preflight cleanup is disabled in this instance."
+                    .to_string(),
+            );
+        }
+
+        Ok(Self { handle })
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WindowsInstanceMutex {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        // The kernel object disappears when the last process handle closes,
+        // including after forced process termination.
+        unsafe { CloseHandle(self.handle) };
+    }
+}
 
 #[cfg(windows)]
 struct WindowsJobObject {
@@ -390,6 +447,8 @@ impl Default for ProcessSupervisor {
                 idle: Notify::new(),
                 #[cfg(windows)]
                 job,
+                #[cfg(windows)]
+                instance_mutex: Mutex::new(None),
             }),
         }
     }
@@ -401,6 +460,18 @@ impl ProcessSupervisor {
     /// its kill-on-close Job Object.
     pub fn for_app() -> Self {
         let supervisor = Self::default();
+        #[cfg(windows)]
+        {
+            let lease = WindowsInstanceMutex::acquire(
+                "Local\\BlacklistInevitable.DesktopInstance",
+            );
+            let mut slot = supervisor
+                .inner
+                .instance_mutex
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *slot = Some(lease);
+        }
         supervisor.mark_cleanup_unhealthy();
         supervisor
     }
@@ -412,6 +483,17 @@ impl ProcessSupervisor {
     pub fn attach_current_process_to_job(&self) -> Result<(), String> {
         #[cfg(windows)]
         {
+            let lease = self
+                .inner
+                .instance_mutex
+                .lock()
+                .map_err(|_| "The Windows desktop instance lease state is unavailable.".to_string())?;
+            match lease.as_ref() {
+                Some(Ok(_)) => {}
+                Some(Err(error)) => return Err(error.clone()),
+                None => return Err("The Windows desktop instance lease was not acquired.".to_string()),
+            }
+
             let job = self.inner.job.as_ref().ok_or_else(|| {
                 "The Windows process-containment Job Object is unavailable.".to_string()
             })?;

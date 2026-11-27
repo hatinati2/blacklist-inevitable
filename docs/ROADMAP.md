@@ -44,7 +44,7 @@ Windows is the first platform. Android work starts only after the Windows releas
 - [x] Attach the desktop application itself to its kill-on-close Job Object during Tauri setup, after initial UI helpers are initialized but before engine commands can run, so later children inherit containment at process creation; fail closed if the app cannot join.
 - [x] Add a Windows integration test for inherited child membership and per-instance Job Object isolation, closing the pre-assignment orphan window.
 - [ ] Verify file cleanup, child-process exit, and listener release under success, failure, timeout, cancellation, graceful shutdown, and app-level forced termination on Windows.
-- [ ] Run protocol-aware preflight tests against controlled VLESS, VMess, Trojan, Shadowsocks, Hysteria2, TUIC, and Naive test servers.
+- [x] Run protocol-aware preflight tests against controlled VLESS/TLS, VMess WebSocket/TLS, Trojan/TLS, Shadowsocks AES-256-GCM, Hysteria2 Salamander, TUIC, Naive HTTPS, and Naive QUIC servers. Exact-head Windows CI #836 passed all eight authenticated local HTTP 204 roundtrips: https://github.com/hatinati2/blacklist-inevitable/actions/runs/46071362794.
 
 ## M3 — Multi-engine adapters
 
@@ -57,11 +57,11 @@ Windows is the first platform. Android work starts only after the Windows releas
 
 - [x] Add a bounded Naive HTTPS / QUIC share-link importer and sing-box outbound mapping for Windows.
 - [ ] Evaluate Mieru profile/config import and sing-box mapping for the Windows release; do not assume a share-link URI format.
-- [ ] Run controlled-server Naive authentication tests, including both HTTPS and QUIC modes, before claiming end-to-end protocol compatibility.
+- [x] Run controlled-server Naive authentication tests, including both HTTPS and QUIC modes, before claiming end-to-end protocol compatibility. Covered by the exact-head Windows CI integration run #836; this is controlled localhost coverage, not certification against arbitrary production servers.
 - [ ] For Mieru, verify upstream engine support, canonical config format, credential isolation, transport semantics, and controlled-server behavior before implementation.
 - [ ] Keep unsupported fields visible by name and reject profiles that cannot be represented without semantic loss.
 
-Naive import/config mapping is implemented for a bounded subset; remote authentication tests remain open. Mieru is a future Windows compatibility target and is not currently supported. Android and other OS work remains blocked until the Windows release gate is complete.
+Naive import/config mapping is implemented for a bounded subset, and controlled localhost authentication/data-path tests now pass for both HTTPS and QUIC. Compatibility with arbitrary third-party production Naive servers remains unverified. Mieru is a future Windows compatibility target and is not currently supported. Android and other OS work remains blocked until the Windows release gate is complete.
 
 ## M4 — Normal connection lifecycle
 

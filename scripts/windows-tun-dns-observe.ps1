@@ -835,7 +835,9 @@ foreach ($id in $currentIds) {
     }
 }
 
+$globalSettingsComparable = $true
 if (@($baseline.globalSettings).Count -eq 0 -or @($current.globalSettings).Count -eq 0) {
+    $globalSettingsComparable = $false
     $unknown += "Global DNS suffix/devolution settings were not returned."
 }
 else {
@@ -843,23 +845,28 @@ else {
     foreach ($record in @($baseline.globalSettings) + @($current.globalSettings)) {
         $missingGlobalFields = @($requiredGlobalFields | Where-Object { $record.availableProperties -notcontains $_ })
         if ($missingGlobalFields.Count -gt 0) {
+            $globalSettingsComparable = $false
             $unknown += "Global DNS settings are missing properties: $($missingGlobalFields -join ", ")."
         }
     }
 }
 
+$dohInventoryComparable = $true
 foreach ($record in @($baseline.dohServerInventory) + @($current.dohServerInventory)) {
     $requiredDohFields = @("ServerAddress", "DohTemplate", "AutoUpgrade", "AllowFallbackToUdp")
     $missingDohFields = @($requiredDohFields | Where-Object { $record.availableProperties -notcontains $_ })
     if ($missingDohFields.Count -gt 0) {
+        $dohInventoryComparable = $false
         $unknown += "A DoH inventory record is missing properties: $($missingDohFields -join ", ")."
     }
 }
 
+$nrptComparable = $true
 foreach ($record in @($baseline.nrptRules) + @($current.nrptRules)) {
     $requiredNrptFields = @("Namespace", "NameServers")
     $missingNrptFields = @($requiredNrptFields | Where-Object { $record.availableProperties -notcontains $_ })
     if ($missingNrptFields.Count -gt 0) {
+        $nrptComparable = $false
         $unknown += "An NRPT rule is missing properties: $($missingNrptFields -join ", ")."
     }
 }
@@ -871,10 +878,14 @@ elseif ((ConvertTo-ComparableJson $baseline.os.values) -ne (ConvertTo-Comparable
     $unknown += "Windows version/build information changed between baseline and current observations."
 }
 
-foreach ($propertyName in @("globalSettings", "dohServerInventory", "nrptRules")) {
-    if ((ConvertTo-ComparableJson $baseline.$propertyName) -ne (ConvertTo-ComparableJson $current.$propertyName)) {
-        $changes += "Global DNS evidence '$propertyName' changed."
-    }
+if ($globalSettingsComparable -and (ConvertTo-ComparableJson $baseline.globalSettings) -ne (ConvertTo-ComparableJson $current.globalSettings)) {
+    $changes += "Global DNS evidence 'globalSettings' changed."
+}
+if ($dohInventoryComparable -and (ConvertTo-ComparableJson $baseline.dohServerInventory) -ne (ConvertTo-ComparableJson $current.dohServerInventory)) {
+    $changes += "Global DNS evidence 'dohServerInventory' changed."
+}
+if ($nrptComparable -and (ConvertTo-ComparableJson $baseline.nrptRules) -ne (ConvertTo-ComparableJson $current.nrptRules)) {
+    $changes += "Global DNS evidence 'nrptRules' changed."
 }
 
 $baselineAdapterIds = @($baseline.adapters | ForEach-Object { [string]$_.interfaceGuid })

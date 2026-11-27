@@ -334,16 +334,22 @@ fn make_cases(certificate: &Path, private_key: &Path) -> Vec<ProtocolCase> {
     let tls = inbound_tls(certificate, private_key, &["h3"]);
     cases.push(ProtocolCase {
         label: "naive-quic",
-        profile: profile("naive", port, &[
-            ("sni", "localhost"), ("insecureConcurrency", "0"), ("quic", "true"),
-        ]),
+        // Cronet resolves loopback to IPv6 (::1) for its QUIC socket on Windows.
+        // Bind the controlled test listener on the same address family to avoid
+        // an IPv4-only listener rejecting the otherwise-local QUIC handshake.
+        profile: ProfileSummary {
+            server: "::1".to_string(),
+            ..profile("naive", port, &[
+                ("sni", "localhost"), ("insecureConcurrency", "0"), ("quic", "true"),
+            ])
+        },
         credentials: credentials(&[
             ("username", "controlled-naive-quic-user"),
             ("password", "controlled-naive-quic-secret"),
         ]),
         inbound: json!({
             "type": "naive", "tag": "naive-quic-in", "network": "udp",
-            "listen": "127.0.0.1", "listen_port": port,
+            "listen": "::1", "listen_port": port,
             "users": [{
                 "username": "controlled-naive-quic-user",
                 "password": "controlled-naive-quic-secret"

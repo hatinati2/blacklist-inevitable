@@ -115,11 +115,6 @@ public static class PreflightAclImpersonationProbe {
     }
     Write-Host "PASS: the current user can read the fixture; a second local standard-user token cannot list/read it."
 
-    if ($process.ExitCode -ne 0) {
-        throw "The second standard-user ACL denial check failed with exit code $($process.ExitCode)."
-    }
-
-    Write-Host "PASS: the current user can read the fixture; a second local standard user cannot list/read it."
 }
 finally {
     if ($createdUser) {

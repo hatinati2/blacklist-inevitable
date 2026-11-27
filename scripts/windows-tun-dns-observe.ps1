@@ -558,6 +558,15 @@ foreach ($collectorName in $requiredCollectors) {
     }
 }
 
+$unclassifiedBaseline = @($baseline.adapters | Where-Object { $null -eq $_.hardwareInterface })
+$unclassifiedCurrent = @($current.adapters | Where-Object { $null -eq $_.hardwareInterface })
+if ($unclassifiedBaseline.Count -gt 0) {
+    $unknown += "One or more baseline adapters could not be classified as physical or virtual."
+}
+if ($unclassifiedCurrent.Count -gt 0) {
+    $unknown += "One or more current adapters could not be classified as physical or virtual."
+}
+
 $baselinePhysical = @($baseline.adapters | Where-Object { $_.hardwareInterface -eq $true })
 $currentPhysical = @($current.adapters | Where-Object { $_.hardwareInterface -eq $true })
 
@@ -593,6 +602,22 @@ foreach ($id in $baselineIds) {
     }
     if (@($before.dnsClientSettings).Count -eq 0 -or @($after.dnsClientSettings).Count -eq 0) {
         $unknown += "Per-interface DNS Client settings were not returned for physical adapter $id."
+    }
+    foreach ($adapterObservation in @(
+        [pscustomobject]@{ label = "baseline"; adapter = $before },
+        [pscustomobject]@{ label = "current"; adapter = $after }
+    )) {
+        $addressRecords = @($adapterObservation.adapter.dnsServerAddresses)
+        if ($addressRecords.Count -eq 0) {
+            $unknown += "No DNS server address-family records were returned for physical adapter $id in the $($adapterObservation.label) observation."
+            continue
+        }
+        $observedFamilies = @($addressRecords | ForEach-Object { [string]$_.addressFamily })
+        foreach ($family in @("IPv4", "IPv6")) {
+            if ($observedFamilies -notcontains $family) {
+                $unknown += "The $family DNS server address record is missing for physical adapter $id in the $($adapterObservation.label) observation."
+            }
+        }
     }
     $requiredClientFields = @("ConnectionSpecificSuffix", "RegisterThisConnectionsAddress", "UseSuffixWhenRegistering")
     foreach ($record in @($before.dnsClientSettings) + @($after.dnsClientSettings)) {

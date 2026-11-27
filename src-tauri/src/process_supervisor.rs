@@ -58,10 +58,11 @@ impl WindowsInstanceMutex {
         use windows_sys::Win32::Foundation::{CloseHandle, GetLastError};
         use windows_sys::Win32::System::Threading::CreateMutexW;
 
-        let name_wide = name.encode_utf16().chain(std::iter::once(0)).collect::<Vec<_>>();
-        let handle = unsafe {
-            CreateMutexW(std::ptr::null(), 0, name_wide.as_ptr())
-        };
+        let name_wide = name
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let handle = unsafe { CreateMutexW(std::ptr::null(), 0, name_wide.as_ptr()) };
         if handle.is_null() {
             return Err(format!(
                 "CreateMutexW for the desktop instance lease failed: {}",
@@ -69,7 +70,7 @@ impl WindowsInstanceMutex {
             ));
         }
 
-        // ERROR_ALREADY_EXISTS means another process already owns the named
+        // ERROR_ALREADY_EXISTS means another process already holds the named
         // object. Do not retain our additional handle or run startup recovery.
         if unsafe { GetLastError() } == 183 {
             unsafe { CloseHandle(handle) };
@@ -487,11 +488,17 @@ impl ProcessSupervisor {
                 .inner
                 .instance_mutex
                 .lock()
-                .map_err(|_| "The Windows desktop instance lease state is unavailable.".to_string())?;
+                .map_err(|_| {
+                    "The Windows desktop instance lease state is unavailable.".to_string()
+                })?;
             match lease.as_ref() {
                 Some(Ok(_)) => {}
                 Some(Err(error)) => return Err(error.clone()),
-                None => return Err("The Windows desktop instance lease was not acquired.".to_string()),
+                None => {
+                    return Err(
+                        "The Windows desktop instance lease was not acquired.".to_string(),
+                    )
+                }
             }
 
             let job = self.inner.job.as_ref().ok_or_else(|| {
@@ -1253,7 +1260,10 @@ mod windows_instance_lease_tests {
             .expect("first app-like process must acquire the instance lease");
 
         let second = WindowsInstanceMutex::acquire(&name);
-        assert!(second.is_err(), "a second app-like process must not acquire the same lease");
+        assert!(
+            second.is_err(),
+            "a second app-like process must not acquire the same lease"
+        );
         assert!(
             second.err().unwrap_or_default().contains("already running"),
             "duplicate instance should be rejected with a clear diagnostic"

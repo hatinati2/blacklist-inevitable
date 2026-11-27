@@ -61,9 +61,9 @@ The helper uses `InterfaceGuid` to correlate physical adapters and does not use 
 
 ## Result interpretation
 
-- `PASS`: only the observed physical-adapter DNS server lists, selected per-interface DNS Client settings, read-only per-interface registry DoH evidence, and selected global DNS evidence were unchanged.
+- `PASS`: only the observed physical-adapter DNS server lists, selected per-interface DNS Client settings, read-only per-interface registry DoH evidence, per-family netsh DNS source tokens, and selected global DNS evidence were unchanged.
 - `FAIL`: one or more observed physical-adapter/global DNS values changed.
-- `UNKNOWN`: a required collector failed, physical-adapter identity or physical/virtual classification is incomplete, per-interface DNS settings are missing, an IPv4/IPv6 DNS-family record is absent, or the requested virtual TUN adapter could not be identified.
+- `UNKNOWN`: a required collector failed, physical-adapter identity or physical/virtual classification is incomplete, per-interface DNS settings or source-mode statements are missing/ambiguous, an IPv4/IPv6 DNS-family record is absent, or the requested virtual TUN adapter could not be identified.
 
 Microsoft documents `ConnectionSpecificSuffixSearchList` on the `MSFT_DNSClient` WMI class and exposes the global `UseSuffixSearchList` switch alongside `SuffixSearchList`. The comparison therefore treats either property being unavailable as UNKNOWN rather than assuming the search list is fully represented:
 

@@ -236,8 +236,10 @@ mod tests {
             "ci-test-secret-never-used-for-network-access".to_string(),
         );
 
-        store_credentials(&profile_id, &expected).expect("store credentials in Windows Credential Manager");
-        let loaded = get_credentials(&profile_id).expect("read credentials from Windows Credential Manager");
+        store_credentials(&profile_id, &expected)
+            .expect("store credentials in Windows Credential Manager");
+        let loaded = get_credentials(&profile_id)
+            .expect("read credentials from Windows Credential Manager");
         assert_eq!(loaded, expected);
 
         delete_credentials(&profile_id).expect("delete Windows Credential Manager entry");

@@ -391,6 +391,7 @@ function Get-DnsObservation {
         $globalSettings = @(
             $globalCapture.data | ForEach-Object {
                 Get-SelectedProperties -InputObject $_ -PropertyNames @(
+                    "UseSuffixSearchList",
                     "SuffixSearchList",
                     "UseDevolution",
                     "DevolutionLevel"
@@ -632,7 +633,7 @@ foreach ($id in $baselineIds) {
             }
         }
     }
-    $requiredClientFields = @("ConnectionSpecificSuffix", "RegisterThisConnectionsAddress", "UseSuffixWhenRegistering")
+    $requiredClientFields = @("ConnectionSpecificSuffix", "ConnectionSpecificSuffixSearchList", "RegisterThisConnectionsAddress", "UseSuffixWhenRegistering")
     foreach ($record in @($before.dnsClientSettings) + @($after.dnsClientSettings)) {
         $missingClientFields = @($requiredClientFields | Where-Object { $record.availableProperties -notcontains $_ })
         if ($missingClientFields.Count -gt 0) {
@@ -664,7 +665,7 @@ if (@($baseline.globalSettings).Count -eq 0 -or @($current.globalSettings).Count
     $unknown += "Global DNS suffix/devolution settings were not returned."
 }
 else {
-    $requiredGlobalFields = @("SuffixSearchList", "UseDevolution", "DevolutionLevel")
+    $requiredGlobalFields = @("UseSuffixSearchList", "SuffixSearchList", "UseDevolution", "DevolutionLevel")
     foreach ($record in @($baseline.globalSettings) + @($current.globalSettings)) {
         $missingGlobalFields = @($requiredGlobalFields | Where-Object { $record.availableProperties -notcontains $_ })
         if ($missingGlobalFields.Count -gt 0) {

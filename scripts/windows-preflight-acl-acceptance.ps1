@@ -43,8 +43,9 @@ try {
     $usersGroupName = $usersGroupAccount.Split('\')[-1]
     Add-LocalGroupMember -Group $usersGroupName -Member "$env:COMPUTERNAME\$userName"
 
+    # Use the explicit local-account prefix; the account is not a domain identity.
     $credential = [System.Management.Automation.PSCredential]::new(
-        "$env:COMPUTERNAME\$userName",
+        ".\$userName",
         $securePassword
     )
     $childScript = @'
@@ -82,9 +83,13 @@ exit 0
     $childScript = $childScript.Replace("__CONFIG__", $config.Replace("'", "''"))
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childScript))
     $pwsh = (Get-Process -Id $PID).Path
-    $process = Start-Process -FilePath $pwsh -Credential $credential -ArgumentList @(
-        "-NoProfile", "-NonInteractive", "-EncodedCommand", $encoded
-    ) -PassThru -Wait -WindowStyle Hidden
+    try {
+        $process = Start-Process -FilePath $pwsh -Credential $credential -ArgumentList @(
+            "-NoProfile", "-NonInteractive", "-EncodedCommand", $encoded
+        ) -PassThru -Wait -LoadUserProfile -ErrorAction Stop
+    } catch {
+        throw "Unable to launch the standard-user ACL probe process: $($_.Exception.ToString())"
+    }
 
     if ($process.ExitCode -ne 0) {
         throw "The second standard-user ACL denial check failed with exit code $($process.ExitCode)."

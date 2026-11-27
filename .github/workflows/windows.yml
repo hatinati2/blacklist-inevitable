@@ -91,7 +91,7 @@ jobs:
             'set global doh=yes dot=no ddr=yes',
             'set dnsserver name="Ethernet fixture" source=static address=192.0.2.53 register=primary validate=yes',
             'add dnsserver name="Ethernet fixture" address=2001:db8::53 index=2 validate=no',
-            'add encryption server=1.1.1.1 dohtemplate="https://resolver.example/dns-query{?dns}" autoupgrade=yes udpfallback=no',
+            'add encryption server=1.1.1.1 dohtemplate="https://resolver.example/dns-query{?dns}" dothost=resolver.example:853 autoupgrade=yes udpfallback=no',
             'set interface name="Ethernet fixture" ddr=yes ddrfallback=no',
             'popd'
           )
@@ -100,6 +100,11 @@ jobs:
           if ($dnsClientDumpEvidence.dnsServerCommands.Count -ne 2 -or $dnsClientDumpEvidence.dnsServerCommands[1].addressFamily -ne "IPv6") { throw "DNS Client dump server addresses/families were not preserved." }
           if ($dnsClientDumpEvidence.globalCommands.Count -ne 1 -or $dnsClientDumpEvidence.globalCommands[0].doh -ne "yes" -or $dnsClientDumpEvidence.globalCommands[0].ddr -ne "yes") { throw "DNS Client dump global DoH/DDR settings were not parsed." }
           if ($dnsClientDumpEvidence.encryptionCommands.Count -ne 1 -or $dnsClientDumpEvidence.encryptionCommands[0].autoUpgrade -ne "yes" -or $dnsClientDumpEvidence.encryptionCommands[0].udpFallback -ne "no") { throw "DNS Client dump encryption settings were not parsed." }
+          if ($dnsClientDumpEvidence.encryptionCommands[0].dotHost -ne "resolver.example:853") { throw "DNS Client dump DoT host was not preserved." }
+          $dnsClientDumpMissingDotHost = ConvertFrom-NetshDnsClientDump -Lines @('add encryption server=1.1.1.1 dohtemplate="https://resolver.example/dns-query{?dns}"')
+          if ($dnsClientDumpMissingDotHost.parseState -ne "incomplete") { throw "An encryption command missing the documented DoT host must remain incomplete." }
+          $dnsClientDumpBadDotPort = ConvertFrom-NetshDnsClientDump -Lines @('set encryption server=1.1.1.1 dohtemplate="https://resolver.example/dns-query{?dns}" dothost=resolver.example:70000')
+          if ($dnsClientDumpBadDotPort.parseState -ne "incomplete") { throw "An encryption command with an invalid DoT port must remain incomplete." }
           if ($dnsClientDumpEvidence.interfaceCommands.Count -ne 1 -or $dnsClientDumpEvidence.interfaceCommands[0].ddrFallback -ne "no") { throw "DNS Client dump per-interface DDR settings were not parsed." }
           $dnsClientDumpDuplicate = ConvertFrom-NetshDnsClientDump -Lines @('set global doh=yes doh=no')
           if ($dnsClientDumpDuplicate.parseState -ne "incomplete" -or $dnsClientDumpDuplicate.malformedCommandCount -ne 1) { throw "Duplicate DNS Client dump options must remain incomplete." }

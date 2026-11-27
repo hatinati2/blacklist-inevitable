@@ -448,8 +448,11 @@ function ConvertFrom-NetshDnsClientDump {
                         if (-not [System.Net.IPAddress]::TryParse([string]$tokens["address"], [ref]$parsedAddress)) {
                             $reason = "The added DNS server address is not a valid IP address."
                         }
-                        elseif ($tokens.Contains("index") -and ([int]::TryParse([string]$tokens["index"], [ref]$null) -eq $false)) {
-                            $reason = "The DNS server index is not a valid integer."
+                        elseif ($tokens.Contains("index")) {
+                            $parsedIndex = 0
+                            if (-not [int]::TryParse([string]$tokens["index"], [ref]$parsedIndex) -or $parsedIndex -lt 1) {
+                                $reason = "The DNS server index is not a positive integer."
+                            }
                         }
                     }
                     if ($null -eq $reason -and $tokens.Contains("register") -and $tokens["register"].ToLowerInvariant() -notin @("none", "primary", "both")) {

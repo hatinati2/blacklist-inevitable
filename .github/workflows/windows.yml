@@ -156,9 +156,24 @@ jobs:
               IPv6PolicyObserved = if ($family -eq "ipv6") { @($physicalAdapters | Where-Object { $_.ipv6DnsPolicy.state -eq "observed" }).Count } else { $null }
             }
           }
+          $dnsDumpEvidence = $observation.evidence.netshDnsClientDumpParsed
+          if ($null -eq $dnsDumpEvidence -or $dnsDumpEvidence.parseState -notin @("parsed", "incomplete", "unknown")) {
+            throw "The live DNS Client dump parser did not produce a recognized diagnostic state."
+          }
+          $dnsDumpSummary = [pscustomobject]@{
+            ParseState = [string]$dnsDumpEvidence.parseState
+            Recognized = [int]$dnsDumpEvidence.recognizedCommandCount
+            DnsServer = @($dnsDumpEvidence.dnsServerCommands).Count
+            Encryption = @($dnsDumpEvidence.encryptionCommands).Count
+            Global = @($dnsDumpEvidence.globalCommands).Count
+            Interface = @($dnsDumpEvidence.interfaceCommands).Count
+            Malformed = [int]$dnsDumpEvidence.malformedCommandCount
+            Unsupported = [int]$dnsDumpEvidence.unsupportedCommandCount
+          }
           $runnerOs = [string]$observation.os.values.Caption
           $runnerBuild = [string]$observation.os.values.BuildNumber
           Write-Host ("Live runner OS: {0}; build {1}; physical adapters observed: {2}" -f $runnerOs, $runnerBuild, $physicalAdapters.Count)
+          Write-Host ("Live DNS Client dump parser: state={0}, recognized={1}, dnsserver={2}, encryption={3}, global={4}, interface={5}, malformed={6}, unsupported={7}" -f $dnsDumpSummary.ParseState, $dnsDumpSummary.Recognized, $dnsDumpSummary.DnsServer, $dnsDumpSummary.Encryption, $dnsDumpSummary.Global, $dnsDumpSummary.Interface, $dnsDumpSummary.Malformed, $dnsDumpSummary.Unsupported)
           foreach ($summary in $sourceEvidenceSummary) {
             Write-Host ("Live {0} DNS source evidence: observed={1}, static={2}, automatic={3}, unknown_or_ambiguous={4}" -f $summary.AddressFamily, $summary.Observed, $summary.Static, $summary.Automatic, $summary.UnknownOrAmbiguous)
           }
@@ -168,6 +183,12 @@ jobs:
             "| Runner OS | Build | Physical adapters |",
             "|---|---:|---:|",
             "| $runnerOs | $runnerBuild | $($physicalAdapters.Count) |",
+            "",
+            "### Structured DNS Client dump diagnostics",
+            "",
+            "| Parse state | Recognized | DNS server | Encryption | Global | Interface | Malformed | Unsupported |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|",
+            "| $($dnsDumpSummary.ParseState) | $($dnsDumpSummary.Recognized) | $($dnsDumpSummary.DnsServer) | $($dnsDumpSummary.Encryption) | $($dnsDumpSummary.Global) | $($dnsDumpSummary.Interface) | $($dnsDumpSummary.Malformed) | $($dnsDumpSummary.Unsupported) |",
             "",
             "| Family | Observed | Static | Automatic | Unknown / ambiguous | IPv6 interface policy observed |",
             "|---|---:|---:|---:|---:|---:|"

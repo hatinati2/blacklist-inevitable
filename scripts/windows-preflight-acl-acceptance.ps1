@@ -32,11 +32,11 @@ try {
         "$env:COMPUTERNAME\$userName",
         $securePassword
     )
-    $childScript = @"
+    $childScript = @'
 $ErrorActionPreference = 'Stop'
-$root = '$($root.Replace("'", "''"))'
-$runDir = '$($runDir.Replace("'", "''"))'
-$config = '$($config.Replace("'", "''"))'
+$root = '__ROOT__'
+$runDir = '__RUNDIR__'
+$config = '__CONFIG__'
 $checks = @(
     @{ Name = 'list preflight root'; Action = { Get-ChildItem -LiteralPath $root -Force -ErrorAction Stop | Out-Null } },
     @{ Name = 'list per-run directory'; Action = { Get-ChildItem -LiteralPath $runDir -Force -ErrorAction Stop | Out-Null } },
@@ -44,20 +44,23 @@ $checks = @(
 )
 foreach ($check in $checks) {
     try {
-        & $check.Action
-        Write-Error "Unexpectedly succeeded: $($check.Name)"
+        & ($check.Action)
+        [Console]::Error.WriteLine("Unexpectedly succeeded: $($check.Name)")
         exit 41
     } catch {
         if ($_.Exception -is [System.UnauthorizedAccessException] -or $_.Exception.HResult -eq -2147024891) {
             Write-Output "Denied as expected: $($check.Name)"
         } else {
-            Write-Error "Unexpected error while checking $($check.Name): $($_.Exception.GetType().FullName) / $($_.Exception.Message)"
+            [Console]::Error.WriteLine("Unexpected error while checking $($check.Name): $($_.Exception.GetType().FullName) / $($_.Exception.Message)")
             exit 42
         }
     }
 }
 exit 0
-"@
+'@
+    $childScript = $childScript.Replace("__ROOT__", $root.Replace("'", "''"))
+    $childScript = $childScript.Replace("__RUNDIR__", $runDir.Replace("'", "''"))
+    $childScript = $childScript.Replace("__CONFIG__", $config.Replace("'", "''"))
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childScript))
     $pwsh = (Get-Process -Id $PID).Path
     $process = Start-Process -FilePath $pwsh -Credential $credential -ArgumentList @(

@@ -1237,3 +1237,31 @@ mod tests {
         worker.await.expect("worker task");
     }
 }
+
+
+#[cfg(all(test, windows))]
+mod windows_instance_lease_tests {
+    use super::*;
+
+    #[test]
+    fn named_instance_lease_rejects_a_second_owner_until_the_first_closes() {
+        let name = format!(
+            "Local\\BlacklistInevitable.Test.{}",
+            uuid::Uuid::new_v4()
+        );
+        let first = WindowsInstanceMutex::acquire(&name)
+            .expect("first app-like process must acquire the instance lease");
+
+        let second = WindowsInstanceMutex::acquire(&name)
+            .expect_err("a second app-like process must not acquire the same lease");
+        assert!(
+            second.contains("already running"),
+            "duplicate instance should be rejected with a clear diagnostic"
+        );
+
+        drop(first);
+        let replacement = WindowsInstanceMutex::acquire(&name)
+            .expect("the OS must release the lease after its owner closes the handle");
+        drop(replacement);
+    }
+}

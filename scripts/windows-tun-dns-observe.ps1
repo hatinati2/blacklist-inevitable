@@ -174,7 +174,7 @@ function Get-DnsObservation {
             $interfaceIndex = [int]$adapter.ifIndex
             $guid = $null
             if ($null -ne $adapter.InterfaceGuid) {
-                $guid = ([string]$adapter.InterfaceGuid).Trim().Trim("{", "}").ToLowerInvariant()
+                $guid = ([string]$adapter.InterfaceGuid).Trim().TrimStart([char]'{').TrimEnd([char]'}').ToLowerInvariant()
                 if ([string]::IsNullOrWhiteSpace($guid)) {
                     $guid = $null
                 }

@@ -69,12 +69,17 @@ Microsoft documents `ConnectionSpecificSuffixSearchList` on the `MSFT_DNSClient`
 
 - [MSFT_DNSClient](https://learn.microsoft.com/en-us/windows/win32/fwp/wmi/dnsclientcimprov/msft-dnsclient)
 - [Get-DnsClientGlobalSetting](https://learn.microsoft.com/en-us/powershell/module/dnsclient/get-dnsclientglobalsetting)
+- [Get-NetIPInterface](https://learn.microsoft.com/en-us/powershell/module/nettcpip/get-netipinterface)
+- [MSFT_NetIPInterface AddressFamily values](https://learn.microsoft.com/en-us/windows/win32/fwp/wmi/nettcpipprov/msft-netipinterface)
+- [netsh interface IPv6 policy settings](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/netsh-interface)
 
 The JSON also records:
 
 - adapter identity, hardware/virtual classification, and IPv4/IPv6 DNS server lists; the native CIM family value is retained as `addressFamilyRaw` (`2` = IPv4, `23` = IPv6) while normalized labels are used for comparison;
 - separate read-only IPv4 and IPv6 DNS source-mode statements parsed from `netsh interface ipv4 dump` and `netsh interface ipv6 dump`, correlated to the contemporaneous adapter alias and retained alongside raw dump output;
 - selected per-interface DNS Client settings;
+- per-family `Get-NetIPInterface` DHCP/router-discovery/managed-address/other-stateful properties. The native CIM `AddressFamily` value is normalized (`2` = IPv4, `23` = IPv6) while its raw value is preserved;
+- IPv6 `routerdiscovery`, `managedaddress`, `otherstateful`, `rabaseddnsconfig`, and `dhcpstaticipcoexistence` configuration policy parsed from the read-only IPv6 interface dump;
 - global suffix-search settings, the system DoH known-server inventory, and NRPT rules where available;
 - raw `netsh dnsclient dump`, `show global`, `show state`, and `show encryption` output as review-only evidence;
 - raw `netsh interface ipv4/ipv6 dump` output as review-only evidence; the helper parses only the `set dnsservers ... source=dhcp|static` token and never executes dump output;
@@ -83,7 +88,8 @@ The JSON also records:
 ## Important limits
 
 1. `Get-DnsClientDohServerAddress` is a system known-server inventory. It is not the per-adapter/per-profile DoH property arrays in `DNS_INTERFACE_SETTINGS3`.
-2. `Get-DnsClientServerAddress` reports server-address lists; it is not a full previous-state snapshot. The observer now also parses the per-family `set dnsservers source=dhcp|static` record from the corresponding read-only `netsh interface ipv4/ipv6 dump` output and compares that token by physical adapter. Missing, duplicate, or unrecognized statements remain UNKNOWN. A `dhcp` token is represented as `Automatic`, not as proof of the actual upstream resolver mechanism; in particular, it does not distinguish IPv6 RA/RDNSS from DHCPv6.
+2. `Get-DnsClientServerAddress` reports server-address lists; it is not a full previous-state snapshot. The observer also parses the per-family `set dnsservers source=dhcp|static` record from read-only IPv4/IPv6 interface dumps. Missing, duplicate, or unrecognized statements remain UNKNOWN. A `dhcp` token is represented as `Automatic`, not as proof of the actual upstream resolver mechanism.
+3. For IPv6, the source token is not sufficient to characterize dynamic DNS policy. The observer separately records `Get-NetIPInterface` family settings and the netsh IPv6 `RouterDiscovery`, `ManagedAddress`, `OtherStateful`, `RABasedDnsConfig`, and `DHCPStaticIPCoexistence` flags. These settings describe interface policy (including whether RA-based DNS or DHCPv6 stateful configuration is enabled); they do not prove which mechanism supplied each effective resolver address. Missing or unsupported values remain UNKNOWN.
 3. The `Doh`/`Doh6` registry paths are included as diagnostic evidence because community tooling uses them to configure DoH. Microsoft does not document these paths as a stable complete read/restore contract; registry values are never written or deleted by this helper, and their presence alone is not accepted as proof that a server is actively using DoH.
 4. `netsh dnsclient dump` is retained as text only. It is not parsed, replayed, or accepted as a canonical restore file. The separate IPv4/IPv6 interface dumps are parsed only for documented source tokens; no generated command is executed.
 5. A physical adapter DNS configuration that remains unchanged does not prove that every DNS query stayed inside the tunnel. Validate with packet capture on both physical and TUN interfaces, including UDP/TCP 53, PTR, SVCB/HTTPS record types, IPv4 and IPv6, reconnect, engine exit, and network changes.

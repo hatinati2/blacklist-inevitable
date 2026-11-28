@@ -1655,20 +1655,28 @@ pub async fn validate_profile_config(
         .app_cache_dir()
         .map_err(|_| "Could not resolve the temporary test directory.".to_string())?
         .join("preflight");
-    fs::create_dir_all(&cache)
-        .map_err(|_| "Could not create the temporary test directory.".to_string())?;
+    if let Some(parent) = cache.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|_| "Could not prepare the temporary test directory.".to_string())?;
+    }
+    super::preflight_acl::ensure_private_directory(&cache)
+        .map_err(|_| "The temporary test directory does not have a verified private ACL.".to_string())?;
     let config_path = cache.join(format!("config-{}.json", Uuid::new_v4()));
-    // Install the guard before the write so a cancelled/failed write cannot leave
-    // a partial credential-bearing configuration behind.
+    let config_bytes = serde_json::to_vec(&config)
+        .map_err(|_| "Could not encode the temporary engine configuration.".to_string())?;
+    // Creation + write is synchronous and internally removes only the file it
+    // successfully created on failure. Install the guard only after success so
+    // a CREATE_NEW collision can never make Drop remove someone else's file.
+    if super::preflight_acl::create_private_file(&config_path, &config_bytes).is_err() {
+        // The helper attempts to remove a partial file. Treat any uncertain
+        // create/write failure as unsafe until the next process start recovers it.
+        supervisor.mark_cleanup_unhealthy();
+        return Err("Could not securely write the temporary engine configuration; preflight is blocked.".to_string());
+    }
     let _config_guard = ProbeConfigFile {
         path: config_path.clone(),
         supervisor: supervisor.clone(),
     };
-    let config_bytes = serde_json::to_vec(&config)
-        .map_err(|_| "Could not encode the temporary engine configuration.".to_string())?;
-    tokio::fs::write(&config_path, config_bytes)
-        .await
-        .map_err(|_| "Could not write the temporary engine configuration.".to_string())?;
 
     let output = run_config_check_and_cleanup(&binary, &config_path, supervisor).await?;
     if output.status.success() {
@@ -1733,6 +1741,13 @@ pub fn recover_stale_preflight_data(
         "Could not resolve the temporary preflight recovery directory; engine startup is blocked."
             .to_string()
     })?.join("preflight");
+    if super::preflight_acl::verify_private_directory_if_exists(&path).is_err() {
+        supervisor.mark_cleanup_unhealthy();
+        return Err(
+            "Existing preflight storage failed owner/ACL validation; engine startup is blocked."
+                .to_string(),
+        );
+    }
     recover_preflight_directory(&path, supervisor)
 }
 
@@ -1802,14 +1817,16 @@ pub async fn measure_real_delay(
         .app_cache_dir()
         .map_err(|_| "Could not resolve the temporary preflight directory.".to_string())?
         .join("preflight");
-    tokio::fs::create_dir_all(&cache)
-        .await
-        .map_err(|_| "Could not create the temporary preflight directory.".to_string())?;
+    if let Some(parent) = cache.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|_| "Could not prepare the temporary preflight directory.".to_string())?;
+    }
+    super::preflight_acl::ensure_private_directory(&cache)
+        .map_err(|_| "The temporary preflight directory does not have a verified private ACL.".to_string())?;
 
     let run_dir = cache.join(format!("probe-{}", Uuid::new_v4()));
-    tokio::fs::create_dir(&run_dir)
-        .await
-        .map_err(|_| "Could not create an isolated directory for this node test.".to_string())?;
+    super::preflight_acl::create_private_directory(&run_dir)
+        .map_err(|_| "Could not create a new private directory for this node test.".to_string())?;
     let _directory_guard = ProbeDirectory {
         path: run_dir.clone(),
         supervisor: supervisor.clone(),
@@ -1823,9 +1840,15 @@ pub async fn measure_real_delay(
             return Err("Could not encode the isolated sing-box configuration.".to_string());
         }
     };
-    if tokio::fs::write(&config_path, config_bytes).await.is_err() {
-        cleanup_probe_dir(&run_dir).await?;
-        return Err("Could not write the isolated sing-box configuration.".to_string());
+    if super::preflight_acl::create_private_file(&config_path, &config_bytes).is_err() {
+        if cleanup_probe_dir(&run_dir).await.is_err() {
+            operation.mark_cleanup_unhealthy();
+            return Err(
+                "A failed private config write left temporary preflight cleanup uncertain; engine operations are blocked."
+                    .to_string(),
+            );
+        }
+        return Err("Could not securely write the isolated sing-box configuration.".to_string());
     }
 
     let validation = run_engine_command_output(

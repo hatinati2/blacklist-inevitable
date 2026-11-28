@@ -746,7 +746,7 @@ async fn public_real_delay_command_runs_authenticated_engine_and_cleans_up() {
         cmd: "test_all_profile_real_delays".into(),
         callback: tauri::ipc::CallbackFn(0),
         error: tauri::ipc::CallbackFn(1),
-        url: "tauri://localhost".parse().expect("parse mock app URL"),
+        url: "http://tauri.localhost".parse().expect("parse Windows mock app URL"),
         body: tauri::ipc::InvokeBody::default(),
         headers: Default::default(),
         invoke_key: tauri::test::INVOKE_KEY.to_string(),

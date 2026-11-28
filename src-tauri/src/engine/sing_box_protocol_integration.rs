@@ -2,8 +2,11 @@ use super::{
     build_probe_config_with_socks_auth, build_probe_http_client, measure_request_with_client,
     ProbeSocksCredentials,
 };
-use crate::profiles::ProfileSummary;
+use crate::process_supervisor::ProcessSupervisor;
+use crate::profiles::{ParsedProfile, ProfileSummary};
+use crate::real_delay_settings::RealDelaySettings;
 use serde_json::{json, Value};
+use tauri::Manager;
 use std::collections::BTreeMap;
 use std::fs;
 use std::net::{TcpListener as StdTcpListener, UdpSocket as StdUdpSocket};
@@ -13,6 +16,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::process::Child;
+use tokio::sync::oneshot;
 use tokio::time::{sleep, timeout};
 
 // Chromium/Naive rejects server certificates valid for more than 398 days.
@@ -560,4 +564,308 @@ async fn every_supported_outbound_completes_an_authenticated_controlled_http_rou
 
     origin_task.abort();
     server.stop("multi-protocol server").await;
+}
+
+
+async fn start_gated_http_204_origin() -> (
+    u16,
+    oneshot::Receiver<()>,
+    oneshot::Sender<()>,
+    tokio::task::JoinHandle<()>,
+) {
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("bind gated controlled HTTP origin");
+    let port = listener
+        .local_addr()
+        .expect("read gated HTTP origin address")
+        .port();
+    let (request_seen_tx, request_seen_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+
+    let task = tokio::spawn(async move {
+        let Ok((mut stream, _)) = listener.accept().await else {
+            return;
+        };
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        timeout(Duration::from_secs(8), async {
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let count = stream.read(&mut buffer).await?;
+                if count == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..count]);
+                assert!(request.len() <= 8192, "controlled HTTP headers exceeded the test bound");
+            }
+            Ok::<(), std::io::Error>(())
+        })
+        .await
+        .expect("controlled HTTP origin did not receive request")
+        .expect("read controlled HTTP request");
+        assert!(
+            request.starts_with(b"GET "),
+            "Real Delay must send an HTTP GET through the selected node"
+        );
+        let _ = request_seen_tx.send(());
+        let _ = release_rx.await;
+        let _ = stream
+            .write_all(
+                b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .await;
+        let _ = stream.shutdown().await;
+    });
+
+    (port, request_seen_rx, release_tx, task)
+}
+
+#[cfg(windows)]
+struct StoredProfileCleanup {
+    app: tauri::AppHandle<tauri::test::MockRuntime>,
+    profile_id: String,
+}
+
+#[cfg(windows)]
+impl Drop for StoredProfileCleanup {
+    fn drop(&mut self) {
+        let _ = crate::profile_store::remove_profile(&self.app, &self.profile_id);
+    }
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn public_real_delay_command_runs_authenticated_engine_and_cleans_up() {
+    let Ok(validated_binary) = std::env::var("SING_BOX_VALIDATOR") else {
+        // The Windows workflow always provides the pinned, hash-verified binary.
+        return;
+    };
+
+    let directory = TemporaryDirectory::create();
+    let certificate_path = directory.path().join("localhost.crt");
+    let private_key_path = directory.path().join("localhost.key");
+    fs::write(&certificate_path, TEST_CERTIFICATE).expect("write test certificate");
+    fs::write(&private_key_path, TEST_PRIVATE_KEY).expect("write test private key");
+
+    let case = make_cases(&certificate_path, &private_key_path)
+        .into_iter()
+        .find(|case| case.label == "trojan-tls")
+        .expect("controlled Trojan test case");
+    let mut profile = case.profile.clone();
+    // This is limited to the ephemeral self-signed loopback server used by this test.
+    profile
+        .options
+        .insert("insecure".to_string(), "true".to_string());
+
+    let server_config = json!({
+        "log": {"level": "error"},
+        "inbounds": [case.inbound.clone()],
+        "outbounds": [{"type": "direct", "tag": "direct"}],
+        "route": {"final": "direct"}
+    });
+    let server_config_path = directory.path().join("public-command-server.json");
+    write_json(&server_config_path, &server_config);
+    check_config(&validated_binary, &server_config_path, "public-command server");
+    let mut server = ManagedChild::spawn(&validated_binary, &server_config_path);
+    wait_for_tcp_listener(&mut server.0, profile.port, "public-command server").await;
+
+    let (origin_port, request_seen, release_origin, origin_task) =
+        start_gated_http_204_origin().await;
+    let endpoint = format!("http://127.0.0.1:{origin_port}/generate_204");
+
+    let app_root = directory.path().join("tauri-app");
+    fs::create_dir_all(&app_root).expect("create isolated mock app directory");
+    let mut context = tauri::test::mock_context(tauri::test::noop_assets());
+    context.config_mut().identifier = format!(
+        "com.blacklist.inevitable.test.{}",
+        uuid::Uuid::new_v4().simple()
+    );
+    context.config_mut().app.app_directories_override = Some(
+        tauri::utils::config::AppDirectoriesOverride::Root(app_root),
+    );
+
+    let supervisor = ProcessSupervisor::default();
+    let app = tauri::test::mock_builder()
+        .manage(supervisor.clone())
+        .invoke_handler(tauri::generate_handler![
+            crate::commands::test_all_profile_real_delays
+        ])
+        .build(context)
+        .expect("build Tauri mock app with the public command registered");
+    let app_handle = app.handle().clone();
+
+    let validator = PathBuf::from(&validated_binary);
+    let source_runtime = validator
+        .parent()
+        .expect("validator directory")
+        .join("libcronet.dll");
+    assert!(
+        source_runtime.is_file(),
+        "the pinned Windows engine archive must include libcronet.dll"
+    );
+    let engine_directory = app_handle
+        .path()
+        .app_data_dir()
+        .expect("resolve isolated app data directory")
+        .join("engines")
+        .join(format!("sing-box-{}", super::SING_BOX_VERSION));
+    fs::create_dir_all(&engine_directory).expect("create installed engine directory");
+    let installed_binary = engine_directory.join("sing-box.exe");
+    fs::copy(&validator, &installed_binary).expect("install pinned test engine binary");
+    fs::copy(&source_runtime, engine_directory.join("libcronet.dll"))
+        .expect("install matching Naive runtime library");
+
+    crate::profile_store::add_profiles(
+        &app_handle,
+        vec![ParsedProfile {
+            profile: profile.clone(),
+            credentials: case.credentials.clone(),
+        }],
+    )
+    .expect("store synthetic profile and credentials in the isolated test app");
+    let _profile_cleanup = StoredProfileCleanup {
+        app: app_handle.clone(),
+        profile_id: profile.id.clone(),
+    };
+
+    crate::real_delay_settings::save(
+        &app_handle,
+        RealDelaySettings {
+            primary_url: endpoint.clone(),
+            fallback_url: endpoint.clone(),
+            timeout_seconds: 9,
+        },
+    )
+    .expect("save loopback-only test Real Delay endpoint");
+
+    let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+        .build()
+        .expect("create mock Tauri webview for IPC command");
+
+    let request = tauri::webview::InvokeRequest {
+        cmd: "test_all_profile_real_delays".into(),
+        callback: tauri::ipc::CallbackFn(0),
+        error: tauri::ipc::CallbackFn(1),
+        url: "tauri://localhost".parse().expect("parse mock app URL"),
+        body: tauri::ipc::InvokeBody::default(),
+        headers: Default::default(),
+        invoke_key: tauri::test::INVOKE_KEY.to_string(),
+    };
+    let invocation = tokio::task::spawn_blocking(move || {
+        let body = tauri::test::get_ipc_response(&webview, request)
+            .expect("public Real Delay Tauri IPC command must succeed");
+        body.deserialize::<Value>()
+            .expect("deserialize public Real Delay command response")
+    });
+
+    timeout(Duration::from_secs(20), request_seen)
+        .await
+        .expect("Real Delay did not reach the controlled HTTP origin")
+        .expect("controlled HTTP origin closed before the Real Delay request");
+
+    let preflight_directory = app_handle
+        .path()
+        .app_cache_dir()
+        .expect("resolve isolated app cache directory")
+        .join("preflight");
+    let run_directories = fs::read_dir(&preflight_directory)
+        .expect("read active preflight directory")
+        .map(|entry| entry.expect("read preflight entry").path())
+        .filter(|path| path.is_dir())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        run_directories.len(),
+        1,
+        "the command must own exactly one isolated per-run probe directory while the HTTP request is active"
+    );
+    let config_path = run_directories[0].join("config.json");
+    let runtime_config: Value = serde_json::from_slice(
+        &fs::read(&config_path).expect("read live credential-bearing probe config"),
+    )
+    .expect("parse live sing-box probe config");
+    let socks_inbound = &runtime_config["inbounds"][0];
+    assert_eq!(socks_inbound["type"], "socks");
+    assert_eq!(socks_inbound["listen"], "127.0.0.1");
+    let socks_port = socks_inbound["listen_port"]
+        .as_u64()
+        .expect("read temporary SOCKS port") as u16;
+    let socks_user = socks_inbound["users"][0]["username"]
+        .as_str()
+        .expect("read generated SOCKS username");
+    let socks_password = socks_inbound["users"][0]["password"]
+        .as_str()
+        .expect("read generated SOCKS password");
+    assert!(!socks_user.is_empty());
+    assert!(!socks_password.is_empty());
+    assert_ne!(
+        socks_password,
+        case.credentials.get("password").map(String::as_str).unwrap_or_default(),
+        "temporary SOCKS authentication must not reuse remote profile credentials"
+    );
+    let mut socks_listener = TcpStream::connect(("127.0.0.1", socks_port))
+        .await
+        .expect("authenticated local SOCKS listener must be active during the real probe");
+    socks_listener
+        .write_all(&[5, 1, 0])
+        .await
+        .expect("send unauthenticated SOCKS greeting");
+    let mut auth_response = [0_u8; 2];
+    timeout(Duration::from_secs(3), socks_listener.read_exact(&mut auth_response))
+        .await
+        .expect("SOCKS listener did not answer unauthenticated greeting")
+        .expect("read SOCKS authentication negotiation");
+    assert_eq!(
+        auth_response,
+        [5, 0xff],
+        "the temporary SOCKS listener must reject clients without credentials"
+    );
+    drop(socks_listener);
+
+    release_origin
+        .send(())
+        .expect("release controlled HTTP 204 response");
+    let response = timeout(Duration::from_secs(20), invocation)
+        .await
+        .expect("public Real Delay command did not complete")
+        .expect("public Real Delay IPC worker panicked");
+    let results = response
+        .as_array()
+        .expect("public Real Delay command returns a result array");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["profileId"], profile.id);
+    assert_eq!(results[0]["configStatus"], "valid");
+    assert!(
+        results[0]["realDelayMs"].as_u64().is_some(),
+        "the public command must return a measured Real Delay value"
+    );
+    assert_eq!(results[0]["testedUrl"], endpoint);
+    assert!(
+        results[0]["realDelayDetail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("HTTP 204")),
+        "the public command must identify the accepted HTTP 204 response"
+    );
+
+    assert!(
+        timeout(Duration::from_secs(5), supervisor.wait_for_idle())
+            .await
+            .expect("supervisor did not drain the completed Real Delay operation"),
+        "cleanup must remain healthy after command completion"
+    );
+    let remaining_entries = fs::read_dir(&preflight_directory)
+        .expect("preflight directory remains available after cleanup")
+        .count();
+    assert_eq!(
+        remaining_entries, 0,
+        "credential-bearing per-run config and probe directory must be removed"
+    );
+    assert!(
+        TcpStream::connect(("127.0.0.1", socks_port)).await.is_err(),
+        "the temporary SOCKS listener must be released after the command returns"
+    );
+
+    origin_task
+        .await
+        .expect("controlled HTTP origin task panicked");
+    server.stop("public-command server").await;
 }

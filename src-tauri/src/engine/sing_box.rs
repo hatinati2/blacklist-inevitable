@@ -1330,7 +1330,7 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, Runtime};
 use tokio::net::TcpStream;
 use tokio::process::{Child, Command};
 use tokio::time::{sleep, timeout};
@@ -1429,7 +1429,7 @@ const CONFIG_CHECK_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_ENGINE_ARCHIVE_BYTES: usize = 128 * 1024 * 1024;
 const MAX_ENGINE_EXECUTABLE_BYTES: u64 = 128 * 1024 * 1024;
 
-pub fn installed_binary_path(app: &AppHandle) -> Result<PathBuf, String> {
+pub fn installed_binary_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     let root = app
         .path()
         .app_data_dir()
@@ -1828,8 +1828,8 @@ impl Drop for ProbeConfigFile {
 }
 
 
-pub async fn measure_real_delay(
-    app: &AppHandle,
+pub async fn measure_real_delay<R: Runtime>(
+    app: &AppHandle<R>,
     profile: &ProfileSummary,
     credentials: &BTreeMap<String, String>,
     settings: &crate::real_delay_settings::RealDelaySettings,

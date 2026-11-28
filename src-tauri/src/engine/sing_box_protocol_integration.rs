@@ -1163,3 +1163,167 @@ async fn public_real_delay_job_object_assignment_failure_kills_child_and_cleans_
     );
     assert_preflight_directory_empty(&harness.app_handle);
 }
+
+
+#[cfg(windows)]
+#[tokio::test]
+async fn public_real_delay_shutdown_cancels_active_request_and_cleans_up() {
+    let Ok(validated_binary) = std::env::var("SING_BOX_VALIDATOR") else {
+        return;
+    };
+
+    let directory = TemporaryDirectory::create();
+    let certificate_path = directory.path().join("localhost.crt");
+    let private_key_path = directory.path().join("localhost.key");
+    fs::write(&certificate_path, TEST_CERTIFICATE).expect("write test certificate");
+    fs::write(&private_key_path, TEST_PRIVATE_KEY).expect("write test private key");
+
+    let case = make_cases(&certificate_path, &private_key_path)
+        .into_iter()
+        .find(|case| case.label == "trojan-tls")
+        .expect("controlled Trojan test case");
+    let mut profile = case.profile.clone();
+    profile
+        .options
+        .insert("insecure".to_string(), "true".to_string());
+
+    let server_config = json!({
+        "log": {"level": "error"},
+        "inbounds": [case.inbound.clone()],
+        "outbounds": [{"type": "direct", "tag": "direct"}],
+        "route": {"final": "direct"}
+    });
+    let server_config_path = directory.path().join("shutdown-server.json");
+    write_json(&server_config_path, &server_config);
+    check_config(&validated_binary, &server_config_path, "public shutdown server");
+    let mut server = ManagedChild::spawn(&validated_binary, &server_config_path);
+    wait_for_tcp_listener(&mut server.0, profile.port, "public shutdown server").await;
+
+    let (origin_port, request_seen, release_origin, origin_task) =
+        start_gated_http_204_origin().await;
+    let endpoint = format!("http://127.0.0.1:{origin_port}/generate_204");
+
+    let runtime_path = PathBuf::from(&validated_binary)
+        .parent()
+        .expect("validator directory")
+        .join("libcronet.dll");
+    assert!(runtime_path.is_file(), "the pinned Windows engine archive must include libcronet.dll");
+
+    let supervisor = ProcessSupervisor::default();
+    let harness = build_mock_real_delay_harness(
+        directory,
+        Path::new(&validated_binary),
+        Some(&runtime_path),
+        profile,
+        case.credentials,
+        supervisor,
+    );
+    crate::real_delay_settings::save(
+        &harness.app_handle,
+        RealDelaySettings {
+            primary_url: endpoint.clone(),
+            fallback_url: endpoint.clone(),
+            timeout_seconds: 9,
+        },
+    )
+    .expect("save gated loopback test endpoint");
+
+    let webview = tauri::WebviewWindowBuilder::new(
+        &harness._app,
+        "main",
+        Default::default(),
+    )
+    .build()
+    .expect("create mock Tauri webview for public IPC command");
+    let request = tauri::webview::InvokeRequest {
+        cmd: "test_all_profile_real_delays".into(),
+        callback: tauri::ipc::CallbackFn(0),
+        error: tauri::ipc::CallbackFn(1),
+        url: "http://tauri.localhost"
+            .parse()
+            .expect("parse Windows mock app URL"),
+        body: tauri::ipc::InvokeBody::default(),
+        headers: Default::default(),
+        invoke_key: tauri::test::INVOKE_KEY.to_string(),
+    };
+    let invocation = tokio::task::spawn_blocking(move || {
+        let body = tauri::test::get_ipc_response(&webview, request)
+            .expect("public Real Delay Tauri IPC command must return after shutdown");
+        body.deserialize::<Value>()
+            .expect("deserialize public Real Delay IPC response")
+    });
+
+    timeout(Duration::from_secs(20), request_seen)
+        .await
+        .expect("Real Delay did not reach the gated controlled HTTP origin")
+        .expect("controlled HTTP origin closed before the Real Delay request");
+
+    let preflight_directory = harness
+        .app_handle
+        .path()
+        .app_cache_dir()
+        .expect("resolve isolated app cache directory")
+        .join("preflight");
+    let run_directories = fs::read_dir(&preflight_directory)
+        .expect("read active preflight directory before shutdown")
+        .map(|entry| entry.expect("read preflight entry").path())
+        .filter(|path| path.is_dir())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        run_directories.len(),
+        1,
+        "the public command must own exactly one per-run directory while the HTTP request is blocked"
+    );
+    let config_path = run_directories[0].join("config.json");
+    let runtime_config: Value = serde_json::from_slice(
+        &fs::read(&config_path).expect("read active credential-bearing config"),
+    )
+    .expect("parse active sing-box config");
+    let socks_port = runtime_config["inbounds"][0]["listen_port"]
+        .as_u64()
+        .expect("read active loopback SOCKS port") as u16;
+
+    assert!(
+        harness.supervisor.request_shutdown(),
+        "the first application shutdown request must begin cancellation"
+    );
+
+    let response = timeout(Duration::from_secs(20), invocation)
+        .await
+        .expect("public Real Delay command did not return after shutdown")
+        .expect("public Real Delay IPC worker panicked");
+    let results = response
+        .as_array()
+        .expect("public Real Delay command returns a result array");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["configStatus"], "not_checked");
+    assert!(
+        results[0]["configDetail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("cancelled because the application is shutting down")),
+        "the public command must report shutdown cancellation: {results:?}"
+    );
+    assert!(results[0]["realDelayMs"].is_null());
+
+    assert!(
+        timeout(Duration::from_secs(5), harness.supervisor.wait_for_idle())
+            .await
+            .expect("supervisor did not drain the cancelled public Real Delay operation"),
+        "confirmed child and file cleanup must keep supervisor health"
+    );
+    assert!(
+        harness.supervisor.shutdown_complete(),
+        "shutdown must finish only after the public Real Delay worker releases its operation lease"
+    );
+    assert_preflight_directory_empty(&harness.app_handle);
+    assert!(
+        TcpStream::connect(("127.0.0.1", socks_port)).await.is_err(),
+        "shutdown must release the temporary authenticated SOCKS listener"
+    );
+
+    let _ = release_origin.send(());
+    origin_task
+        .await
+        .expect("gated controlled HTTP origin task panicked");
+    server.stop("public shutdown server").await;
+}

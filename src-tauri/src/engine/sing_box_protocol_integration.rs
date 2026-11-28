@@ -1017,13 +1017,15 @@ async fn public_real_delay_rejected_config_is_reported_and_probe_files_are_remov
     let unused_key = directory.path().join("unused.key");
     let case = make_cases(&unused_certificate, &unused_key)
         .into_iter()
-        .find(|case| case.label == "vless-tls")
-        .expect("controlled VLESS test case");
+        .find(|case| case.label == "shadowsocks-aes-256-gcm")
+        .expect("controlled Shadowsocks test case");
     let mut invalid_profile = case.profile;
-    invalid_profile.server.clear();
-    invalid_profile.port = 0;
-    let mut invalid_credentials = case.credentials;
-    invalid_credentials.insert("uuid".to_string(), "this-is-not-a-valid-uuid".to_string());
+    // The adapter deliberately preserves the source cipher string; sing-box
+    // must reject a cipher it does not implement during its native config check.
+    invalid_profile
+        .options
+        .insert("method".to_string(), "not-a-real-shadowsocks-cipher".to_string());
+    let invalid_credentials = case.credentials;
 
     let runtime_path = PathBuf::from(&validated_binary)
         .parent()
@@ -1042,7 +1044,11 @@ async fn public_real_delay_rejected_config_is_reported_and_probe_files_are_remov
     let response = invoke_public_real_delay_command(&harness._app).await;
     let results = response.as_array().expect("public command returns a result array");
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0]["configStatus"], "invalid");
+    assert_eq!(
+        results[0]["configStatus"],
+        "invalid",
+        "the pinned sing-box validator must reject the deliberately unknown cipher: {results:?}"
+    );
     assert!(results[0]["realDelayMs"].is_null());
     assert!(results[0]["testedUrl"].is_null());
     assert!(
@@ -1091,8 +1097,8 @@ async fn public_real_delay_spawn_failure_removes_probe_files_and_preserves_healt
     assert!(
         results[0]["configDetail"]
             .as_str()
-            .is_some_and(|detail| detail.contains("Could not start sing-box config validation")),
-        "public command should surface a bounded config-check spawn failure"
+            .is_some_and(|detail| detail.contains("Could not start sing-box configuration validation")),
+        "public command should surface the actual config-check spawn diagnostic: {results:?}"
     );
     assert!(results[0]["realDelayMs"].is_null());
     assert!(

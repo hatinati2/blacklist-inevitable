@@ -476,6 +476,28 @@ impl ProcessSupervisor {
         }
     }
 
+
+    /// Keep the supervisor operational until the first child assignment so the
+    /// public Real Delay path can exercise a real Job Object assignment failure.
+    /// The child must then be terminated and the per-run config removed.
+    #[cfg(all(test, windows))]
+    pub(crate) fn without_job_but_healthy_for_assignment_test() -> Self {
+        Self {
+            inner: Arc::new(Inner {
+                state: Mutex::new(State {
+                    shutting_down: false,
+                    shutdown_complete: false,
+                    cleanup_healthy: true,
+                    next_operation_id: 1,
+                    active: HashMap::new(),
+                }),
+                idle: Notify::new(),
+                job: None,
+                instance_mutex: Mutex::new(None),
+            }),
+        }
+    }
+
     /// Construct the production app supervisor in a blocked state. Engine work
     /// stays disabled until Tauri setup has attached this application process to
     /// its kill-on-close Job Object.

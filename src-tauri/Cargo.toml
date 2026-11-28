@@ -50,3 +50,6 @@ windows-sys = { version = "0.61", features = [
     "Win32_Security_Authorization",
 ] }
 keyring = { version = "4.2", default-features = false, features = ["v1", "windows-native-keyring-store"] }
+
+[dev-dependencies]
+tauri = { version = "2", features = ["test"] }

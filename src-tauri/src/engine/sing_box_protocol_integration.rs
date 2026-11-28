@@ -1296,12 +1296,16 @@ async fn public_real_delay_shutdown_cancels_active_request_and_cleans_up() {
         .as_array()
         .expect("public Real Delay command returns a result array");
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0]["configStatus"], "not_checked");
+    assert_eq!(
+        results[0]["configStatus"],
+        "valid",
+        "sing-box configuration had already passed validation before the HTTP request was cancelled: {results:?}"
+    );
     assert!(
-        results[0]["configDetail"]
+        results[0]["realDelayDetail"]
             .as_str()
             .is_some_and(|detail| detail.contains("cancelled because the application is shutting down")),
-        "the public command must report shutdown cancellation: {results:?}"
+        "the public command must report shutdown cancellation of the Real Delay request: {results:?}"
     );
     assert!(results[0]["realDelayMs"].is_null());
 

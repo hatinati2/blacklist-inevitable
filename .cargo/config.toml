@@ -1,5 +1,0 @@
-[env]
-# Embed the Common-Controls v6 manifest into Windows MSVC test binaries.
-# Without this, Tauri mock-runtime tests may fail to start with
-# STATUS_ENTRYPOINT_NOT_FOUND (0xc0000139) before the test harness runs.
-__TAURI_WORKSPACE__ = "true"

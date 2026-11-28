@@ -3,8 +3,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, Runtime};
 use url::Url;
+#[cfg(test)]
+use std::net::IpAddr;
 
 const SETTINGS_SCHEMA_VERSION: u32 = 1;
 const SETTINGS_FILE_NAME: &str = "real-delay-settings.json";
@@ -61,7 +63,23 @@ fn validate_endpoint(label: &str, value: &str) -> Result<(), String> {
     let parsed = Url::parse(value)
         .map_err(|_| format!("{label} Real Delay endpoint must be a valid HTTPS URL."))?;
 
-    if parsed.scheme() != "https" {
+    let loopback_http = {
+        #[cfg(test)]
+        {
+            parsed.scheme() == "http"
+                && parsed.host_str().is_some_and(|host| {
+                    host.eq_ignore_ascii_case("localhost")
+                        || host
+                            .parse::<IpAddr>()
+                            .is_ok_and(|address| address.is_loopback())
+                })
+        }
+        #[cfg(not(test))]
+        {
+            false
+        }
+    };
+    if parsed.scheme() != "https" && !loopback_http {
         return Err(format!("{label} Real Delay endpoint must use HTTPS."));
     }
     if parsed.host_str().is_none() {
@@ -83,7 +101,7 @@ struct SettingsFile {
     real_delay: RealDelaySettings,
 }
 
-fn settings_file_path(app: &AppHandle) -> Result<PathBuf, String> {
+fn settings_file_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     let directory = app
         .path()
         .app_data_dir()
@@ -125,7 +143,7 @@ fn write_file(path: &Path, settings: &RealDelaySettings) -> Result<(), String> {
     Ok(())
 }
 
-pub fn load(app: &AppHandle) -> Result<RealDelaySettings, String> {
+pub fn load<R: Runtime>(app: &AppHandle<R>) -> Result<RealDelaySettings, String> {
     let _guard = lock_settings()?;
     let path = settings_file_path(app)?;
 
@@ -138,7 +156,7 @@ pub fn load(app: &AppHandle) -> Result<RealDelaySettings, String> {
     read_file(&path)
 }
 
-pub fn save(app: &AppHandle, settings: RealDelaySettings) -> Result<RealDelaySettings, String> {
+pub fn save<R: Runtime>(app: &AppHandle<R>, settings: RealDelaySettings) -> Result<RealDelaySettings, String> {
     settings.validate()?;
     let _guard = lock_settings()?;
     let path = settings_file_path(app)?;

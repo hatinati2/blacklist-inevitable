@@ -2,7 +2,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, Runtime};
 use tokio::net::TcpStream;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
@@ -279,8 +279,8 @@ pub fn save_real_delay_settings(
 }
 
 #[tauri::command]
-pub async fn test_all_profile_real_delays(
-    app: AppHandle,
+pub async fn test_all_profile_real_delays<R: Runtime>(
+    app: AppHandle<R>,
 ) -> Result<Vec<RealDelayResult>, String> {
     let settings = crate::real_delay_settings::load(&app)?;
     let profiles = profile_store::list_profiles(&app)?;

@@ -1,6 +1,12 @@
-use super::{build_probe_config, build_probe_http_client, measure_request_with_client};
-use crate::profiles::ProfileSummary;
+use super::{
+    build_probe_config_with_socks_auth, build_probe_http_client, measure_request_with_client,
+    ProbeSocksCredentials,
+};
+use crate::process_supervisor::ProcessSupervisor;
+use crate::profiles::{ParsedProfile, ProfileSummary};
+use crate::real_delay_settings::RealDelaySettings;
 use serde_json::{json, Value};
+use tauri::Manager;
 use std::collections::BTreeMap;
 use std::fs;
 use std::net::{TcpListener as StdTcpListener, UdpSocket as StdUdpSocket};
@@ -10,6 +16,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::process::Child;
+use tokio::sync::oneshot;
 use tokio::time::{sleep, timeout};
 
 // Chromium/Naive rejects server certificates valid for more than 398 days.
@@ -487,9 +494,14 @@ async fn every_supported_outbound_completes_an_authenticated_controlled_http_rou
 
     for case in &cases {
         let socks_port = tcp_port(&mut Vec::new());
-        let mut client_config =
-            build_probe_config(&case.profile, &case.credentials, socks_port)
-                .unwrap_or_else(|error| panic!("{} adapter rejected its test profile: {error}", case.label));
+        let socks_credentials = ProbeSocksCredentials::generate();
+        let mut client_config = build_probe_config_with_socks_auth(
+            &case.profile,
+            &case.credentials,
+            socks_port,
+            &socks_credentials,
+        )
+        .unwrap_or_else(|error| panic!("{} adapter rejected its test profile: {error}", case.label));
 
         // Trust only the ephemeral test certificate. Production adapters retain
         // their normal certificate validation behavior.
@@ -512,8 +524,12 @@ async fn every_supported_outbound_completes_an_authenticated_controlled_http_rou
         let mut client = ManagedChild::spawn(&binary, &client_config_path);
         wait_for_socks(&mut client.0, socks_port, case.label).await;
 
-        let http_client = build_probe_http_client(socks_port, Duration::from_secs(12))
-            .expect("build controlled HTTP client");
+        let http_client = build_probe_http_client(
+            socks_port,
+            &socks_credentials,
+            Duration::from_secs(12),
+        )
+        .expect("build authenticated controlled HTTP client");
         let measured = timeout(
             Duration::from_secs(15),
             measure_request_with_client(&http_client, &[url.as_str()]),
@@ -548,4 +564,770 @@ async fn every_supported_outbound_completes_an_authenticated_controlled_http_rou
 
     origin_task.abort();
     server.stop("multi-protocol server").await;
+}
+
+
+async fn start_gated_http_204_origin() -> (
+    u16,
+    oneshot::Receiver<()>,
+    oneshot::Sender<()>,
+    tokio::task::JoinHandle<()>,
+) {
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("bind gated controlled HTTP origin");
+    let port = listener
+        .local_addr()
+        .expect("read gated HTTP origin address")
+        .port();
+    let (request_seen_tx, request_seen_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+
+    let task = tokio::spawn(async move {
+        let Ok((mut stream, _)) = listener.accept().await else {
+            return;
+        };
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        timeout(Duration::from_secs(8), async {
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let count = stream.read(&mut buffer).await?;
+                if count == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..count]);
+                assert!(request.len() <= 8192, "controlled HTTP headers exceeded the test bound");
+            }
+            Ok::<(), std::io::Error>(())
+        })
+        .await
+        .expect("controlled HTTP origin did not receive request")
+        .expect("read controlled HTTP request");
+        assert!(
+            request.starts_with(b"GET "),
+            "Real Delay must send an HTTP GET through the selected node"
+        );
+        let _ = request_seen_tx.send(());
+        let _ = release_rx.await;
+        let _ = stream
+            .write_all(
+                b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .await;
+        let _ = stream.shutdown().await;
+    });
+
+    (port, request_seen_rx, release_tx, task)
+}
+
+#[cfg(windows)]
+struct StoredProfileCleanup {
+    app: tauri::AppHandle<tauri::test::MockRuntime>,
+    profile_id: String,
+}
+
+#[cfg(windows)]
+impl Drop for StoredProfileCleanup {
+    fn drop(&mut self) {
+        let _ = crate::profile_store::remove_profile(&self.app, &self.profile_id);
+    }
+}
+
+
+#[cfg(windows)]
+struct MockRealDelayHarness {
+    // Remove the Credential Manager/profile entry before the isolated app-data
+    // root is deleted by TemporaryDirectory.
+    _profile_cleanup: StoredProfileCleanup,
+    _app: tauri::App<tauri::test::MockRuntime>,
+    app_handle: tauri::AppHandle<tauri::test::MockRuntime>,
+    supervisor: ProcessSupervisor,
+    _directory: TemporaryDirectory,
+}
+
+#[cfg(windows)]
+fn build_mock_real_delay_harness(
+    directory: TemporaryDirectory,
+    engine_source: &Path,
+    runtime_source: Option<&Path>,
+    profile: ProfileSummary,
+    profile_credentials: BTreeMap<String, String>,
+    supervisor: ProcessSupervisor,
+) -> MockRealDelayHarness {
+    let app_root = directory.path().join("tauri-app");
+    fs::create_dir_all(&app_root).expect("create isolated mock app directory");
+    let mut context = tauri::test::mock_context(tauri::test::noop_assets());
+    context.config_mut().identifier = format!(
+        "com.blacklist.inevitable.test.{}",
+        uuid::Uuid::new_v4().simple()
+    );
+    context.config_mut().app.app_directories_override = Some(
+        tauri::utils::config::AppDirectoriesOverride::Root(app_root),
+    );
+
+    let app = tauri::test::mock_builder()
+        .manage(supervisor.clone())
+        .invoke_handler(tauri::generate_handler![
+            crate::commands::test_all_profile_real_delays
+        ])
+        .build(context)
+        .expect("build isolated Tauri mock app");
+    let app_handle = app.handle().clone();
+
+    let engine_directory = app_handle
+        .path()
+        .app_data_dir()
+        .expect("resolve isolated app data directory")
+        .join("engines")
+        .join(format!("sing-box-{}", super::SING_BOX_VERSION));
+    fs::create_dir_all(&engine_directory).expect("create isolated engine directory");
+    fs::copy(engine_source, engine_directory.join("sing-box.exe"))
+        .expect("place test sing-box executable");
+    let runtime_path = engine_directory.join("libcronet.dll");
+    match runtime_source {
+        Some(source) => {
+            fs::copy(source, &runtime_path).expect("copy matching sing-box runtime");
+        }
+        None => fs::write(&runtime_path, b"test-only runtime placeholder")
+            .expect("create runtime presence marker"),
+    }
+
+    crate::profile_store::add_profiles(
+        &app_handle,
+        vec![ParsedProfile {
+            profile: profile.clone(),
+            credentials: profile_credentials,
+        }],
+    )
+    .expect("store synthetic profile and credentials in isolated test app");
+    let profile_cleanup = StoredProfileCleanup {
+        app: app_handle.clone(),
+        profile_id: profile.id,
+    };
+    crate::real_delay_settings::save(
+        &app_handle,
+        RealDelaySettings {
+            primary_url: "http://127.0.0.1:9/generate_204".to_string(),
+            fallback_url: "http://127.0.0.1:9/generate_204".to_string(),
+            timeout_seconds: 2,
+        },
+    )
+    .expect("save loopback-only test endpoints");
+
+    MockRealDelayHarness {
+        _profile_cleanup: profile_cleanup,
+        _app: app,
+        app_handle,
+        supervisor,
+        _directory: directory,
+    }
+}
+
+#[cfg(windows)]
+async fn invoke_public_real_delay_command(
+    app: &tauri::App<tauri::test::MockRuntime>,
+) -> Value {
+    let webview = tauri::WebviewWindowBuilder::new(app, "main", Default::default())
+        .build()
+        .expect("create mock Tauri webview for public IPC command");
+    let request = tauri::webview::InvokeRequest {
+        cmd: "test_all_profile_real_delays".into(),
+        callback: tauri::ipc::CallbackFn(0),
+        error: tauri::ipc::CallbackFn(1),
+        url: "http://tauri.localhost".parse().expect("parse Windows mock app URL"),
+        body: tauri::ipc::InvokeBody::default(),
+        headers: Default::default(),
+        invoke_key: tauri::test::INVOKE_KEY.to_string(),
+    };
+    let invocation = tokio::task::spawn_blocking(move || {
+        let body = tauri::test::get_ipc_response(&webview, request)
+            .expect("public Real Delay Tauri IPC command must return");
+        body.deserialize::<Value>()
+            .expect("deserialize public Real Delay IPC response")
+    });
+    timeout(Duration::from_secs(30), invocation)
+        .await
+        .expect("public Real Delay command did not finish within its test bound")
+        .expect("public Real Delay IPC worker panicked")
+}
+
+#[cfg(windows)]
+fn assert_preflight_directory_empty(app: &tauri::AppHandle<tauri::test::MockRuntime>) {
+    let preflight = app
+        .path()
+        .app_cache_dir()
+        .expect("resolve isolated app cache directory")
+        .join("preflight");
+    let entries = fs::read_dir(&preflight)
+        .expect("preflight directory should exist after a probe attempt")
+        .map(|entry| entry.expect("read preflight directory entry").path())
+        .collect::<Vec<_>>();
+    assert!(
+        entries.is_empty(),
+        "failed public Real Delay operation must remove all credential-bearing probe files and run directories: {entries:?}"
+    );
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn public_real_delay_command_runs_authenticated_engine_and_cleans_up() {
+    let Ok(validated_binary) = std::env::var("SING_BOX_VALIDATOR") else {
+        // The Windows workflow always provides the pinned, hash-verified binary.
+        return;
+    };
+
+    let directory = TemporaryDirectory::create();
+    let certificate_path = directory.path().join("localhost.crt");
+    let private_key_path = directory.path().join("localhost.key");
+    fs::write(&certificate_path, TEST_CERTIFICATE).expect("write test certificate");
+    fs::write(&private_key_path, TEST_PRIVATE_KEY).expect("write test private key");
+
+    let case = make_cases(&certificate_path, &private_key_path)
+        .into_iter()
+        .find(|case| case.label == "trojan-tls")
+        .expect("controlled Trojan test case");
+    let mut profile = case.profile.clone();
+    // This is limited to the ephemeral self-signed loopback server used by this test.
+    profile
+        .options
+        .insert("insecure".to_string(), "true".to_string());
+
+    let server_config = json!({
+        "log": {"level": "error"},
+        "inbounds": [case.inbound.clone()],
+        "outbounds": [{"type": "direct", "tag": "direct"}],
+        "route": {"final": "direct"}
+    });
+    let server_config_path = directory.path().join("public-command-server.json");
+    write_json(&server_config_path, &server_config);
+    check_config(&validated_binary, &server_config_path, "public-command server");
+    let mut server = ManagedChild::spawn(&validated_binary, &server_config_path);
+    wait_for_tcp_listener(&mut server.0, profile.port, "public-command server").await;
+
+    let (origin_port, request_seen, release_origin, origin_task) =
+        start_gated_http_204_origin().await;
+    let endpoint = format!("http://127.0.0.1:{origin_port}/generate_204");
+
+    let app_root = directory.path().join("tauri-app");
+    fs::create_dir_all(&app_root).expect("create isolated mock app directory");
+    let mut context = tauri::test::mock_context(tauri::test::noop_assets());
+    context.config_mut().identifier = format!(
+        "com.blacklist.inevitable.test.{}",
+        uuid::Uuid::new_v4().simple()
+    );
+    context.config_mut().app.app_directories_override = Some(
+        tauri::utils::config::AppDirectoriesOverride::Root(app_root),
+    );
+
+    let supervisor = ProcessSupervisor::default();
+    let app = tauri::test::mock_builder()
+        .manage(supervisor.clone())
+        .invoke_handler(tauri::generate_handler![
+            crate::commands::test_all_profile_real_delays
+        ])
+        .build(context)
+        .expect("build Tauri mock app with the public command registered");
+    let app_handle = app.handle().clone();
+
+    let validator = PathBuf::from(&validated_binary);
+    let source_runtime = validator
+        .parent()
+        .expect("validator directory")
+        .join("libcronet.dll");
+    assert!(
+        source_runtime.is_file(),
+        "the pinned Windows engine archive must include libcronet.dll"
+    );
+    let engine_directory = app_handle
+        .path()
+        .app_data_dir()
+        .expect("resolve isolated app data directory")
+        .join("engines")
+        .join(format!("sing-box-{}", super::SING_BOX_VERSION));
+    fs::create_dir_all(&engine_directory).expect("create installed engine directory");
+    let installed_binary = engine_directory.join("sing-box.exe");
+    fs::copy(&validator, &installed_binary).expect("install pinned test engine binary");
+    fs::copy(&source_runtime, engine_directory.join("libcronet.dll"))
+        .expect("install matching Naive runtime library");
+
+    crate::profile_store::add_profiles(
+        &app_handle,
+        vec![ParsedProfile {
+            profile: profile.clone(),
+            credentials: case.credentials.clone(),
+        }],
+    )
+    .expect("store synthetic profile and credentials in the isolated test app");
+    let _profile_cleanup = StoredProfileCleanup {
+        app: app_handle.clone(),
+        profile_id: profile.id.clone(),
+    };
+
+    crate::real_delay_settings::save(
+        &app_handle,
+        RealDelaySettings {
+            primary_url: endpoint.clone(),
+            fallback_url: endpoint.clone(),
+            timeout_seconds: 9,
+        },
+    )
+    .expect("save loopback-only test Real Delay endpoint");
+
+    let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+        .build()
+        .expect("create mock Tauri webview for IPC command");
+
+    let request = tauri::webview::InvokeRequest {
+        cmd: "test_all_profile_real_delays".into(),
+        callback: tauri::ipc::CallbackFn(0),
+        error: tauri::ipc::CallbackFn(1),
+        url: "http://tauri.localhost".parse().expect("parse Windows mock app URL"),
+        body: tauri::ipc::InvokeBody::default(),
+        headers: Default::default(),
+        invoke_key: tauri::test::INVOKE_KEY.to_string(),
+    };
+    let invocation = tokio::task::spawn_blocking(move || {
+        let body = tauri::test::get_ipc_response(&webview, request)
+            .expect("public Real Delay Tauri IPC command must succeed");
+        body.deserialize::<Value>()
+            .expect("deserialize public Real Delay command response")
+    });
+
+    timeout(Duration::from_secs(20), request_seen)
+        .await
+        .expect("Real Delay did not reach the controlled HTTP origin")
+        .expect("controlled HTTP origin closed before the Real Delay request");
+
+    let preflight_directory = app_handle
+        .path()
+        .app_cache_dir()
+        .expect("resolve isolated app cache directory")
+        .join("preflight");
+    let run_directories = fs::read_dir(&preflight_directory)
+        .expect("read active preflight directory")
+        .map(|entry| entry.expect("read preflight entry").path())
+        .filter(|path| path.is_dir())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        run_directories.len(),
+        1,
+        "the command must own exactly one isolated per-run probe directory while the HTTP request is active"
+    );
+    let config_path = run_directories[0].join("config.json");
+    let runtime_config: Value = serde_json::from_slice(
+        &fs::read(&config_path).expect("read live credential-bearing probe config"),
+    )
+    .expect("parse live sing-box probe config");
+    let socks_inbound = &runtime_config["inbounds"][0];
+    assert_eq!(socks_inbound["type"], "socks");
+    assert_eq!(socks_inbound["listen"], "127.0.0.1");
+    let socks_port = socks_inbound["listen_port"]
+        .as_u64()
+        .expect("read temporary SOCKS port") as u16;
+    let socks_user = socks_inbound["users"][0]["username"]
+        .as_str()
+        .expect("read generated SOCKS username");
+    let socks_password = socks_inbound["users"][0]["password"]
+        .as_str()
+        .expect("read generated SOCKS password");
+    assert!(!socks_user.is_empty());
+    assert!(!socks_password.is_empty());
+    assert_ne!(
+        socks_password,
+        case.credentials.get("password").map(String::as_str).unwrap_or_default(),
+        "temporary SOCKS authentication must not reuse remote profile credentials"
+    );
+    let mut socks_listener = TcpStream::connect(("127.0.0.1", socks_port))
+        .await
+        .expect("authenticated local SOCKS listener must be active during the real probe");
+    socks_listener
+        .write_all(&[5, 1, 0])
+        .await
+        .expect("send unauthenticated SOCKS greeting");
+    let mut auth_response = [0_u8; 2];
+    timeout(Duration::from_secs(3), socks_listener.read_exact(&mut auth_response))
+        .await
+        .expect("SOCKS listener did not answer unauthenticated greeting")
+        .expect("read SOCKS authentication negotiation");
+    assert_eq!(
+        auth_response,
+        [5, 0xff],
+        "the temporary SOCKS listener must reject clients without credentials"
+    );
+    drop(socks_listener);
+
+    release_origin
+        .send(())
+        .expect("release controlled HTTP 204 response");
+    let response = timeout(Duration::from_secs(20), invocation)
+        .await
+        .expect("public Real Delay command did not complete")
+        .expect("public Real Delay IPC worker panicked");
+    let results = response
+        .as_array()
+        .expect("public Real Delay command returns a result array");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["profileId"], profile.id);
+    assert_eq!(results[0]["configStatus"], "valid");
+    assert!(
+        results[0]["realDelayMs"].as_u64().is_some(),
+        "the public command must return a measured Real Delay value"
+    );
+    assert_eq!(results[0]["testedUrl"], endpoint);
+    assert!(
+        results[0]["realDelayDetail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("HTTP 204")),
+        "the public command must identify the accepted HTTP 204 response"
+    );
+
+    assert!(
+        timeout(Duration::from_secs(5), supervisor.wait_for_idle())
+            .await
+            .expect("supervisor did not drain the completed Real Delay operation"),
+        "cleanup must remain healthy after command completion"
+    );
+    let remaining_entries = fs::read_dir(&preflight_directory)
+        .expect("preflight directory remains available after cleanup")
+        .count();
+    assert_eq!(
+        remaining_entries, 0,
+        "credential-bearing per-run config and probe directory must be removed"
+    );
+    assert!(
+        TcpStream::connect(("127.0.0.1", socks_port)).await.is_err(),
+        "the temporary SOCKS listener must be released after the command returns"
+    );
+
+    origin_task
+        .await
+        .expect("controlled HTTP origin task panicked");
+    server.stop("public-command server").await;
+}
+
+
+#[cfg(windows)]
+#[tokio::test]
+async fn public_real_delay_rejected_config_is_reported_and_probe_files_are_removed() {
+    let Ok(validated_binary) = std::env::var("SING_BOX_VALIDATOR") else {
+        return;
+    };
+    let directory = TemporaryDirectory::create();
+    let unused_certificate = directory.path().join("unused.crt");
+    let unused_key = directory.path().join("unused.key");
+    let case = make_cases(&unused_certificate, &unused_key)
+        .into_iter()
+        .find(|case| case.label == "shadowsocks-aes-256-gcm")
+        .expect("controlled Shadowsocks test case");
+    let mut invalid_profile = case.profile;
+    // The adapter deliberately preserves the source cipher string; sing-box
+    // must reject a cipher it does not implement during its native config check.
+    invalid_profile
+        .options
+        .insert("method".to_string(), "not-a-real-shadowsocks-cipher".to_string());
+    let invalid_credentials = case.credentials;
+
+    let runtime_path = PathBuf::from(&validated_binary)
+        .parent()
+        .expect("validator directory")
+        .join("libcronet.dll");
+    let supervisor = ProcessSupervisor::default();
+    let harness = build_mock_real_delay_harness(
+        directory,
+        Path::new(&validated_binary),
+        Some(&runtime_path),
+        invalid_profile,
+        invalid_credentials,
+        supervisor,
+    );
+
+    let response = invoke_public_real_delay_command(&harness._app).await;
+    let results = response.as_array().expect("public command returns a result array");
+    assert_eq!(results.len(), 1);
+    assert_eq!(
+        results[0]["configStatus"],
+        "invalid",
+        "the pinned sing-box validator must reject the deliberately unknown cipher: {results:?}"
+    );
+    assert!(results[0]["realDelayMs"].is_null());
+    assert!(results[0]["testedUrl"].is_null());
+    assert!(
+        !results[0]["configDetail"]
+            .as_str()
+            .unwrap_or_default()
+            .is_empty(),
+        "sing-box's invalid-config diagnostic should be returned"
+    );
+    assert!(
+        timeout(Duration::from_secs(5), harness.supervisor.wait_for_idle())
+            .await
+            .expect("invalid-config operation should drain"),
+        "a rejected config with confirmed cleanup must preserve supervisor health"
+    );
+    assert_preflight_directory_empty(&harness.app_handle);
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn public_real_delay_spawn_failure_removes_probe_files_and_preserves_health() {
+    let directory = TemporaryDirectory::create();
+    let invalid_executable = directory.path().join("not-a-windows-executable.exe");
+    fs::write(&invalid_executable, b"not a PE executable")
+        .expect("write deliberately invalid test executable");
+    let unused_certificate = directory.path().join("unused.crt");
+    let unused_key = directory.path().join("unused.key");
+    let case = make_cases(&unused_certificate, &unused_key)
+        .into_iter()
+        .find(|case| case.label == "trojan-tls")
+        .expect("controlled Trojan test case");
+    let supervisor = ProcessSupervisor::default();
+    let harness = build_mock_real_delay_harness(
+        directory,
+        &invalid_executable,
+        None,
+        case.profile,
+        case.credentials,
+        supervisor,
+    );
+
+    let response = invoke_public_real_delay_command(&harness._app).await;
+    let results = response.as_array().expect("public command returns a result array");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["configStatus"], "not_checked");
+    assert!(
+        results[0]["configDetail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("Could not start sing-box configuration validation")),
+        "public command should surface the actual config-check spawn diagnostic: {results:?}"
+    );
+    assert!(results[0]["realDelayMs"].is_null());
+    assert!(
+        timeout(Duration::from_secs(5), harness.supervisor.wait_for_idle())
+            .await
+            .expect("spawn-failure operation should drain"),
+        "a confirmed spawn failure plus successful file cleanup must preserve supervisor health"
+    );
+    assert_preflight_directory_empty(&harness.app_handle);
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn public_real_delay_job_object_assignment_failure_kills_child_and_cleans_config() {
+    let Ok(validated_binary) = std::env::var("SING_BOX_VALIDATOR") else {
+        return;
+    };
+    let directory = TemporaryDirectory::create();
+    let unused_certificate = directory.path().join("unused.crt");
+    let unused_key = directory.path().join("unused.key");
+    let case = make_cases(&unused_certificate, &unused_key)
+        .into_iter()
+        .find(|case| case.label == "trojan-tls")
+        .expect("controlled Trojan test case");
+    let runtime = PathBuf::from(&validated_binary)
+        .parent()
+        .expect("validator directory")
+        .join("libcronet.dll");
+    let supervisor = ProcessSupervisor::without_job_but_healthy_for_assignment_test();
+    let harness = build_mock_real_delay_harness(
+        directory,
+        Path::new(&validated_binary),
+        Some(&runtime),
+        case.profile,
+        case.credentials,
+        supervisor,
+    );
+
+    let response = invoke_public_real_delay_command(&harness._app).await;
+    let results = response.as_array().expect("public command returns a result array");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["configStatus"], "not_checked");
+    assert!(
+        results[0]["configDetail"]
+            .as_str()
+            .is_some_and(|detail| {
+                detail.contains("Windows Job Object ownership")
+                    && detail.contains("the child was stopped")
+            }),
+        "public command must report confirmed child termination after containment failure"
+    );
+    assert!(results[0]["realDelayMs"].is_null());
+    assert!(
+        !harness.supervisor.cleanup_healthy(),
+        "an uncontained child attempt must fail closed for the rest of the app session"
+    );
+    assert!(
+        !timeout(Duration::from_secs(5), harness.supervisor.wait_for_idle())
+            .await
+            .expect("containment-failure operation should drain"),
+        "the supervisor must remain unhealthy after Job Object assignment failure"
+    );
+    assert_preflight_directory_empty(&harness.app_handle);
+}
+
+
+#[cfg(windows)]
+#[tokio::test]
+async fn public_real_delay_shutdown_cancels_active_request_and_cleans_up() {
+    let Ok(validated_binary) = std::env::var("SING_BOX_VALIDATOR") else {
+        return;
+    };
+
+    let directory = TemporaryDirectory::create();
+    let certificate_path = directory.path().join("localhost.crt");
+    let private_key_path = directory.path().join("localhost.key");
+    fs::write(&certificate_path, TEST_CERTIFICATE).expect("write test certificate");
+    fs::write(&private_key_path, TEST_PRIVATE_KEY).expect("write test private key");
+
+    let case = make_cases(&certificate_path, &private_key_path)
+        .into_iter()
+        .find(|case| case.label == "trojan-tls")
+        .expect("controlled Trojan test case");
+    let mut profile = case.profile.clone();
+    profile
+        .options
+        .insert("insecure".to_string(), "true".to_string());
+
+    let server_config = json!({
+        "log": {"level": "error"},
+        "inbounds": [case.inbound.clone()],
+        "outbounds": [{"type": "direct", "tag": "direct"}],
+        "route": {"final": "direct"}
+    });
+    let server_config_path = directory.path().join("shutdown-server.json");
+    write_json(&server_config_path, &server_config);
+    check_config(&validated_binary, &server_config_path, "public shutdown server");
+    let mut server = ManagedChild::spawn(&validated_binary, &server_config_path);
+    wait_for_tcp_listener(&mut server.0, profile.port, "public shutdown server").await;
+
+    let (origin_port, request_seen, release_origin, origin_task) =
+        start_gated_http_204_origin().await;
+    let endpoint = format!("http://127.0.0.1:{origin_port}/generate_204");
+
+    let runtime_path = PathBuf::from(&validated_binary)
+        .parent()
+        .expect("validator directory")
+        .join("libcronet.dll");
+    assert!(runtime_path.is_file(), "the pinned Windows engine archive must include libcronet.dll");
+
+    let supervisor = ProcessSupervisor::default();
+    let harness = build_mock_real_delay_harness(
+        directory,
+        Path::new(&validated_binary),
+        Some(&runtime_path),
+        profile,
+        case.credentials,
+        supervisor,
+    );
+    crate::real_delay_settings::save(
+        &harness.app_handle,
+        RealDelaySettings {
+            primary_url: endpoint.clone(),
+            fallback_url: endpoint.clone(),
+            timeout_seconds: 9,
+        },
+    )
+    .expect("save gated loopback test endpoint");
+
+    let webview = tauri::WebviewWindowBuilder::new(
+        &harness._app,
+        "main",
+        Default::default(),
+    )
+    .build()
+    .expect("create mock Tauri webview for public IPC command");
+    let request = tauri::webview::InvokeRequest {
+        cmd: "test_all_profile_real_delays".into(),
+        callback: tauri::ipc::CallbackFn(0),
+        error: tauri::ipc::CallbackFn(1),
+        url: "http://tauri.localhost"
+            .parse()
+            .expect("parse Windows mock app URL"),
+        body: tauri::ipc::InvokeBody::default(),
+        headers: Default::default(),
+        invoke_key: tauri::test::INVOKE_KEY.to_string(),
+    };
+    let invocation = tokio::task::spawn_blocking(move || {
+        let body = tauri::test::get_ipc_response(&webview, request)
+            .expect("public Real Delay Tauri IPC command must return after shutdown");
+        body.deserialize::<Value>()
+            .expect("deserialize public Real Delay IPC response")
+    });
+
+    timeout(Duration::from_secs(20), request_seen)
+        .await
+        .expect("Real Delay did not reach the gated controlled HTTP origin")
+        .expect("controlled HTTP origin closed before the Real Delay request");
+
+    let preflight_directory = harness
+        .app_handle
+        .path()
+        .app_cache_dir()
+        .expect("resolve isolated app cache directory")
+        .join("preflight");
+    let run_directories = fs::read_dir(&preflight_directory)
+        .expect("read active preflight directory before shutdown")
+        .map(|entry| entry.expect("read preflight entry").path())
+        .filter(|path| path.is_dir())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        run_directories.len(),
+        1,
+        "the public command must own exactly one per-run directory while the HTTP request is blocked"
+    );
+    let config_path = run_directories[0].join("config.json");
+    let runtime_config: Value = serde_json::from_slice(
+        &fs::read(&config_path).expect("read active credential-bearing config"),
+    )
+    .expect("parse active sing-box config");
+    let socks_port = runtime_config["inbounds"][0]["listen_port"]
+        .as_u64()
+        .expect("read active loopback SOCKS port") as u16;
+
+    assert!(
+        harness.supervisor.request_shutdown(),
+        "the first application shutdown request must begin cancellation"
+    );
+
+    let response = timeout(Duration::from_secs(20), invocation)
+        .await
+        .expect("public Real Delay command did not return after shutdown")
+        .expect("public Real Delay IPC worker panicked");
+    let results = response
+        .as_array()
+        .expect("public Real Delay command returns a result array");
+    assert_eq!(results.len(), 1);
+    assert_eq!(
+        results[0]["configStatus"],
+        "valid",
+        "sing-box configuration had already passed validation before the HTTP request was cancelled: {results:?}"
+    );
+    assert!(
+        results[0]["realDelayDetail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("cancelled because the application is shutting down")),
+        "the public command must report shutdown cancellation of the Real Delay request: {results:?}"
+    );
+    assert!(results[0]["realDelayMs"].is_null());
+
+    assert!(
+        timeout(Duration::from_secs(5), harness.supervisor.wait_for_idle())
+            .await
+            .expect("supervisor did not drain the cancelled public Real Delay operation"),
+        "confirmed child and file cleanup must keep supervisor health"
+    );
+    assert!(
+        harness.supervisor.shutdown_complete(),
+        "shutdown must finish only after the public Real Delay worker releases its operation lease"
+    );
+    assert_preflight_directory_empty(&harness.app_handle);
+    assert!(
+        TcpStream::connect(("127.0.0.1", socks_port)).await.is_err(),
+        "shutdown must release the temporary authenticated SOCKS listener"
+    );
+
+    let _ = release_origin.send(());
+    origin_task
+        .await
+        .expect("gated controlled HTTP origin task panicked");
+    server.stop("public shutdown server").await;
 }

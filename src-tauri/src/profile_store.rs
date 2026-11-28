@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, Runtime};
 
 use crate::profiles::{ParsedProfile, ProfileSummary};
 
@@ -33,7 +33,7 @@ impl Default for ProfileFile {
     }
 }
 
-fn profile_file_path(app: &AppHandle) -> Result<PathBuf, String> {
+fn profile_file_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     let directory = app
         .path()
         .app_data_dir()
@@ -124,13 +124,13 @@ fn cleanup_added_credentials(profiles: &[ProfileSummary]) -> Result<(), String> 
     }
 }
 
-pub fn list_profiles(app: &AppHandle) -> Result<Vec<ProfileSummary>, String> {
+pub fn list_profiles<R: Runtime>(app: &AppHandle<R>) -> Result<Vec<ProfileSummary>, String> {
     let _guard = lock_profile_store()?;
     let path = profile_file_path(app)?;
     Ok(read_file(&path)?.profiles)
 }
 
-pub fn add_profiles(app: &AppHandle, incoming: Vec<ParsedProfile>) -> Result<Vec<ProfileSummary>, String> {
+pub fn add_profiles<R: Runtime>(app: &AppHandle<R>, incoming: Vec<ParsedProfile>) -> Result<Vec<ProfileSummary>, String> {
     let _guard = lock_profile_store()?;
     let path = profile_file_path(app)?;
     let mut file = read_file(&path)?;
@@ -158,7 +158,7 @@ pub fn add_profiles(app: &AppHandle, incoming: Vec<ParsedProfile>) -> Result<Vec
     Ok(added)
 }
 
-pub fn remove_profile(app: &AppHandle, profile_id: &str) -> Result<(), String> {
+pub fn remove_profile<R: Runtime>(app: &AppHandle<R>, profile_id: &str) -> Result<(), String> {
     let _guard = lock_profile_store()?;
     let path = profile_file_path(app)?;
     let mut file = read_file(&path)?;
